@@ -7,10 +7,12 @@ for a complete single-host QEMU example.
 
 ## Prerequisites
 
-Build on a compatible system with Rust **1.88+**, a C compiler/linker, `pkg-config`
-and OpenSSL development files. SQLite is bundled. `make release` uses the committed
-`Cargo.lock` with `--locked`. Build binaries for each target's architecture and libc;
-copying a glibc binary to a musl host does not make it compatible.
+Build on a compatible system with Rust **1.88+** and a C/C++ compiler/linker.
+SQLite is bundled. The HTTP client uses reqwest 0.13 with rustls/AWS-LC; OpenSSL
+development files are no longer required. AWS-LC and bundled SQLite still compile
+native code. `make release` uses the committed `Cargo.lock` with `--locked`. Build
+binaries for each target's architecture and libc; copying a glibc binary to a musl
+host does not make it compatible.
 
 Linux agents run as root. Install only the dependencies needed for your engine:
 
