@@ -20,7 +20,7 @@ Linux agents run as root. Install only the dependencies needed for your engine:
 |---|---|
 | QEMU/KVM | Working `/dev/kvm`, `qemu-system-x86_64`, `qemu-img`, `genisoimage` or `mkisofs` |
 | QEMU and Firecracker networking | Full `iproute2`, `nftables`, kernel TUN/TAP support; QEMU also uses `vhost_net` |
-| Firecracker | Working `/dev/kvm`, matching `firecracker` and `jailer`, cgroup v2 with CPU/memory/PID controllers, `curl`, compatible kernel/rootfs; `mkfs.ext4` for config drives |
+| Firecracker | Working `/dev/kvm`, matching `firecracker` and `jailer`, cgroup v2 with CPU/memory/PID controllers, `curl`, compatible kernel/rootfs; `mkfs.ext4` for config drives; `e2fsck` and `resize2fs` for rootfs growth (all from `e2fsprogs`) |
 | Docker | Working Docker daemon or Podman runtime; the agent selects Docker when its binary is installed |
 | QEMU/Firecracker image recipes | `curl`; Firecracker additionally uses `dd`, `mkfs.ext4`, loop mount/unmount and `tar` |
 | Zvol storage | Existing ZFS pool/datasets and `zfs`; provision these manually |

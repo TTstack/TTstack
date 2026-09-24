@@ -11,6 +11,52 @@ use std::path::Path;
 
 pub struct FileStore;
 
+/// Grow an offline, unpartitioned ext4 clone before its first boot.
+/// The caller keeps a failed clone for diagnosis/explicit deletion.
+pub fn resize_ext4(path: &Path, size_mib: u32) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path).c(d!("inspect ext4 clone"))?;
+    if !metadata.is_file() {
+        return Err(eg!("rootfs.ext4 must be a regular file"));
+    }
+    let requested = u64::from(size_mib) * 1024 * 1024;
+    if requested < metadata.len() {
+        return Err(eg!("requested disk is smaller than the base image"));
+    }
+    if requested == metadata.len() {
+        return Ok(());
+    }
+    let check = std::process::Command::new("e2fsck")
+        .args(["-f", "-p"])
+        .arg(path)
+        .bounded_output()
+        .c(d!("check ext4 clone"))?;
+    // e2fsck uses 1 for successfully corrected filesystem errors.
+    if !matches!(check.status.code(), Some(0 | 1)) {
+        return Err(eg!(
+            "e2fsck failed: {} {}",
+            String::from_utf8_lossy(&check.stdout),
+            String::from_utf8_lossy(&check.stderr)
+        ));
+    }
+    let disk = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .c(d!("open ext4 clone"))?;
+    disk.set_len(requested).c(d!("grow ext4 clone"))?;
+    let resize = std::process::Command::new("resize2fs")
+        .arg(path)
+        .bounded_output()
+        .c(d!("grow ext4 filesystem"))?;
+    if !resize.status.success() {
+        return Err(eg!(
+            "resize2fs failed: {}",
+            String::from_utf8_lossy(&resize.stderr)
+        ));
+    }
+    disk.sync_all().c(d!("sync ext4 clone"))?;
+    Ok(())
+}
+
 impl ImageStore for FileStore {
     fn clone_image(&self, base: &str, target: &str) -> Result<()> {
         let mut cmd = std::process::Command::new("cp");
@@ -142,6 +188,71 @@ impl ImageStore for FileStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ext4_growth_preserves_files_and_rejects_shrinking() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base.ext4");
+        let clone = dir.path().join("clone.ext4");
+        let contents = dir.path().join("contents");
+        std::fs::create_dir(&contents).unwrap();
+        std::fs::write(contents.join("marker"), "persistent-data").unwrap();
+        std::fs::File::create(&base)
+            .unwrap()
+            .set_len(64 * 1024 * 1024)
+            .unwrap();
+        let mkfs = std::process::Command::new("mkfs.ext4")
+            .args(["-q", "-F", "-d"])
+            .arg(&contents)
+            .arg(&base)
+            .output()
+            .unwrap();
+        assert!(
+            mkfs.status.success(),
+            "{}",
+            String::from_utf8_lossy(&mkfs.stderr)
+        );
+        FileStore
+            .clone_image(base.to_str().unwrap(), clone.to_str().unwrap())
+            .unwrap();
+        resize_ext4(&clone, 96).unwrap();
+        assert_eq!(std::fs::metadata(&base).unwrap().len(), 64 * 1024 * 1024);
+        assert_eq!(std::fs::metadata(&clone).unwrap().len(), 96 * 1024 * 1024);
+        let fs = std::process::Command::new("dumpe2fs")
+            .arg("-h")
+            .arg(&clone)
+            .output()
+            .unwrap();
+        assert!(fs.status.success());
+        let header = String::from_utf8(fs.stdout).unwrap();
+        let value = |key: &str| -> u64 {
+            header
+                .lines()
+                .find_map(|line| line.strip_prefix(key))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        assert_eq!(
+            value("Block count:") * value("Block size:"),
+            96 * 1024 * 1024
+        );
+        let read = std::process::Command::new("debugfs")
+            .args(["-R", "cat /marker"])
+            .arg(&clone)
+            .output()
+            .unwrap();
+        assert!(read.status.success());
+        assert_eq!(read.stdout, b"persistent-data");
+        resize_ext4(&clone, 96).unwrap();
+        assert!(resize_ext4(&clone, 64).is_err());
+        assert_eq!(std::fs::metadata(&clone).unwrap().len(), 96 * 1024 * 1024);
+        let invalid = dir.path().join("invalid.ext4");
+        std::fs::write(&invalid, b"not an ext4 filesystem").unwrap();
+        assert!(resize_ext4(&invalid, 64).is_err());
+        assert_eq!(std::fs::read(invalid).unwrap(), b"not an ext4 filesystem");
+    }
 
     #[test]
     fn clone_and_remove_file() {

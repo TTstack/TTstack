@@ -472,8 +472,10 @@ pub fn validate_vm_options(
     ssh_keys: &[String],
     ports: &[u16],
 ) -> std::result::Result<(), String> {
-    if disk.is_some() && engine != Engine::Qemu {
-        return Err("--disk is supported only by QEMU; other engines use the image's existing size (Docker has no disk quota)".into());
+    if disk.is_some() && !matches!(engine, Engine::Qemu | Engine::Firecracker) {
+        return Err(
+            "--disk is supported only by QEMU and Firecracker (Docker has no disk quota)".into(),
+        );
     }
     if deny_outgoing && engine == Engine::Docker {
         return Err("--deny-outgoing is not supported by Docker".into());
@@ -547,7 +549,8 @@ mod option_tests {
     #[test]
     fn unsupported_options_are_rejected() {
         assert!(validate_vm_options(Engine::Docker, None, true, &[], &[]).is_err());
-        assert!(validate_vm_options(Engine::Firecracker, Some(512), false, &[], &[]).is_err());
+        assert!(validate_vm_options(Engine::Firecracker, Some(512), false, &[], &[]).is_ok());
+        assert!(validate_vm_options(Engine::Docker, Some(512), false, &[], &[]).is_err());
         assert!(
             validate_vm_options(
                 Engine::Qemu,

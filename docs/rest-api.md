@@ -70,7 +70,7 @@ Each `VmSpec` accepts:
 | `engine` | string | `qemu` by default; JSON values: `qemu`, `firecracker`, `docker`, `bhyve`, `jail` |
 | `cpu` | integer | Positive vCPU count; default 2 |
 | `mem` | integer | Positive memory in MiB; default 1024 |
-| `disk` | integer | QEMU virtual disk size in MiB; default 40960. Omit for other engines |
+| `disk` | integer | Disk size in MiB. QEMU defaults to 40960; Firecracker defaults to the base rootfs size and allows creation-time ext4 growth. Omit for other engines |
 | `ports` | integer[] | TCP guest ports to expose; default empty; port 22 is added for QEMU/Bhyve/Jail |
 | `deny_outgoing` | boolean | Default false; block routed outgoing initiation, not host/guest isolation; rejected for Docker |
 | `isolated_network` | boolean | Default false; Linux QEMU/Firecracker only; block peers, guest-initiated host access, private/link-local destinations and IPv6; allow public IPv4 egress and replies to inbound connections |
@@ -118,13 +118,13 @@ are **reservations**, not measured CPU load, RAM use or physical filesystem usag
 Stopped guests release CPU/memory reservations and retain disk reservations. Failed
 or incomplete operations conservatively retain resources until cleanup. `vm_count`
 includes stopped/failed/deleting records. Docker disk usage is not accounted or
-quota-enforced; Firecracker reserves its existing rootfs size plus 4 MiB when a
+quota-enforced; Firecracker reserves its requested rootfs size (or the image size when omitted) plus 4 MiB when a
 configuration drive is present. Firecracker memory reservations include 128 MiB
 of VMM headroom in addition to the guest's `mem`; stopped guests release both.
 
 Agent `/api/info` returns `host_id`, `resource`, `engines`, `storage`, `images` and
-`capabilities`. Linux agents advertise `guest_config`, `isolated_network` and
-`firecracker_jailer`; hosts retain these fields. The controller rejects placement
+`capabilities`. Linux agents advertise `guest_config`, `isolated_network`,
+`firecracker_jailer` and `firecracker_disk_resize`; hosts retain these fields. The controller rejects placement
 on older agents that do not advertise the required capabilities. Upgrade agents
 before requesting these features. Reported capabilities describe implementation
 support, not a substitute for host prerequisites or application readiness checks.
@@ -195,7 +195,8 @@ normal fleet operations to avoid untracked resources.
 `CreateVmReq` requires `vm_id`, `env_id`, `image`, `engine`, `cpu`, `mem`, `disk`,
 `ports` and `deny_outgoing`; `ssh_keys` and `guest_config` default to empty and
 `isolated_network` defaults to false. Unlike controller
-requests, there are no sizing defaults here: non-QEMU `disk` must be 0. Agent
+requests, QEMU requires a positive `disk`; Firecracker accepts 0 for the image
+size or a positive creation-time size in MiB. Other engines require 0. Agent
 mutation errors currently return HTTP 500, including validation failures.
 
 Repeated creation with the same VM ID and parameters reuses the record rather

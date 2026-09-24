@@ -130,8 +130,15 @@ impl Runtime {
                 let bytes = std::fs::metadata(format!("{base_image}/rootfs.ext4"))
                     .c(d!("rootfs.ext4"))?
                     .len();
-                u32::try_from(bytes.div_ceil(1024 * 1024))
-                    .c(d!("rootfs too large"))?
+                let base_mib =
+                    u32::try_from(bytes.div_ceil(1024 * 1024)).c(d!("rootfs too large"))?;
+                if req.disk != 0 && req.disk < base_mib {
+                    return Err(eg!(
+                        "requested disk is smaller than the base image ({base_mib} MiB)"
+                    ));
+                }
+                req.disk
+                    .max(base_mib)
                     .checked_add(if req.guest_config.is_empty() {
                         0
                     } else {
@@ -194,6 +201,12 @@ impl Runtime {
                 self.store.clone_image(&base_image, &clone_path)?;
                 #[cfg(target_os = "linux")]
                 if vm.engine == Engine::Firecracker {
+                    if req.disk > 0 {
+                        ttcore::storage::file::resize_ext4(
+                            &std::path::Path::new(&clone_path).join("rootfs.ext4"),
+                            req.disk,
+                        )?;
+                    }
                     ttcore::guest_config::write_disk(
                         std::path::Path::new(&clone_path),
                         &req.guest_config,
@@ -429,6 +442,7 @@ impl Runtime {
                     "guest_config".into(),
                     "isolated_network".into(),
                     "firecracker_jailer".into(),
+                    "firecracker_disk_resize".into(),
                 ]
             } else {
                 vec![]

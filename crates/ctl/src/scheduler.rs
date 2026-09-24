@@ -15,6 +15,19 @@ pub struct Placement {
     pub host_addr: String,
 }
 
+// Unspecified Firecracker rootfs size is checked by the agent, which owns the image.
+fn disk_reservation(spec: &VmSpec) -> u32 {
+    spec.disk
+        .unwrap_or(spec.engine.default_disk())
+        .saturating_add(
+            if spec.engine == Engine::Firecracker && !spec.guest_config.is_empty() {
+                ttcore::guest_config::CONFIG_DISK_MIB
+            } else {
+                0
+            },
+        )
+}
+
 /// Choose the best host for a VM spec using a best-fit strategy.
 ///
 /// Prefers the host with the least free resources that can still
@@ -32,7 +45,7 @@ pub fn place_vm(
     let mem = spec
         .engine
         .memory_reservation(spec.mem.unwrap_or(VM_MEM_DEFAULT));
-    let disk = spec.disk.unwrap_or(spec.engine.default_disk());
+    let disk = disk_reservation(spec);
 
     // Docker images are managed by Docker, not by the image directory
     let check_images = !host_images.is_empty() && spec.engine != Engine::Docker;
@@ -41,6 +54,9 @@ pub fn place_vm(
         (!spec.isolated_network || has("isolated_network"))
             && (spec.guest_config.is_empty() || has("guest_config"))
             && (spec.engine != Engine::Firecracker || has("firecracker_jailer"))
+            && (spec.engine != Engine::Firecracker
+                || spec.disk.is_none()
+                || has("firecracker_disk_resize"))
     };
 
     let mut candidates: Vec<&Host> = hosts
@@ -66,7 +82,7 @@ pub fn place_vm(
                 .any(|h| h.state == HostState::Online && supports(h))
         {
             return Err(eg!(
-                "no online agent supports the requested capabilities; upgrade agents before using guest_config, isolated_network or jailed Firecracker"
+                "no online agent supports the requested capabilities; upgrade agents before using guest_config, isolated_network, jailed Firecracker or Firecracker disk sizing"
             ));
         }
         // Provide a more helpful error message
@@ -142,7 +158,7 @@ pub fn schedule_env(
             let mem = spec
                 .engine
                 .memory_reservation(spec.mem.unwrap_or(VM_MEM_DEFAULT));
-            let disk = spec.disk.unwrap_or(spec.engine.default_disk());
+            let disk = disk_reservation(spec);
             h.resource.cpu_used += cpu;
             h.resource.mem_used += mem;
             h.resource.disk_used += disk;
@@ -165,6 +181,7 @@ mod tests {
                 "guest_config".into(),
                 "isolated_network".into(),
                 "firecracker_jailer".into(),
+                "firecracker_disk_resize".into(),
             ],
             id: id.into(),
             addr: format!("{id}:9100"),
@@ -219,6 +236,25 @@ mod tests {
         spec.guest_config
             .insert("settings.json".into(), "{}".into());
         assert!(place_vm(&[host], &spec, &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn firecracker_disk_sizing_requires_capability_and_reserves_config_drive() {
+        let mut host = make_host("disk-host", 8, 8192, vec![Engine::Firecracker]);
+        let mut spec = make_spec();
+        spec.engine = Engine::Firecracker;
+        spec.disk = Some(8192);
+        spec.guest_config
+            .insert("settings.json".into(), "{}".into());
+        host.capabilities.retain(|c| c != "firecracker_disk_resize");
+        assert!(place_vm(std::slice::from_ref(&host), &spec, &HashMap::new()).is_err());
+        host.capabilities.push("firecracker_disk_resize".into());
+        host.resource.disk_total = 8192;
+        assert!(place_vm(std::slice::from_ref(&host), &spec, &HashMap::new()).is_err());
+        host.resource.disk_total = 8196;
+        assert!(place_vm(std::slice::from_ref(&host), &spec, &HashMap::new()).is_ok());
+        host.resource.disk_total = 16388; // Two rootfs disks fit, their two config drives do not.
+        assert!(schedule_env(&[host], &[spec.clone(), spec], &HashMap::new()).is_err());
     }
 
     #[test]

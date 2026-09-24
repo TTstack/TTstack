@@ -137,7 +137,27 @@ an application or sshd. Read boot output on the agent at
 interactive console. Build a suitable rootfs for application workloads; old images
 with a hard-coded IP need replacement, not just a TTstack binary upgrade.
 
-The existing rootfs size is reserved and retained; `--disk` resizing is rejected.
+Omit `--disk` to retain the base rootfs size, or specify a size in MiB at creation:
+
+```bash
+tt env create fc-work --image fc-alpine --engine firecracker \
+  --cpu 2 --mem 1024 --disk 2048
+```
+
+The agent clones the image, checks the offline filesystem with `e2fsck`, and grows
+both the raw file and its ext4 filesystem with `resize2fs` before first boot.
+Only unpartitioned ext4 rootfs images are supported. Shrinking below the base
+image size is rejected before allocation; the base image is never modified.
+Disk space is reserved at the requested logical size, even for sparse files;
+configuration drives reserve another 4 MiB. Filesystem metadata and reserved
+blocks reduce the capacity reported by guest tools such as `df`. Upgrade agents to one advertising
+`firecracker_disk_resize` before specifying a size. CPU/RAM still need to fit the
+host's configured capacity, including VMM overhead. TTstack has no application
+or user-tier sizing policy; callers can impose their own ceilings.
+
+This is creation-time sizing, not a resize API for existing VMs. Stop/start
+preserves the selected size and data. It does not expand or shrink old disks.
+
 Stop requests orderly shutdown on x86_64, waits up to 30 seconds, then forcibly
 terminates if necessary. The kernel needs `CONFIG_SERIO_I8042` and
 `CONFIG_KEYBOARD_ATKBD`; init must handle Ctrl-Alt-Del by stopping applications,

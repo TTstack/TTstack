@@ -202,7 +202,7 @@ const FRONTEND_HTML: &str = r##"<!DOCTYPE html>
     <div class="row">
       <div><label>CPU Cores</label><input id="env-cpu" type="number" value="2" min="1"></div>
       <div><label>Memory (MB)</label><input id="env-mem" type="number" value="1024" min="64"></div>
-      <div><label>QEMU disk (MiB)</label><input id="env-disk" type="number" value="40960" min="128"></div>
+      <div><label>Disk (MiB; QEMU / Firecracker)</label><input id="env-disk" type="number" value="40960" min="128"></div>
     </div>
     <label>Ports (comma-separated)</label>
     <input id="env-ports" placeholder="22, 80, 443" value="22">
@@ -411,7 +411,7 @@ async function removeHost(id) {
 
 function updateEngineOptions() {
   const engine = document.getElementById('env-engine').value;
-  document.getElementById('env-disk').disabled = engine !== 'qemu';
+  document.getElementById('env-disk').disabled = engine !== 'qemu' && engine !== 'firecracker';
   document.getElementById('env-deny-outgoing').disabled = engine === 'docker';
   document.getElementById('env-ssh-keys').disabled = !['qemu', 'jail'].includes(engine);
 }
@@ -437,7 +437,7 @@ async function createEnv() {
 
   var vms = [];
   for (var i = 0; i < dup; i++) {
-    vms.push({ image: image, engine: engine, cpu: cpu, mem: mem, disk: engine === 'qemu' ? disk : null, ports: ports, deny_outgoing: engine === 'docker' ? false : denyOutgoing, ssh_keys: [] });
+    vms.push({ image: image, engine: engine, cpu: cpu, mem: mem, disk: (engine === 'qemu' || engine === 'firecracker') ? disk : null, ports: ports, deny_outgoing: engine === 'docker' ? false : denyOutgoing, ssh_keys: [] });
   }
 
   var body = { id: name, owner: owner, vms: vms, lifetime: lifetime, ssh_keys: ['qemu', 'jail'].includes(engine) ? sshKeys : [] };

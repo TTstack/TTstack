@@ -93,7 +93,7 @@ enum EnvCmd {
         /// Memory per VM in MiB.
         #[arg(long)]
         mem: Option<u32>,
-        /// QEMU virtual disk size in MiB (default 40960); omit for other engines.
+        /// Disk size in MiB: QEMU defaults to 40960; Firecracker defaults to image size.
         #[arg(long)]
         disk: Option<u32>,
         /// Duplicate each image N times.
