@@ -11,6 +11,7 @@ directory for every document category.
 | Prepare guests and understand storage/network boundaries | [Guest images](guest-images.md) |
 | Call the API or understand lifecycle recovery | [REST API](rest-api.md) |
 | Check supported platforms and validation limits | [Compatibility](compatibility.md) |
+| Inspect the experimental FreeBSD restoration and its limits | [FreeBSD scope](compatibility.md#experimental-freebsd-restoration) |
 | Inspect Linux lifecycle evidence | [Linux validation, 2026-09-24](live-validation-2026-09-24.md) |
 | Inspect Firecracker configuration, isolation, and jailer evidence | [Firecracker validation, 2026-09-24](firecracker-validation-2026-09-24.md) |
 | Inspect Firecracker disk sizing and resource accounting | [Resource sizing validation, 2026-09-24](resource-sizing-validation-2026-09-24.md) |

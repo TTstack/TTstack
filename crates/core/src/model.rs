@@ -13,12 +13,15 @@ use std::fmt;
 ///
 /// Platform availability:
 /// - **Linux**: Qemu, Firecracker, Docker
+/// - **FreeBSD (experimental)**: Bhyve, Jail
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
     Qemu,
     Firecracker,
+    Bhyve,
     Docker,
+    Jail,
 }
 
 impl fmt::Display for Engine {
@@ -26,7 +29,9 @@ impl fmt::Display for Engine {
         match self {
             Self::Qemu => write!(f, "qemu"),
             Self::Firecracker => write!(f, "firecracker"),
+            Self::Bhyve => write!(f, "bhyve"),
             Self::Docker => write!(f, "docker"),
+            Self::Jail => write!(f, "jail"),
         }
     }
 }
@@ -37,7 +42,9 @@ impl std::str::FromStr for Engine {
         match s.to_ascii_lowercase().as_str() {
             "qemu" | "kvm" => Ok(Self::Qemu),
             "firecracker" | "fc" => Ok(Self::Firecracker),
+            "bhyve" => Ok(Self::Bhyve),
             "docker" | "podman" => Ok(Self::Docker),
+            "jail" => Ok(Self::Jail),
             _ => Err(format!("unknown engine: {s}")),
         }
     }
@@ -286,7 +293,13 @@ mod tests {
 
     #[test]
     fn engine_display_roundtrip() {
-        for e in [Engine::Qemu, Engine::Firecracker, Engine::Docker] {
+        for e in [
+            Engine::Qemu,
+            Engine::Firecracker,
+            Engine::Bhyve,
+            Engine::Docker,
+            Engine::Jail,
+        ] {
             let s = e.to_string();
             let parsed: Engine = s.parse().unwrap();
             assert_eq!(e, parsed);
@@ -312,6 +325,8 @@ mod tests {
             (Engine::Qemu, "qemu"),
             (Engine::Firecracker, "firecracker"),
             (Engine::Docker, "docker"),
+            (Engine::Bhyve, "bhyve"),
+            (Engine::Jail, "jail"),
         ] {
             let json = serde_json::to_string(&engine).unwrap();
             assert_eq!(json, format!("\"{name}\""));
@@ -475,7 +490,9 @@ pub fn validate_vm_options(
     if deny_outgoing && engine == Engine::Docker {
         return Err("--deny-outgoing is not supported by Docker".into());
     }
-    if !ssh_keys.is_empty() && matches!(engine, Engine::Docker | Engine::Firecracker) {
+    if !ssh_keys.is_empty()
+        && matches!(engine, Engine::Docker | Engine::Firecracker | Engine::Bhyve)
+    {
         return Err(format!("SSH key injection is not supported by {engine}"));
     }
     if ports.contains(&0) {
@@ -539,6 +556,25 @@ mod option_tests {
         assert!(validate_image("--privileged", Engine::Docker).is_err());
         assert!(validate_image("../image", Engine::Qemu).is_err());
     }
+    #[test]
+    fn experimental_freebsd_options_keep_their_engine_limits() {
+        let keys = vec!["ssh-ed25519 AAAA user".into()];
+        assert!(validate_vm_options(Engine::Jail, None, false, &keys, &[22]).is_ok());
+        assert!(validate_vm_options(Engine::Bhyve, None, false, &keys, &[22]).is_err());
+        for engine in [Engine::Bhyve, Engine::Jail] {
+            assert!(validate_vm_options(engine, Some(512), false, &[], &[]).is_err());
+            assert!(crate::guest_config::validate(engine, &Default::default(), true).is_err());
+            assert!(
+                crate::guest_config::validate(
+                    engine,
+                    &std::collections::BTreeMap::from([("config".into(), "value".into())]),
+                    false
+                )
+                .is_err()
+            );
+        }
+    }
+
     #[test]
     fn unsupported_options_are_rejected() {
         assert!(validate_vm_options(Engine::Docker, None, true, &[], &[]).is_err());

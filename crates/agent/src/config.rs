@@ -64,7 +64,7 @@ impl Config {
         }
     }
 
-    /// Auto-detect memory if set to 0 (read from /proc/meminfo).
+    /// Auto-detect memory if set to 0 (Linux /proc/meminfo or FreeBSD sysctl).
     pub fn effective_mem(&self) -> u32 {
         if self.mem_total == 0 {
             read_total_mem_mb().unwrap_or(8192)
@@ -74,13 +74,36 @@ impl Config {
     }
 }
 
-/// Read total system memory in MiB from the Linux host.
+/// Read total system memory in MiB.
+///
+/// Uses `/proc/meminfo` on Linux and `sysctl hw.physmem` on FreeBSD.
 fn read_total_mem_mb() -> Option<u32> {
-    let content = std::fs::read_to_string("/proc/meminfo").ok()?;
-    parse_mem_total(&content)
+    #[cfg(target_os = "linux")]
+    {
+        let content = std::fs::read_to_string("/proc/meminfo").ok()?;
+        parse_mem_total(&content)
+    }
+    #[cfg(target_os = "freebsd")]
+    {
+        let output = std::process::Command::new("sysctl")
+            .arg("-n")
+            .arg("hw.physmem")
+            .output()
+            .ok()?;
+        let bytes: u64 = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .ok()?;
+        Some((bytes / (1024 * 1024)) as u32)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    {
+        None
+    }
 }
 
 /// Parse MemTotal from /proc/meminfo content.
+#[cfg(any(target_os = "linux", test))]
 fn parse_mem_total(content: &str) -> Option<u32> {
     for line in content.lines() {
         if line.starts_with("MemTotal:") {

@@ -5,9 +5,10 @@
 //!
 //! Supported platforms:
 //! - **Linux**: Qemu, Firecracker, Docker/Podman
+//! - **FreeBSD (experimental)**: Bhyve, Jail
 
-#[cfg(not(target_os = "linux"))]
-compile_error!("tt-agent requires a Linux host");
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+compile_error!("tt-agent requires a Linux or FreeBSD host");
 
 mod auth;
 mod config;
@@ -26,6 +27,8 @@ use ttcore::model::Resource;
 #[tokio::main]
 async fn main() {
     let cfg = Config::parse();
+    #[cfg(target_os = "freebsd")]
+    eprintln!("WARNING: FreeBSD support is experimental and outside the primary validation scope");
 
     let db_path = format!("{}/agent.db", cfg.data_dir);
     std::fs::create_dir_all(&cfg.data_dir).unwrap_or_else(|e| {

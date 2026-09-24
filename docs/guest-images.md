@@ -27,6 +27,7 @@ are not installed. It is not needed for deployment.
 | `fc-alpine` | Firecracker | Prebuilt kernel + Alpine 3.21.3 userspace; 128 MiB ext4 rootfs, idle boot/network check |
 | `alpine`, `debian`, `ubuntu`, `rockylinux` | Docker | Base OS images: `alpine:3.21`, `debian:trixie-slim`, `ubuntu:24.04`, `rockylinux:9-minimal` |
 | `nginx`, `redis`, `postgres` | Docker | `nginx:alpine`, `redis:7-alpine`, `postgres:17-alpine` |
+| `freebsd-base` | Jail | Experimental FreeBSD base archive; see [restoration limits](compatibility.md#experimental-freebsd-restoration) |
 
 Upstream rolling URLs and container tags can change. These recipes are not a
 content-pinned image lockfile. Existing QEMU files are left in place; Firecracker
@@ -335,4 +336,7 @@ gateway using the host/provider firewall and authenticate guest applications.
 Keep controller/agent endpoints on a protected management network; remote management
 addresses on public networks are not covered by a private-address egress block.
 
-See [compatibility and validation](compatibility.md) for tested Linux workflows.
+QEMU and Firecracker instructions above describe Linux hosts. The restored
+FreeBSD Bhyve/Jail/PF paths require manual setup and retain known lifecycle and
+networking limitations. See [FreeBSD scope](compatibility.md#experimental-freebsd-restoration)
+and [compatibility and validation](compatibility.md) for tested Linux workflows.
