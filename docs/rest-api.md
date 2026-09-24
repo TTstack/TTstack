@@ -73,6 +73,8 @@ Each `VmSpec` accepts:
 | `disk` | integer | QEMU virtual disk size in MiB; default 40960. Omit for other engines |
 | `ports` | integer[] | TCP guest ports to expose; default empty; port 22 is added for QEMU/Bhyve/Jail |
 | `deny_outgoing` | boolean | Default false; block routed outgoing initiation, not host/guest isolation; rejected for Docker |
+| `isolated_network` | boolean | Default false; Linux QEMU/Firecracker only; block peers, guest-initiated host access, private/link-local destinations and IPv6; allow public IPv4 egress and replies to inbound connections |
+| `guest_config` | object | Default `{}`; Firecracker only; up to 32 simple file names mapped to UTF-8 strings, 64 KiB total names/content; attached as a read-only config drive |
 | `ssh_keys` | string[] | Empty; merged with environment keys; QEMU cloud-init / experimental Jail only |
 
 CLI engine aliases such as `kvm`, `fc` and `podman` are not JSON enum values.
@@ -116,9 +118,24 @@ are **reservations**, not measured CPU load, RAM use or physical filesystem usag
 Stopped guests release CPU/memory reservations and retain disk reservations. Failed
 or incomplete operations conservatively retain resources until cleanup. `vm_count`
 includes stopped/failed/deleting records. Docker disk usage is not accounted or
-quota-enforced; Firecracker reserves its existing rootfs size.
+quota-enforced; Firecracker reserves its existing rootfs size plus 4 MiB when a
+configuration drive is present. Firecracker memory reservations include 128 MiB
+of VMM headroom in addition to the guest's `mem`; stopped guests release both.
 
-Agent `/api/info` returns `host_id`, `resource`, `engines`, `storage` and `images`.
+Agent `/api/info` returns `host_id`, `resource`, `engines`, `storage`, `images` and
+`capabilities`. Linux agents advertise `guest_config`, `isolated_network` and
+`firecracker_jailer`; hosts retain these fields. The controller rejects placement
+on older agents that do not advertise the required capabilities. Upgrade agents
+before requesting these features. Reported capabilities describe implementation
+support, not a substitute for host prerequisites or application readiness checks.
+
+`Vm.options` contains `isolated_network` and optional `guest_config_digest` (SHA-256),
+never configuration contents. Configuration is immutable for that VM and retained
+across stop/start. TTstack treats it as opaque data, not shell commands or a
+cloud-init document. Use a guest application protocol for live credential renewal.
+Protect create requests with a private network or TLS because they can carry secrets.
+The [guest configuration contract](guest-images.md#firecracker-guest-configuration)
+describes mounting, limits and ownership.
 `storage: "file"` covers files/directories; `"zvol"` means ZFS raw volumes. Docker's
 image store is independent. Full serialized models are in
 [model.rs](../crates/core/src/model.rs) and [api.rs](../crates/core/src/api.rs).
@@ -144,7 +161,10 @@ immediate engine probes, and end-to-end freshness is not guaranteed within 15 se
   can leave creation failed; there is no automatic re-creation of failed workloads.
 - **Stop/start:** on Linux, stop releases execution resources while preserving
   disks/containers; start boots/restarts them. VM memory is not retained. QEMU tries
-  guest shutdown before termination; Firecracker stop terminates the process.
+  guest shutdown before termination. Firecracker on x86_64 sends `SendCtrlAltDel`,
+  waits up to 30 seconds, then terminates on failure/timeout and logs the fallback.
+  The image must support orderly shutdown; a successful stop alone does not prove
+  that the guest flushed its data. Stopping a paused Firecracker first resumes it.
   Save work before stopping. Partial failures are reported instead of hidden.
 - **Delete:** failed cleanup returns an error and retains remaining records as
   `deleting`. The controller retries, or the client can repeat DELETE. A missing
@@ -173,7 +193,8 @@ normal fleet operations to avoid untracked resources.
 | POST | `/api/vms/{id}/start` | No payload |
 
 `CreateVmReq` requires `vm_id`, `env_id`, `image`, `engine`, `cpu`, `mem`, `disk`,
-`ports` and `deny_outgoing`; only `ssh_keys` defaults to empty. Unlike controller
+`ports` and `deny_outgoing`; `ssh_keys` and `guest_config` default to empty and
+`isolated_network` defaults to false. Unlike controller
 requests, there are no sizing defaults here: non-QEMU `disk` must be 0. Agent
 mutation errors currently return HTTP 500, including validation failures.
 

@@ -86,6 +86,11 @@ For multiple hosts, use [distributed deployment](docs/deployment.md#distributed-
 - QEMU cloud images support root SSH key injection and virtual-disk growth.
   Firecracker uses a prepared kernel/rootfs; its built-in recipe only checks boot
   and networking. Docker requires a long-running image default command.
+- Firecracker uses jailer and per-VM resource limits, supports opaque read-only
+  guest configuration, and requests orderly shutdown before forced termination.
+  Linux QEMU/Firecracker can opt into host-enforced guest network isolation. See
+  [guest configuration and networking](docs/guest-images.md#firecracker-guest-configuration).
+  Identity, application installation and idle-stop policy remain caller responsibilities.
 - Image preparation happens on each agent host. There is no automatic image
   distribution, cross-host private network, guest migration or high availability.
 

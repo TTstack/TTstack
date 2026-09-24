@@ -244,12 +244,16 @@ for arg in $(cat /proc/cmdline); do
 done
 ip route add default via 10.10.0.1 2>/dev/null
 
-# This smoke-test image stays alive without an interactive serial session.
-# Custom images should start their own workload here.
-while true; do sleep 3600; done
+# Configuration is data, never executed by this generic image.
+if [ -b /dev/vdb ]; then
+    mkdir -p /run/ttstack-config
+    chmod 700 /run/ttstack-config
+    mount -t ext4 -o ro,nosuid,nodev,noexec /dev/vdb /run/ttstack-config || exit 1
+fi
+# BusyBox init stays alive and handles Ctrl-Alt-Del and shutdown.
 "#
         );
-        let init_path = format!("{}/init", mnt.display());
+        let init_path = format!("{}/etc/ttstack-boot", mnt.display());
         tokio::fs::write(&init_path, init_script)
             .await
             .c(d!("write init"))?;
@@ -260,9 +264,11 @@ while true; do sleep 3600; done
         tokio::fs::create_dir_all(&sbin).await.ok();
         let sbin_init = format!("{sbin}/init");
         let _ = tokio::fs::remove_file(&sbin_init).await;
-        tokio::fs::symlink("/init", &sbin_init)
+        tokio::fs::symlink("/bin/busybox", &sbin_init)
             .await
             .c(d!("install guest init"))?;
+        tokio::fs::write(mnt.join("etc/inittab"), "::sysinit:/etc/ttstack-boot\n::ctrlaltdel:/sbin/reboot\n::shutdown:/bin/sync\n::shutdown:/bin/umount -a -r\n")
+            .await.c(d!("write guest shutdown configuration"))?;
 
         // Set up DNS
         let etc = format!("{}/etc", mnt.display());

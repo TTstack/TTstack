@@ -9,6 +9,10 @@
 //! **FreeBSD**: uses `ifconfig`, `pf`
 
 use crate::command::CommandExt;
+#[cfg(target_os = "linux")]
+mod isolation;
+#[cfg(target_os = "linux")]
+pub use isolation::{isolate, remove_isolation};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use ruc::*;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -81,10 +85,17 @@ mod platform {
     }
 
     pub fn create_tap(vm_id: &str) -> Result<()> {
+        create_tap_owned(vm_id, None)
+    }
+
+    pub fn create_tap_owned(vm_id: &str, uid: Option<u32>) -> Result<()> {
         let tap = tap_name(vm_id);
 
         if !link_exists(&tap)? {
-            run(&["ip", "tuntap", "add", "dev", &tap, "mode", "tap"])?;
+            let owner = uid.unwrap_or(0).to_string();
+            run(&[
+                "ip", "tuntap", "add", "dev", &tap, "mode", "tap", "user", &owner,
+            ])?;
         }
         run(&["ip", "link", "set", &tap, "master", BRIDGE_NAME])?;
         run(&["ip", "link", "set", &tap, "up"])?;
@@ -219,7 +230,7 @@ mod platform {
             .any(|link| link["ifname"].as_str() == Some(name)))
     }
 
-    fn nft(rule: &str) -> Result<()> {
+    pub(super) fn nft(rule: &str) -> Result<()> {
         use std::io::{Seek, SeekFrom, Write};
         let mut input = tempfile::tempfile().c(d!("nft input"))?;
         writeln!(input, "{rule}").c(d!("write nft input"))?;
@@ -439,6 +450,13 @@ pub fn create_tap(vm_id: &str, _vm_ip_addr: &str) -> Result<()> {
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn destroy_tap(vm_id: &str) -> Result<()> {
     platform::destroy_tap(vm_id)
+}
+
+/// Called only before launching a stopped Firecracker, never during live recovery.
+#[cfg(target_os = "linux")]
+pub fn prepare_jailed_tap(vm_id: &str, uid: u32) -> Result<()> {
+    platform::destroy_tap(vm_id)?;
+    platform::create_tap_owned(vm_id, Some(uid))
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]

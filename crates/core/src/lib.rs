@@ -18,3 +18,4 @@ pub mod net;
 pub mod storage;
 
 pub mod command;
+pub mod guest_config;

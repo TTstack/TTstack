@@ -335,6 +335,7 @@ mod tests {
 
     fn make_host(id: &str) -> Host {
         Host {
+            capabilities: vec![],
             id: id.into(),
             addr: format!("{id}:9100"),
             resource: Resource {

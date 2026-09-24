@@ -70,6 +70,8 @@ impl Runtime {
         validate_name(&req.vm_id, "vm_id").map_err(|e| eg!(e))?;
         validate_name(&req.env_id, "env_id").map_err(|e| eg!(e))?;
         validate_image(&req.image, req.engine).map_err(|e| eg!(e))?;
+        ttcore::guest_config::validate(req.engine, &req.guest_config, req.isolated_network)
+            .map_err(|e| eg!(e))?;
         validate_vm_options(
             req.engine,
             (req.disk > 0).then_some(req.disk),
@@ -96,6 +98,8 @@ impl Runtime {
             ssh_keys: req.ssh_keys.clone(),
             deny_outgoing: req.deny_outgoing,
             requested_disk: req.disk,
+            isolated_network: req.isolated_network,
+            guest_config_digest: ttcore::guest_config::digest(&req.guest_config),
         };
         if let Some(vm) = load_vm(&self.db, &req.vm_id)? {
             if vm.env_id != req.env_id
@@ -126,11 +130,21 @@ impl Runtime {
                 let bytes = std::fs::metadata(format!("{base_image}/rootfs.ext4"))
                     .c(d!("rootfs.ext4"))?
                     .len();
-                u32::try_from(bytes.div_ceil(1024 * 1024)).c(d!("rootfs too large"))?
+                u32::try_from(bytes.div_ceil(1024 * 1024))
+                    .c(d!("rootfs too large"))?
+                    .checked_add(if req.guest_config.is_empty() {
+                        0
+                    } else {
+                        ttcore::guest_config::CONFIG_DISK_MIB
+                    })
+                    .ok_or_else(|| eg!("rootfs and configuration disk are too large"))?
             }
             _ => req.disk,
         };
-        if !self.resource.can_fit(req.cpu, req.mem, disk) {
+        if !self
+            .resource
+            .can_fit(req.cpu, req.engine.memory_reservation(req.mem), disk)
+        {
             return Err(eg!("insufficient resources on host {}", self.host_id));
         }
         if self.resource.vm_count as usize >= MAX_VMS {
@@ -178,6 +192,13 @@ impl Runtime {
                 self.ensure_network()?;
                 let clone_path = self.clone_path(&vm);
                 self.store.clone_image(&base_image, &clone_path)?;
+                #[cfg(target_os = "linux")]
+                if vm.engine == Engine::Firecracker {
+                    ttcore::guest_config::write_disk(
+                        std::path::Path::new(&clone_path),
+                        &req.guest_config,
+                    )?;
+                }
                 if vm.engine == Engine::Qemu {
                     self.store.resize_disk(&clone_path, vm.disk)?;
                 }
@@ -228,6 +249,10 @@ impl Runtime {
     fn restore_network(&self, vm: &Vm) -> Result<()> {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if vm.engine != Engine::Docker {
+            #[cfg(target_os = "linux")]
+            if vm.options.isolated_network {
+                net::isolate(&vm.id, &vm.ip)?;
+            }
             net::create_tap(&vm.id, &vm.ip)?;
             net::remove_port_forwards(&vm.ip)?;
             for (&guest, &host) in &vm.port_map {
@@ -235,6 +260,8 @@ impl Runtime {
             }
             if vm.options.deny_outgoing {
                 net::deny_outgoing(&vm.ip)?;
+            } else {
+                net::allow_outgoing(&vm.ip)?;
             }
         }
         Ok(())
@@ -272,7 +299,11 @@ impl Runtime {
             return Err(eg!("cannot start VM in state {}", vm.state));
         }
         self.recount()?;
-        if vm.state == VmState::Stopped && !self.resource.can_fit(vm.cpu, vm.mem, 0) {
+        if vm.state == VmState::Stopped
+            && !self
+                .resource
+                .can_fit(vm.cpu, vm.engine.memory_reservation(vm.mem), 0)
+        {
             return Err(eg!("insufficient resources to restart VM"));
         }
         let previous = vm.state;
@@ -327,6 +358,10 @@ impl Runtime {
                 net::remove_port_forwards(&vm.ip)?;
                 net::allow_outgoing(&vm.ip)?;
                 net::destroy_tap(id)?;
+                #[cfg(target_os = "linux")]
+                if vm.options.isolated_network {
+                    net::remove_isolation(id)?;
+                }
             }
             if vm.engine != Engine::Docker {
                 self.store.remove_image(&self.clone_path(&vm))?;
@@ -389,6 +424,15 @@ impl Runtime {
     }
     pub fn agent_info(&self) -> Result<AgentInfo> {
         Ok(AgentInfo {
+            capabilities: if cfg!(target_os = "linux") {
+                vec![
+                    "guest_config".into(),
+                    "isolated_network".into(),
+                    "firecracker_jailer".into(),
+                ]
+            } else {
+                vec![]
+            },
             host_id: self.host_id.clone(),
             resource: self.resource.clone(),
             engines: self.engines.clone(),
@@ -625,7 +669,7 @@ fn detect_engines() -> Vec<Engine> {
         if which("qemu-system-x86_64") {
             engines.push(Engine::Qemu);
         }
-        if which("firecracker") {
+        if which("firecracker") && which("jailer") {
             engines.push(Engine::Firecracker);
         }
     }
@@ -881,6 +925,8 @@ mod lifecycle_tests {
         let mut rt = runtime(Connection::open_in_memory().unwrap());
         let req = CreateVmReq {
             vm_id: "idempotent".into(),
+            isolated_network: false,
+            guest_config: Default::default(),
             env_id: "env".into(),
             image: "live".into(),
             engine: Engine::Docker,

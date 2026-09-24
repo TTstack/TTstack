@@ -20,7 +20,7 @@ Linux agents run as root. Install only the dependencies needed for your engine:
 |---|---|
 | QEMU/KVM | Working `/dev/kvm`, `qemu-system-x86_64`, `qemu-img`, `genisoimage` or `mkisofs` |
 | QEMU and Firecracker networking | Full `iproute2`, `nftables`, kernel TUN/TAP support; QEMU also uses `vhost_net` |
-| Firecracker | Working `/dev/kvm`, `firecracker`, `curl`, compatible kernel/rootfs |
+| Firecracker | Working `/dev/kvm`, matching `firecracker` and `jailer`, cgroup v2 with CPU/memory/PID controllers, `curl`, compatible kernel/rootfs; `mkfs.ext4` for config drives |
 | Docker | Working Docker daemon or Podman runtime; the agent selects Docker when its binary is installed |
 | QEMU/Firecracker image recipes | `curl`; Firecracker additionally uses `dd`, `mkfs.ext4`, loop mount/unmount and `tar` |
 | Zvol storage | Existing ZFS pool/datasets and `zfs`; provision these manually |
@@ -29,6 +29,23 @@ Docker uses its own networking and does not need TTstack's TAP/nftables setup.
 Engine detection is not a complete health check: permissions, daemon availability
 and guest compatibility still matter. Avoid installing a broken Docker binary next
 to a working Podman installation; the agent will select Docker.
+
+New Firecracker processes always run through jailer; there is no silent unjailed
+fallback. Existing unjailed processes remain queryable/stoppable during upgrade;
+their next cold start needs the new prerequisites. The jailer uses a chroot under
+`runtime_dir/.jailer`, a per-VM UID/GID in **100000–165535** derived from the allocated
+guest IP, and cgroups under `/sys/fs/cgroup/ttstack`. Reserve this UID/GID range
+from host accounts and other services. Keep runtime storage private and on one
+filesystem: jail resources hard-link the VM's existing disk rather than copying
+or replacing it. Avoid long runtime paths because Unix sockets have a 108-byte limit.
+
+Each VMM has a CPU quota of its vCPU count, a memory ceiling of guest RAM + 128 MiB,
+swap disabled, and a bounded thread count. Scheduling reserves the same memory
+headroom. Leave capacity for the host OS and agent in the configured host budgets.
+Jailer cgroups are separate from the agent service's cgroup; limiting only the
+agent service does not limit guest processes. Use `isolated_network` for guest
+network isolation; jailer alone does not provide that policy. Upgrade controller
+and agents together before requesting the new capabilities.
 
 The controller must reach every registered agent address. Clients need access to
 the controller, and guest connections need access to each host's published TCP

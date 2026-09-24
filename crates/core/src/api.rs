@@ -17,6 +17,12 @@ pub struct CreateVmReq {
     pub disk: u32,
     pub ports: Vec<u16>,
     pub deny_outgoing: bool,
+    /// Block guest access to peers, host services and private networks (Linux VMs).
+    #[serde(default)]
+    pub isolated_network: bool,
+    /// UTF-8 files on a read-only configuration drive (Firecracker only).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub guest_config: crate::guest_config::GuestConfig,
     /// Root SSH public keys for QEMU cloud-init or experimental Jail.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ssh_keys: Vec<String>,
@@ -31,6 +37,8 @@ pub struct CreateVmResp {
 /// Information reported by an agent about itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     pub host_id: String,
     pub resource: Resource,
     pub engines: Vec<Engine>,
@@ -53,6 +61,10 @@ pub struct VmSpec {
     pub ports: Vec<u16>,
     #[serde(default)]
     pub deny_outgoing: bool,
+    #[serde(default)]
+    pub isolated_network: bool,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub guest_config: crate::guest_config::GuestConfig,
     /// Per-VM SSH keys (merged with env-level keys).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ssh_keys: Vec<String>,

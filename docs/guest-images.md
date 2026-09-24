@@ -131,15 +131,54 @@ sudo /opt/ttstack/bin/tt image create fc-alpine
   --cpu 1 --mem 128
 ```
 
-The built-in rootfs configures networking and runs an idle loop. It does not start
+The built-in rootfs configures networking and runs BusyBox init. It does not start
 an application or sshd. Read boot output on the agent at
 `/home/ttstack/run/fc-VM_ID.log`. There is no managed SSH key injection or
 interactive console. Build a suitable rootfs for application workloads; old images
 with a hard-coded IP need replacement, not just a TTstack binary upgrade.
 
 The existing rootfs size is reserved and retained; `--disk` resizing is rejected.
-Stop terminates the microVM, and start boots its preserved disk. TTstack's
-stop/start commands do not use Firecracker pause/resume.
+Stop requests orderly shutdown on x86_64, waits up to 30 seconds, then forcibly
+terminates if necessary. The kernel needs `CONFIG_SERIO_I8042` and
+`CONFIG_KEYBOARD_ATKBD`; init must handle Ctrl-Alt-Del by stopping applications,
+syncing/unmounting filesystems and rebooting (Firecracker exits on reset).
+New `fc-alpine` builds provide BusyBox init shutdown handling. Existing images are
+not rewritten; rebuild under a new image name/directory to adopt the new init.
+Start cold-boots the preserved disk. Memory is not retained. Normal stop/start
+does not implement snapshot or suspend-to-disk semantics.
+
+### Firecracker guest configuration
+
+`--guest-config FILE` reads a JSON object mapping simple file names to UTF-8
+contents. REST clients use `vms[].guest_config`. For example:
+
+```json
+{"application.json":"{\"listen\":\"0.0.0.0:8080\"}"}
+```
+
+Use at most 32 files and 64 KiB total name/content bytes. Names are up to 128 ASCII
+letters, digits, `.`, `_`, `-`, with no leading dot or path separators. Binary
+files and directory trees are intentionally unsupported. The CLI input JSON has
+a 512 KiB encoded-size limit. Configuration is per VM; CLI duplicates receive the
+same contents, so submit separate requests when each VM needs a different secret.
+
+The agent builds a 4 MiB ext4 drive labelled `TTCONFIG`, exposed read-only as
+`/dev/vdb`. A custom guest init can mount it as root:
+
+```sh
+mkdir -p /run/ttstack-config
+chmod 700 /run/ttstack-config
+mount -t ext4 -o ro,nosuid,nodev,noexec /dev/vdb /run/ttstack-config
+```
+
+New `fc-alpine` builds perform that mount when the drive exists. Files are readable
+by guest root; application init can copy selected values into its own protected
+configuration. TTstack does not execute these files, interpret keys, install an
+application or inject account credentials by itself. Do not include shared
+administrator secrets. Query responses contain only a digest. The disk is private
+to the VMM UID/root on the host and is deleted with the VM, not on stop.
+Configuration remains unchanged across boots; renewal inside a running guest is
+the application's responsibility.
 
 ## Storage
 
@@ -171,6 +210,21 @@ ports. `--deny-outgoing` blocks routed outbound initiation while permitting repl
 to inbound traffic. It can also prevent external DNS access; it is not isolation
 from the host or other guests on the bridge. Environments do not create a private
 cross-host network. Docker uses its own networking and port publishing.
+
+For mutually untrusted Linux QEMU/Firecracker guests, set `isolated_network: true`
+or `--isolated-network`. Host-enforced bridge rules block direct peer traffic,
+MAC/IP/ARP spoofing and IPv6. Routed rules block guest-initiated access to host
+services, RFC1918, link-local, carrier-grade NAT and other listed non-public ranges.
+Public IPv4 egress and responses to host/external connections remain available;
+combine with `deny_outgoing` to block routed initiation entirely. Isolation is
+per VM, including peers in the same environment. It has no private-destination
+allowlist; applications needing private services should use a separately controlled
+gateway. It is not a public-Internet destination allowlist.
+
+Published TCP ports still accept external connections. Restrict these to your
+gateway using the host/provider firewall and authenticate guest applications.
+Keep controller/agent endpoints on a protected management network; remote management
+addresses on public networks are not covered by a private-address egress block.
 
 All FreeBSD/Bhyve/Jail/PF paths are **experimental** and require manual setup.
 QEMU and Firecracker instructions above describe Linux hosts. Bhyve currently

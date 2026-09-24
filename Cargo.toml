@@ -27,6 +27,7 @@ uuid = { version = "1.26.1", features = ["v4"] }
 nix = { version = "0.31.3", features = ["net", "socket", "ioctl", "fs", "signal"] }
 tempfile = "3.27.0"
 toml = "1.1.6"
+sha2 = "0.11.0"
 
 [profile.release]
 lto = true

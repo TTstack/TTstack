@@ -108,6 +108,12 @@ enum EnvCmd {
         /// Block routed outgoing traffic (unsupported for Docker; not host/VM isolation).
         #[arg(long)]
         deny_outgoing: bool,
+        /// Isolate from other guests, host services and private networks (Linux QEMU/Firecracker).
+        #[arg(long)]
+        isolated_network: bool,
+        /// JSON file mapping file names to UTF-8 contents for a read-only Firecracker config drive.
+        #[arg(long)]
+        guest_config: Option<std::path::PathBuf>,
         /// Owner label, not an access control (defaults to $USER).
         #[arg(long)]
         owner: Option<String>,
@@ -356,10 +362,30 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
             port,
             lifetime,
             deny_outgoing,
+            isolated_network,
+            guest_config,
             owner,
             ssh_key,
         } => {
             let engine: Engine = engine.parse().map_err(|e: String| eg!(e))?;
+            let guest_config: ttcore::guest_config::GuestConfig = match guest_config {
+                Some(path) => {
+                    use std::io::Read;
+                    let mut bytes = Vec::new();
+                    std::fs::File::open(path)
+                        .c(d!("open guest config"))?
+                        .take(512 * 1024 + 1)
+                        .read_to_end(&mut bytes)
+                        .c(d!("read guest config"))?;
+                    if bytes.len() > 512 * 1024 {
+                        return Err(eg!("guest config JSON exceeds 512 KiB"));
+                    }
+                    serde_json::from_slice(&bytes).map_err(|_| eg!("guest config must be a JSON object of file names and UTF-8 strings (maximum input 512 KiB)"))?
+                }
+                None => Default::default(),
+            };
+            ttcore::guest_config::validate(engine, &guest_config, isolated_network)
+                .map_err(|e| eg!(e))?;
 
             let owner = owner
                 .or_else(|| std::env::var("USER").ok())
@@ -403,6 +429,8 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
                         disk,
                         ports: port.clone(),
                         deny_outgoing,
+                        isolated_network,
+                        guest_config: guest_config.clone(),
                         ssh_keys: vec![],
                     });
                 }

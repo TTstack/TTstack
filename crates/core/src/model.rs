@@ -169,6 +169,8 @@ impl Resource {
 /// A physical host in the fleet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Host {
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     pub id: String,
     /// Agent listen address, e.g. "10.0.0.1:9100".
     pub addr: String,
@@ -216,6 +218,11 @@ pub struct VmOptions {
     pub ssh_keys: Vec<String>,
     pub deny_outgoing: bool,
     pub requested_disk: u32,
+    #[serde(default)]
+    pub isolated_network: bool,
+    /// Only a digest is exposed/persisted here; configuration contents stay on the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_config_digest: Option<String>,
 }
 
 /// An environment — a logical group of related VMs.
@@ -494,6 +501,10 @@ pub fn validate_vm_options(
 }
 
 impl Engine {
+    /// Reserve VMM headroom as well as guest RAM for jailed Firecracker.
+    pub fn memory_reservation(self, guest_mib: u32) -> u32 {
+        guest_mib.saturating_add(if self == Self::Firecracker { 128 } else { 0 })
+    }
     pub fn default_disk(self) -> u32 {
         if self == Self::Qemu {
             VM_DISK_DEFAULT
@@ -510,7 +521,9 @@ impl Resource {
         self.vm_count = self.vm_count.saturating_add(1);
         if vm.state != VmState::Stopped {
             self.cpu_used = self.cpu_used.saturating_add(vm.cpu);
-            self.mem_used = self.mem_used.saturating_add(vm.mem);
+            self.mem_used = self
+                .mem_used
+                .saturating_add(vm.engine.memory_reservation(vm.mem));
         }
     }
 }

@@ -29,16 +29,25 @@ pub fn place_vm(
     host_images: &HashMap<String, HashSet<String>>,
 ) -> Result<Placement> {
     let cpu = spec.cpu.unwrap_or(VM_CPU_DEFAULT);
-    let mem = spec.mem.unwrap_or(VM_MEM_DEFAULT);
+    let mem = spec
+        .engine
+        .memory_reservation(spec.mem.unwrap_or(VM_MEM_DEFAULT));
     let disk = spec.disk.unwrap_or(spec.engine.default_disk());
 
     // Docker images are managed by Docker, not by the image directory
     let check_images = !host_images.is_empty() && spec.engine != Engine::Docker;
+    let supports = |h: &Host| {
+        let has = |cap: &str| h.capabilities.iter().any(|c| c == cap);
+        (!spec.isolated_network || has("isolated_network"))
+            && (spec.guest_config.is_empty() || has("guest_config"))
+            && (spec.engine != Engine::Firecracker || has("firecracker_jailer"))
+    };
 
     let mut candidates: Vec<&Host> = hosts
         .iter()
         .filter(|h| {
             h.state == HostState::Online
+                && supports(h)
                 && h.engines.contains(&spec.engine)
                 && !(h.storage == Storage::Zvol
                     && matches!(spec.engine, Engine::Firecracker | Engine::Jail))
@@ -51,6 +60,15 @@ pub fn place_vm(
         .collect();
 
     if candidates.is_empty() {
+        if hosts.iter().any(|h| h.state == HostState::Online)
+            && !hosts
+                .iter()
+                .any(|h| h.state == HostState::Online && supports(h))
+        {
+            return Err(eg!(
+                "no online agent supports the requested capabilities; upgrade agents before using guest_config, isolated_network or jailed Firecracker"
+            ));
+        }
         // Provide a more helpful error message
         let online = hosts
             .iter()
@@ -121,7 +139,9 @@ pub fn schedule_env(
         // Update shadow resources to account for this allocation
         if let Some(h) = shadow.iter_mut().find(|h| h.id == placement.host_id) {
             let cpu = spec.cpu.unwrap_or(VM_CPU_DEFAULT);
-            let mem = spec.mem.unwrap_or(VM_MEM_DEFAULT);
+            let mem = spec
+                .engine
+                .memory_reservation(spec.mem.unwrap_or(VM_MEM_DEFAULT));
             let disk = spec.disk.unwrap_or(spec.engine.default_disk());
             h.resource.cpu_used += cpu;
             h.resource.mem_used += mem;
@@ -141,6 +161,11 @@ mod tests {
 
     fn make_host(id: &str, cpu: u32, mem: u32, engines: Vec<Engine>) -> Host {
         Host {
+            capabilities: vec![
+                "guest_config".into(),
+                "isolated_network".into(),
+                "firecracker_jailer".into(),
+            ],
             id: id.into(),
             addr: format!("{id}:9100"),
             resource: Resource {
@@ -162,6 +187,8 @@ mod tests {
 
     fn make_spec() -> VmSpec {
         VmSpec {
+            isolated_network: false,
+            guest_config: Default::default(),
             image: "ubuntu".into(),
             engine: Engine::Qemu,
             cpu: Some(2),
@@ -171,6 +198,39 @@ mod tests {
             deny_outgoing: false,
             ssh_keys: vec![],
         }
+    }
+
+    #[test]
+    fn isolation_and_configuration_are_never_scheduled_on_legacy_agents() {
+        let mut host = make_host("old", 8, 4096, vec![Engine::Qemu, Engine::Firecracker]);
+        host.capabilities.clear();
+        let mut spec = make_spec();
+        spec.isolated_network = true;
+        assert!(
+            place_vm(std::slice::from_ref(&host), &spec, &HashMap::new())
+                .unwrap_err()
+                .to_string()
+                .contains("capabilities")
+        );
+        spec.isolated_network = false;
+        assert!(place_vm(std::slice::from_ref(&host), &spec, &HashMap::new()).is_ok());
+        spec.engine = Engine::Firecracker;
+        spec.disk = None;
+        spec.guest_config
+            .insert("settings.json".into(), "{}".into());
+        assert!(place_vm(&[host], &spec, &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn firecracker_reserves_vmm_memory_headroom() {
+        let host = make_host("small", 2, 256, vec![Engine::Firecracker]);
+        let mut spec = make_spec();
+        spec.engine = Engine::Firecracker;
+        spec.mem = Some(256);
+        spec.disk = None;
+        assert!(place_vm(std::slice::from_ref(&host), &spec, &HashMap::new()).is_err());
+        spec.mem = Some(128);
+        assert!(place_vm(&[host], &spec, &HashMap::new()).is_ok());
     }
 
     fn empty_images() -> HashMap<String, HashSet<String>> {

@@ -140,6 +140,7 @@ pub async fn register_host(
     }
 
     let host = Host {
+        capabilities: info.capabilities,
         id: info.host_id,
         addr: req.addr,
         resource: info.resource,
@@ -259,6 +260,8 @@ async fn create_environment(state: &CtlState, req: CreateEnvReq) -> Result<EnvDe
         ));
     }
     for spec in &req.vms {
+        ttcore::guest_config::validate(spec.engine, &spec.guest_config, spec.isolated_network)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         validate_image(&spec.image, spec.engine).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         let keys: Vec<_> = req.ssh_keys.iter().chain(&spec.ssh_keys).cloned().collect();
         validate_vm_options(
@@ -343,6 +346,8 @@ async fn create_environment(state: &CtlState, req: CreateEnvReq) -> Result<EnvDe
                 ssh_keys: ssh_keys.clone(),
                 deny_outgoing: spec.deny_outgoing,
                 requested_disk: disk,
+                isolated_network: spec.isolated_network,
+                guest_config_digest: ttcore::guest_config::digest(&spec.guest_config),
             },
             error: None,
         });
@@ -359,6 +364,8 @@ async fn create_environment(state: &CtlState, req: CreateEnvReq) -> Result<EnvDe
                 ports: spec.ports,
                 deny_outgoing: spec.deny_outgoing,
                 ssh_keys,
+                isolated_network: spec.isolated_network,
+                guest_config: spec.guest_config,
             },
         ));
     }
@@ -801,6 +808,7 @@ fn apply_host_snapshot(
         Ok((info, actual)) => {
             host.resource = info.resource;
             host.engines = info.engines;
+            host.capabilities = info.capabilities;
             host.storage = info.storage;
             host.images = info.images;
             host.state = HostState::Online;
@@ -874,6 +882,7 @@ mod tests {
             resource.account(vm);
         }
         Json(ApiResp::success(AgentInfo {
+            capabilities: vec![],
             host_id: "host".into(),
             resource,
             engines: vec![Engine::Docker],
@@ -891,6 +900,8 @@ mod tests {
         mock.creates.fetch_add(1, Ordering::SeqCst);
         let mut vm = record(&req.vm_id, &req.env_id);
         vm.options = VmOptions {
+            isolated_network: req.isolated_network,
+            guest_config_digest: ttcore::guest_config::digest(&req.guest_config),
             ports: req.ports,
             ssh_keys: req.ssh_keys,
             deny_outgoing: req.deny_outgoing,
@@ -952,6 +963,7 @@ mod tests {
         state
             .lock_db()
             .put_host(&Host {
+                capabilities: vec![],
                 id: "host".into(),
                 addr,
                 resource: Resource::default(),
@@ -985,6 +997,8 @@ mod tests {
             lifetime: Some(0),
             ssh_keys: vec![],
             vms: vec![VmSpec {
+                isolated_network: false,
+                guest_config: Default::default(),
                 image: "alpine:3.21".into(),
                 engine: Engine::Docker,
                 cpu: Some(1),
