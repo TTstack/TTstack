@@ -321,7 +321,31 @@ stay in place.
 Evidence: `crates/agent/src/runtime.rs` (`allocate_ports` call site) and
 `crates/core/src/net.rs` (`add_port_forward`).
 
-### 12. One bad JSON row disables list, refresh, and delete
+### 12. Firecracker tap recovery does not restore jail ownership
+
+`prepare_jailed_tap` is only used before launching a stopped Firecracker. The
+comment in `net.rs` says it is never used during live recovery. Agent startup,
+for every VM still recorded as running or paused, calls `restore_network`, and
+that calls `create_tap`. `create_tap_owned` creates a missing device as uid 0
+when no owner is passed, and if the device already exists it does not change
+the owner. A tap that disappeared while the jailed VMM is still running is
+therefore recreated as root. The jailed process cannot open it. Recovery does
+not restart that VMM, so the guest stays network-dead. The stored error is
+`network recovery failed: ...`, which finding 9 does not clear when the process
+is later observed running.
+
+On a cold start the order is the opposite, and it is not atomic.
+`prepare_jailed_tap` deletes the tap before `ip tuntap add` creates the
+replacement. If that add fails, the tap is gone. `start_vm` has already
+persisted `Failed`, and start refuses any state other than stopped or paused,
+so the failed start is not retried. The operator has to delete and recreate.
+
+Evidence: `crates/core/src/net.rs` (`create_tap_owned`, `prepare_jailed_tap`),
+`crates/core/src/engine/firecracker/sandbox.rs` (`prepare`), and
+`crates/agent/src/runtime.rs` (startup recovery loop, `restore_network`,
+`start_vm`).
+
+### 13. One bad JSON row disables list, refresh, and delete
 
 Hosts, environments, and VMs are JSON blobs. `query_all` aborts the entire
 result on the first deserialize error. Controller refresh returns immediately
@@ -341,7 +365,7 @@ Evidence: `crates/ctl/src/db.rs` (`query_all`) and
 This is a reasonable prototype schema. It is not a reasonable recovery schema:
 the operation that must still work when a row is corrupt is delete.
 
-### 13. CLI and dashboard defaults disagree with the API the guides document
+### 14. CLI and dashboard defaults disagree with the API the guides document
 
 - Create uses the client's 60-second timeout. The ten-minute poll starts only
   after POST returns. The controller holds the fleet lock and refreshes hosts
@@ -379,7 +403,7 @@ Evidence: `crates/cli/src/client.rs`, `crates/cli/src/main.rs` (server
 selection, SSH key resolution, create poll, delete), and
 `crates/ctl/src/web.rs` (create form and `createEnv`).
 
-### 14. Deploy configuration is interpolated into a root shell, and unit edits are not preserved
+### 15. Deploy configuration is interpolated into a root shell, and unit edits are not preserved
 
 `user`, `prefix`, `image_dir`, `runtime_dir`, `listen`, `host_id`, and
 `data_dir` are inserted unquoted into the remote script. Only the API key is
@@ -409,7 +433,7 @@ cannot express that constraint.
 Evidence: `crates/cli/src/deploy.rs` (`remote_setup_script`, `systemd_unit`,
 `deploy_local`).
 
-### 15. File-backed QEMU disks are not mode-restricted
+### 16. File-backed QEMU disks are not mode-restricted
 
 `clone_image` is `cp -a` and does not chmod the clone. Runtime and image
 directories are created with `create_dir_all`, so their mode is the process
@@ -424,7 +448,7 @@ Evidence: `crates/core/src/storage/file.rs` (`clone_image`) and
 
 ## Low
 
-### 16. API and operator mismatches that do not by themselves lose a guest
+### 17. API and operator mismatches that do not by themselves lose a guest
 
 - `GET /api/hosts` and `GET /api/status` return `ApiResp::err` with axum's
   default 200 on a database error. Other reads use `response()` and return 500.
@@ -471,6 +495,9 @@ intentional, because the guides already say so and the code follows them:
 - Engine commands are argv arrays, not a shell. Environment, host, and image
   names are constrained. Guest configuration contents are not returned by the
   query API.
+- A controller shutdown aborts `finish_creation` the same way a crash does.
+  The guides already say a crash leaves creation failed and does not
+  automatically recreate. That path was checked and is not a separate finding.
 - Capability flags keep new Firecracker and isolation features off old agents.
 - Dated validation reports describe their own revision and limits. They do not
   contradict current defaults, and this audit does not extend them.
@@ -490,8 +517,10 @@ The findings are coupled. A useful sequence is:
    explicit detach for a host that will not answer, so expiry of other
    environments is not behind that timeout.
 4. Give tap, jail, cgroup, and isolation names a stable derivation. Repair
-   `tt0` instead of treating the name as proof of configuration. Decide an
-   explicit Docker coexistence rule before advertising both engines on one host.
+   `tt0` instead of treating the name as proof of configuration. On recovery,
+   recreate a missing Firecracker tap with the jail UID instead of uid 0, and
+   do not delete the old tap until the replacement exists. Decide an explicit
+   Docker coexistence rule before advertising both engines on one host.
 5. Reserve, on the controller, the same disk and memory the agent will reserve.
    Do not replace `host.resource` from a snapshot that omits a VM the controller
    still tracks.
