@@ -223,6 +223,21 @@ parent datasets and base volume manually; import **raw disk contents**, not a
 qcow2 file's encoded bytes. The corresponding device is exposed at
 `/dev/zvol/tank/ttstack/images/IMAGE_NAME`. `tt image create` does not import zvols.
 
+Firecracker can use the `file` backend on a mounted ZFS filesystem. This keeps
+its kernel/rootfs layout and per-VM file copies; it does not turn those disks
+into zvols or create a dataset/snapshot per VM. Place image, runtime and agent
+state directories on operator-provisioned datasets. Keep all files within a
+VM's runtime tree on the same filesystem for jailer hard links. Snapshot stopped
+VMs for an offline recovery point; a running-disk snapshot is not an application
+consistency guarantee. Dataset quotas and agent disk reservations are separate
+limits, so leave pool headroom and configure both deliberately.
+
+For systemd services using these paths, add `RequiresMountsFor=` and explicit
+`ExecStartPre=/usr/bin/mountpoint -q PATH` checks for each dataset mountpoint.
+A missing mount must fail startup rather than create replacement VM state on
+the system disk. Use stable disk identifiers when provisioning a pool; verify
+unused devices separately from TTstack deployment.
+
 The zvol backend reuses each base's `@ttsnap` snapshot for clones. Editing the base
 volume does not refresh that snapshot. Use a new base volume name for a new image
 revision. Zvol is implemented but is not covered by the current live validation.
