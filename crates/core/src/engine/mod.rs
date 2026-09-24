@@ -5,10 +5,15 @@
 //!
 //! Platform-specific engines:
 //! - **Linux**: Qemu, Firecracker, Docker/Podman
+//! - **FreeBSD (experimental)**: Bhyve, Jail
 
+#[cfg(target_os = "freebsd")]
+pub mod bhyve;
 pub mod docker;
 #[cfg(target_os = "linux")]
 pub mod firecracker;
+#[cfg(target_os = "freebsd")]
+pub mod jail;
 #[cfg(target_os = "linux")]
 pub mod qemu;
 
@@ -20,7 +25,7 @@ pub trait VmEngine: Send + Sync {
     /// Create and boot a new VM from the given disk path.
     ///
     /// - `disk_format`: image format (`"qcow2"` for file-based, `"raw"` for zvol).
-    /// - `ssh_keys`: initial public keys used by QEMU seed generation.
+    /// - `ssh_keys`: initial keys for QEMU seed generation or root keys for Jail.
     fn create(
         &self,
         vm: &Vm,
@@ -60,6 +65,10 @@ pub fn create_engine(
         Engine::Docker => Box::new(docker::DockerEngine::new(
             container_runtime.ok_or_else(|| eg!("container runtime is not bound"))?,
         )),
+        #[cfg(target_os = "freebsd")]
+        Engine::Bhyve => Box::new(bhyve::BhyveEngine::new()),
+        #[cfg(target_os = "freebsd")]
+        Engine::Jail => Box::new(jail::JailEngine::new()),
         #[allow(unreachable_patterns)]
         other => {
             return Err(eg!(format!(

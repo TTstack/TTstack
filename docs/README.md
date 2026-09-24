@@ -15,6 +15,7 @@ behavior and are updated together with the code.
 | Call the API or understand lifecycle recovery | [REST API](rest-api.md) |
 | Check supported platforms and validation limits | [Compatibility](compatibility.md) |
 | Configure initial VM SSH and public ingress | [SSH](ssh.md) |
+| Inspect the experimental FreeBSD restoration and its limits | [FreeBSD scope](compatibility.md#experimental-freebsd-restoration) |
 | Configure distributed deployment | [Fleet template](../tools/deploy.toml.example) |
 | Contribute or choose an AI workflow | [Repository instructions](../AGENTS.md) and [Claude workflows](../.claude/README.md) |
 

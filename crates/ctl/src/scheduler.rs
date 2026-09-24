@@ -81,6 +81,7 @@ pub fn place_vm(
             h.state == HostState::Online
                 && supports(h)
                 && h.engines.contains(&spec.engine)
+                && !(h.storage == Storage::Zvol && spec.engine == Engine::Jail)
                 && disk_reservation(spec, h).is_some_and(|disk| h.resource.can_fit(cpu, mem, disk))
                 && (!check_images
                     || host_images
@@ -126,6 +127,7 @@ pub fn place_vm(
                 h.state == HostState::Online
                     && h.engines.contains(&spec.engine)
                     && supports(h)
+                    && !(h.storage == Storage::Zvol && spec.engine == Engine::Jail)
                     && disk_reservation(spec, h)
                         .is_some_and(|disk| h.resource.can_fit(cpu, mem, disk))
             })
@@ -277,6 +279,39 @@ mod tests {
         host.image_sizes.clear();
         spec.disk = None;
         assert!(place_vm(&[host], &spec, &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn freebsd_placement_requires_matching_engine_and_file_storage_for_jail() {
+        let linux = make_host("linux", 8, 8192, vec![Engine::Qemu]);
+        let mut freebsd = make_host("freebsd", 4, 4096, vec![Engine::Bhyve, Engine::Jail]);
+        freebsd.capabilities.clear();
+        let mut spec = make_spec();
+        spec.disk = None;
+        for engine in [Engine::Bhyve, Engine::Jail] {
+            spec.engine = engine;
+            assert!(place_vm(&[linux.clone()], &spec, &HashMap::new()).is_err());
+            let placement =
+                place_vm(&[linux.clone(), freebsd.clone()], &spec, &HashMap::new()).unwrap();
+            assert_eq!(placement.host_id, "freebsd");
+        }
+        let mut zvol = freebsd.clone();
+        zvol.id = "freebsd-zvol".into();
+        zvol.storage = Storage::Zvol;
+        assert!(place_vm(&[zvol.clone()], &spec, &HashMap::new()).is_err());
+        assert_eq!(
+            place_vm(&[zvol.clone(), freebsd.clone()], &spec, &HashMap::new())
+                .unwrap()
+                .host_id,
+            "freebsd"
+        );
+        spec.engine = Engine::Bhyve;
+        assert_eq!(
+            place_vm(&[freebsd, zvol], &spec, &HashMap::new())
+                .unwrap()
+                .host_id,
+            "freebsd-zvol"
+        );
     }
 
     #[test]

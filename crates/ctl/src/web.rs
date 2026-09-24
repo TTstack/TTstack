@@ -199,6 +199,8 @@ const FRONTEND_HTML: &str = r##"<!DOCTYPE html>
           <option value="qemu">QEMU</option>
           <option value="firecracker">Firecracker</option>
           <option value="docker">Docker</option>
+          <option value="bhyve">Bhyve (experimental)</option>
+          <option value="jail">Jail (experimental)</option>
         </select>
       </div>
       <div><label>Replicas</label><input id="env-dup" type="number" value="1" min="1"></div>
@@ -417,7 +419,7 @@ function updateEngineOptions() {
   const engine = document.getElementById('env-engine').value;
   document.getElementById('env-disk').disabled = engine !== 'qemu' && engine !== 'firecracker';
   document.getElementById('env-deny-outgoing').disabled = engine === 'docker';
-  document.getElementById('env-ssh-keys').disabled = engine !== 'qemu';
+  document.getElementById('env-ssh-keys').disabled = !['qemu', 'jail'].includes(engine);
 }
 
 async function createEnv() {
@@ -444,7 +446,7 @@ async function createEnv() {
     vms.push({ image: image, engine: engine, cpu: cpu, mem: mem, disk: (engine === 'qemu' || engine === 'firecracker') ? disk : null, ports: ports, deny_outgoing: engine === 'docker' ? false : denyOutgoing, ssh_keys: [] });
   }
 
-  var body = { id: name, owner: owner, vms: vms, lifetime: lifetime, ssh_keys: engine === 'qemu' ? sshKeys : [] };
+  var body = { id: name, owner: owner, vms: vms, lifetime: lifetime, ssh_keys: ['qemu', 'jail'].includes(engine) ? sshKeys : [] };
 
   setBtn('btn-create-env', true);
   try {
