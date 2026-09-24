@@ -118,12 +118,14 @@ ports are allocated dynamically, so always read the actual mappings from `env sh
 
 | Document | Scope |
 |---|---|
+| [Documentation index](docs/README.md) | Reading paths, maintained guides and dated evidence |
 | [Deployment](docs/deployment.md) | Dependencies, installation, fleet configuration, upgrades |
 | [Guest images](docs/guest-images.md) | Recipes, image formats, guest access, storage and networking |
 | [REST API](docs/rest-api.md) | Endpoints, request defaults, response/state semantics and recovery |
 | [Compatibility](docs/compatibility.md) | Supported scope, CI and limits of live verification |
 | [Linux validation, 2026-09-24](docs/live-validation-2026-09-24.md) | Results for a specific tested code revision |
 | [Fleet configuration template](tools/deploy.toml.example) | Commented distributed deployment configuration |
+| [Claude workflows](.claude/README.md) | Focused review, checks, commits and lightweight live validation |
 
 `make help` lists development commands. `make doc` generates Rust source API
 documentation; the HTTP API is documented in the REST reference above.
