@@ -81,7 +81,8 @@ For multiple hosts, use [distributed deployment](docs/deployment.md#distributed-
 - Creation is persisted before execution. The CLI waits up to ten minutes; after
   a timeout or interruption, inspect `tt env show NAME` before retrying. Incomplete
   deletion remains visible and is retried while the controller is running.
-- Scheduling uses configured CPU, memory and disk reservations, not measured load.
+- Scheduling prefers eligible ZFS hosts for VMs, falling back to file hosts.
+  It uses configured CPU, memory and disk reservations, not measured load.
   Limits of 50 hosts and 1000 tracked VMs are guardrails, not tested fleet capacity.
 - QEMU cloud images support root SSH key injection and virtual-disk growth.
   Firecracker uses a prepared kernel/rootfs and supports creation-time ext4 growth;

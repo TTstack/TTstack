@@ -110,13 +110,16 @@ example `sudo docker exec -it tt-VM_ID sh`, replacing `VM_ID` with the full ID f
 
 ## Firecracker: prepared microVM workloads
 
-Firecracker requires **file storage** and an image directory with both files:
+With file storage, Firecracker uses an image directory with both files:
 
 ```text
 /home/ttstack/images/fc-alpine/
 ├── vmlinux
 └── rootfs.ext4
 ```
+
+The ZFS backend stores the root filesystem in a zvol and the kernel in its parent
+dataset; see [storage](#storage) for the layout and import steps.
 
 The kernel must support Firecracker's devices, including built-in virtio-mmio and
 root filesystem support. The ext4 rootfs needs a working `/sbin/init` and its
@@ -154,7 +157,7 @@ tt env create fc-work --image fc-alpine --engine firecracker \
 ```
 
 The agent clones the image, checks the offline filesystem with `e2fsck`, and grows
-both the raw file and its ext4 filesystem with `resize2fs` before first boot.
+the raw file or zvol and its ext4 filesystem with `resize2fs` before first boot.
 Only unpartitioned ext4 rootfs images are supported. Shrinking below the base
 image size is rejected before allocation; the base image is never modified.
 Disk space is reserved at the requested logical size, even for sparse files;
@@ -213,36 +216,96 @@ the application's responsibility.
 
 | Backend | Base image format | Runtime storage |
 |---|---|---|
-| `file` (default) | QEMU qcow2 file; Firecracker kernel/rootfs directory | Per-VM copy, using reflinks on Linux when available, otherwise a full copy |
-| `zvol` (QEMU) | Raw bootable disk in a ZFS volume | Clone of a base snapshot |
-| Docker runtime | Container image | Managed by Docker/Podman, independently of the agent storage setting |
+| `file` | QEMU qcow2 file; Firecracker kernel/rootfs directory | Per-VM copy, using reflinks on Linux when available, otherwise a full copy |
+| `zvol` | QEMU raw disk volume; Firecracker kernel dataset with an ext4 root volume | Per-VM snapshot clones |
+| Docker runtime | Container image | Managed by Docker/Podman, independently of agent storage |
 
-For zvol, configure dataset names such as `tank/ttstack/images` and
-`tank/ttstack/runtime`, not `/dev/zvol/...` paths. Prepare the existing pool,
-parent datasets and base volume manually; import **raw disk contents**, not a
-qcow2 file's encoded bytes. The corresponding device is exposed at
-`/dev/zvol/tank/ttstack/images/IMAGE_NAME`. `tt image create` does not import zvols.
+For QEMU and Firecracker, the controller prefers eligible **ZFS hosts** over file
+hosts, then packs by free memory within that group. The host must be online, have
+the image and required capabilities, and have sufficient reservations. If no ZFS
+host qualifies, a file host can be selected. Docker placement is unchanged.
+Firecracker on ZFS requires the `firecracker_zvol` agent capability; update both
+controller and agents before using it.
 
-Firecracker can use the `file` backend on a mounted ZFS filesystem. This keeps
-its kernel/rootfs layout and per-VM file copies; it does not turn those disks
-into zvols or create a dataset/snapshot per VM. Place image, runtime and agent
-state directories on operator-provisioned datasets. Firecracker also stores
-PID, console and sandbox metadata in `/home/ttstack/run`; include that directory
-when placing all persistent VM state on ZFS. Keep all files within a
-VM's runtime tree on the same filesystem for jailer hard links. Snapshot stopped
-VMs for an offline recovery point; a running-disk snapshot is not an application
-consistency guarantee. Dataset quotas and agent disk reservations are separate
-limits, so leave pool headroom and configure both deliberately.
+Storage is an operator-provisioned host setting: use `--storage zvol` with dataset
+names such as `tank/ttstack/images` and `tank/ttstack/runtime`, not `/dev/zvol/...`
+paths. Hosts without provisioned ZFS use `--storage file` (the agent/deployment
+default). TTstack does not choose an arbitrary pool, format a disk, or switch a
+running agent's storage automatically. An unavailable pool or failed clone is an
+error, not permission to create an empty file disk. Existing VMs keep their host
+and disks across stop/start. Do not change an agent's backend or storage roots
+while it owns VMs; disk migration is not implemented.
 
-For systemd services using these paths, add `RequiresMountsFor=` and explicit
-`ExecStartPre=/usr/bin/mountpoint -q PATH` checks for each dataset mountpoint.
+### ZFS image preparation
+
+Create the pool and parent datasets first. A QEMU base is a volume directly below
+`images/IMAGE_NAME`; import **raw bootable disk contents**, not qcow2 encoded bytes.
+Use `qemu-img convert -f qcow2 -O raw SOURCE.qcow2 RAW_DISK` when converting a
+qcow2 source. `tt image create` prepares files; it does not import zvols.
+
+A Firecracker base uses this layout:
+
+```text
+tank/ttstack/images/fc-app          filesystem dataset: vmlinux file
+tank/ttstack/images/fc-app/rootfs   volume: raw, unpartitioned ext4 contents
+```
+
+For example, with a prepared **128 MiB** `rootfs.ext4` and matching kernel:
+
+```bash
+sudo zfs create -p -o mountpoint=/srv/tt-images tank/ttstack/images
+sudo zfs create -p -o mountpoint=/srv/tt-run tank/ttstack/runtime
+sudo zfs create tank/ttstack/images/fc-app
+sudo cp /path/to/vmlinux /srv/tt-images/fc-app/vmlinux
+sudo zfs create -s -V 128M -o volmode=dev tank/ttstack/images/fc-app/rootfs
+sudo udevadm settle --timeout=10
+sudo dd if=/path/to/rootfs.ext4 of=/dev/zvol/tank/ttstack/images/fc-app/rootfs \
+  bs=4M conv=fsync status=progress
+```
+
+Choose the volume size to match the source image (a ZFS block-size multiple),
+never smaller. If making a larger base volume, check and grow its offline ext4
+filesystem with `e2fsck -f -p` and `resize2fs` before using it. Keep the kernel in
+the dataset and leave `rootfs.ext4` absent there: TTstack creates a per-clone
+symlink to the clone's own volume. Parent image/runtime datasets must have active
+absolute mountpoints. Keep the runtime mountpoint short enough for Unix sockets.
+Do not run the import against a volume used by an existing guest.
+
+Each base revision uses a fixed `@ttsnap` snapshot. Firecracker snapshots the
+kernel dataset and root volume together, then clones both. Editing a base does
+not refresh that snapshot; import new revisions under new names. The runtime
+clone keeps the kernel, immutable configuration drive and root-volume reference.
+The jail exposes only that VM's block device, owned by its non-root VMM UID;
+it does not change ownership of the host `/dev/zvol` node. On cold start the
+current device is resolved again, so `/dev/zdN` numbers are not persisted.
+
+Stop retains the datasets and volume. Delete removes the jail and the runtime
+clones, leaving the base snapshots available for other VMs. Partially created
+clones remain attached to a failed VM record for explicit, retryable deletion.
+Do not independently destroy live clones or their base snapshots.
+
+### Host paths and recovery
+
+The `file` backend also works on a mounted ZFS filesystem. That still uses files,
+not zvols or per-VM snapshots. Keep a file rootfs and its jail on the same filesystem
+for persistent hard links. Zvol kernel/config files may cross dataset boundaries;
+TTstack copies those read-only files into the jail when necessary.
+
+Firecracker stores PID, console and sandbox metadata in `/home/ttstack/run`.
+Place that directory and the agent database on persistent storage too. Dataset
+quotas and agent disk reservations are separate limits; leave pool headroom and
+configure both deliberately. Sparse volumes reserve logical capacity in TTstack,
+not all their physical pool space. Snapshot stopped guests for an offline recovery
+point; a running-disk snapshot is not an application consistency guarantee.
+
+For systemd services, add `RequiresMountsFor=` and explicit
+`ExecStartPre=/usr/bin/mountpoint -q PATH` checks for required dataset mountpoints.
 A missing mount must fail startup rather than create replacement VM state on
 the system disk. Use stable disk identifiers when provisioning a pool; verify
 unused devices separately from TTstack deployment.
 
-The zvol backend reuses each base's `@ttsnap` snapshot for clones. Editing the base
-volume does not refresh that snapshot. Use a new base volume name for a new image
-revision. Zvol is implemented but is not covered by the current live validation.
+See [Firecracker zvol validation](firecracker-zvol-validation-2026-09-24.md) for
+the tested versions, lifecycle evidence and limits.
 
 ## Networking and platform scope
 

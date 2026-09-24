@@ -35,9 +35,11 @@ fallback. Existing unjailed processes remain queryable/stoppable during upgrade;
 their next cold start needs the new prerequisites. The jailer uses a chroot under
 `runtime_dir/.jailer`, a per-VM UID/GID in **100000–165535** derived from the allocated
 guest IP, and cgroups under `/sys/fs/cgroup/ttstack`. Reserve this UID/GID range
-from host accounts and other services. Keep runtime storage private and on one
-filesystem: Firecracker sandbox resources hard-link the VM's existing disk rather than copying
-or replacing it. Avoid long runtime paths because Unix sockets have a 108-byte limit.
+from host accounts and other services. Keep runtime storage private. File root
+disks use persistent hard links on the same filesystem as the jail. Zvol roots
+use private block-device nodes; read-only kernel/config files may be copied
+across datasets. See the [storage layouts](guest-images.md#storage).
+Avoid long runtime paths because Unix sockets have a 108-byte limit.
 
 Each VMM has a CPU quota of its vCPU count, a memory ceiling of guest RAM + 128 MiB,
 swap disabled, and a bounded thread count. Scheduling reserves the same memory

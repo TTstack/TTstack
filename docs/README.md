@@ -17,6 +17,7 @@ directory for every document category.
 | Inspect Linux engine upgrade and lifecycle regression | [Linux host upgrade validation, 2026-09-24](linux-host-upgrade-validation-2026-09-24.md) |
 | Inspect Firecracker application cold-start entropy | [Cold-start validation, 2026-09-24](firecracker-entropy-validation-2026-09-24.md) |
 | Inspect dedicated ZFS host and Firecracker restart evidence | [Restart validation, 2026-09-24](firecracker-restart-validation-2026-09-24.md) |
+| Inspect Firecracker zvol lifecycle and file fallback | [Zvol validation, 2026-09-24](firecracker-zvol-validation-2026-09-24.md) |
 | Configure distributed deployment | [Fleet template](../tools/deploy.toml.example) |
 | Contribute or choose an AI workflow | [Repository instructions](../AGENTS.md) and [Claude workflows](../.claude/README.md) |
 

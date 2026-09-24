@@ -124,10 +124,13 @@ of VMM headroom in addition to the guest's `mem`; stopped guests release both.
 
 Agent `/api/info` returns `host_id`, `resource`, `engines`, `storage`, `images` and
 `capabilities`. Linux agents advertise `guest_config`, `isolated_network`,
-`firecracker_jailer` and `firecracker_disk_resize`; hosts retain these fields. The controller rejects placement
+`firecracker_jailer`, `firecracker_disk_resize` and `firecracker_zvol`; hosts retain
+these fields. The controller rejects placement
 on older agents that do not advertise the required capabilities. Upgrade agents
 before requesting these features. Reported capabilities describe implementation
 support, not a substitute for host prerequisites or application readiness checks.
+VM placement prefers eligible ZFS hosts, then file hosts; see the
+[storage policy](guest-images.md#storage). This does not migrate existing VMs.
 
 `Vm.options` contains `isolated_network` and optional `guest_config_digest` (SHA-256),
 never configuration contents. Configuration is immutable for that VM and retained

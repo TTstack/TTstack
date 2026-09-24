@@ -10,6 +10,7 @@ requires Linux. QEMU/KVM, Firecracker and Docker/Podman are the available engine
 | Linux QEMU/KVM + file storage | Full VMs, cloud-init, TCP forwarding, disk growth | Alpine 3.21.7 and Debian 13 guests on Ubuntu 24.04.4 hosts |
 | Linux Docker | Container lifecycle and native port publishing | Temporary HTTP workload on two Ubuntu 24.04.4 hosts |
 | Linux Firecracker + file storage | Jailer, config drive, orderly shutdown, opt-in network isolation | Alpine fixture: config/read-only access, retained data, isolation, restart and cleanup on Ubuntu 24.04 |
+| Linux Firecracker + zvol | Snapshot clones, jailed block device, ext4 growth, retained disks | [Dedicated ZFS host validation](firecracker-zvol-validation-2026-09-24.md) |
 | Podman | Alternate runtime selected when Docker binary is absent | Not covered by this run |
 | QEMU + zvol | Raw ZFS volumes and snapshot clones | Not covered by this run |
 | Ubuntu cloud guest | Built-in QEMU recipe | Not covered by this run |
@@ -49,8 +50,9 @@ rules. `make doc` generates Rust API documentation, not the HTTP reference.
 
 For changes affecting live behavior, validate the affected engine's create/access,
 stop/start with retained data, agent/controller restart and final cleanup on a
-suitable host. Host reboot and ZFS-backed storage still require separate validation;
-neither was tested in the current record. No performance or maximum-capacity test
+suitable host. Host reboot on ZFS file datasets has a separate
+[restart record](firecracker-restart-validation-2026-09-24.md); zvol coverage and
+its limits are recorded in the [zvol validation](firecracker-zvol-validation-2026-09-24.md). No performance or maximum-capacity test
 has been performed by that run.
 
 ## SQLite engine assessment — 2026-09-24

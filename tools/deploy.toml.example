@@ -45,7 +45,8 @@ host = "10.0.0.2"
 # Engine run files always use /home/ttstack/run, regardless of general.user.
 
 # Optional additional agent; uncomment only after preparing its ZFS datasets.
-# Zvol is implemented for QEMU but not covered by current live validation.
+# QEMU and Firecracker can use zvol; eligible ZFS hosts are preferred for VMs.
+# See docs/guest-images.md for the distinct QEMU/Firecracker base layouts.
 # Deployment does not provision ZFS or import images.
 # [[agents]]
 # host = "10.0.0.3"
