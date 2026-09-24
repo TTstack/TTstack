@@ -11,7 +11,7 @@ Read [AGENTS.md](../../AGENTS.md) and use the boundaries in the
 [development skill](../skills/ttstack-development/SKILL.md). Read callers and
 cleanup paths, not just the patch. Focus on concrete partial-failure, retry,
 stop/start, deletion, resource accounting, authorization, and operator-experience
-problems. Linux is primary; FreeBSD is experimental.
+problems. Linux x86_64 is the supported host platform.
 
 Report actionable findings with file/line evidence, the triggering condition,
 impact, and the smallest practical correction. Separate observed defects from

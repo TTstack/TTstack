@@ -13,15 +13,12 @@ use std::fmt;
 ///
 /// Platform availability:
 /// - **Linux**: Qemu, Firecracker, Docker
-/// - **FreeBSD (experimental)**: Bhyve, Jail
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
     Qemu,
     Firecracker,
-    Bhyve,
     Docker,
-    Jail,
 }
 
 impl fmt::Display for Engine {
@@ -29,9 +26,7 @@ impl fmt::Display for Engine {
         match self {
             Self::Qemu => write!(f, "qemu"),
             Self::Firecracker => write!(f, "firecracker"),
-            Self::Bhyve => write!(f, "bhyve"),
             Self::Docker => write!(f, "docker"),
-            Self::Jail => write!(f, "jail"),
         }
     }
 }
@@ -42,9 +37,7 @@ impl std::str::FromStr for Engine {
         match s.to_ascii_lowercase().as_str() {
             "qemu" | "kvm" => Ok(Self::Qemu),
             "firecracker" | "fc" => Ok(Self::Firecracker),
-            "bhyve" => Ok(Self::Bhyve),
             "docker" | "podman" => Ok(Self::Docker),
-            "jail" => Ok(Self::Jail),
             _ => Err(format!("unknown engine: {s}")),
         }
     }
@@ -293,13 +286,7 @@ mod tests {
 
     #[test]
     fn engine_display_roundtrip() {
-        for e in [
-            Engine::Qemu,
-            Engine::Firecracker,
-            Engine::Bhyve,
-            Engine::Docker,
-            Engine::Jail,
-        ] {
+        for e in [Engine::Qemu, Engine::Firecracker, Engine::Docker] {
             let s = e.to_string();
             let parsed: Engine = s.parse().unwrap();
             assert_eq!(e, parsed);
@@ -321,11 +308,19 @@ mod tests {
 
     #[test]
     fn engine_serde_json() {
-        let e = Engine::Firecracker;
-        let json = serde_json::to_string(&e).unwrap();
-        assert_eq!(json, r#""firecracker""#);
-        let back: Engine = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, e);
+        for (engine, name) in [
+            (Engine::Qemu, "qemu"),
+            (Engine::Firecracker, "firecracker"),
+            (Engine::Docker, "docker"),
+        ] {
+            let json = serde_json::to_string(&engine).unwrap();
+            assert_eq!(json, format!("\"{name}\""));
+            assert_eq!(serde_json::from_str::<Engine>(&json).unwrap(), engine);
+        }
+        // JSON requires canonical names; CLI aliases do not change persisted formats.
+        for name in ["unknown-engine", "kvm", "fc", "podman", "QEMU", ""] {
+            assert!(serde_json::from_value::<Engine>(serde_json::json!(name)).is_err());
+        }
     }
 
     // ── Storage ─────────────────────────────────────────────────────
@@ -480,9 +475,7 @@ pub fn validate_vm_options(
     if deny_outgoing && engine == Engine::Docker {
         return Err("--deny-outgoing is not supported by Docker".into());
     }
-    if !ssh_keys.is_empty()
-        && matches!(engine, Engine::Docker | Engine::Firecracker | Engine::Bhyve)
-    {
+    if !ssh_keys.is_empty() && matches!(engine, Engine::Docker | Engine::Firecracker) {
         return Err(format!("SSH key injection is not supported by {engine}"));
     }
     if ports.contains(&0) {

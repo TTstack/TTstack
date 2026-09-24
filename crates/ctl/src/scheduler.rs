@@ -65,8 +65,7 @@ pub fn place_vm(
             h.state == HostState::Online
                 && supports(h)
                 && h.engines.contains(&spec.engine)
-                && !(h.storage == Storage::Zvol
-                    && matches!(spec.engine, Engine::Firecracker | Engine::Jail))
+                && !(h.storage == Storage::Zvol && spec.engine == Engine::Firecracker)
                 && h.resource.can_fit(cpu, mem, disk)
                 && (!check_images
                     || host_images
@@ -99,8 +98,7 @@ pub fn place_vm(
             .filter(|h| {
                 h.state == HostState::Online
                     && h.engines.contains(&spec.engine)
-                    && !(h.storage == Storage::Zvol
-                        && matches!(spec.engine, Engine::Firecracker | Engine::Jail))
+                    && !(h.storage == Storage::Zvol && spec.engine == Engine::Firecracker)
                     && h.resource.can_fit(cpu, mem, disk)
             })
             .count();

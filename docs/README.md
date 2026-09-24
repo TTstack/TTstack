@@ -14,6 +14,7 @@ directory for every document category.
 | Inspect Linux lifecycle evidence | [Linux validation, 2026-09-24](live-validation-2026-09-24.md) |
 | Inspect Firecracker configuration, isolation, and jailer evidence | [Firecracker validation, 2026-09-24](firecracker-validation-2026-09-24.md) |
 | Inspect Firecracker disk sizing and resource accounting | [Resource sizing validation, 2026-09-24](resource-sizing-validation-2026-09-24.md) |
+| Inspect Linux engine upgrade and lifecycle regression | [Linux host upgrade validation, 2026-09-24](linux-host-upgrade-validation-2026-09-24.md) |
 | Configure distributed deployment | [Fleet template](../tools/deploy.toml.example) |
 | Contribute or choose an AI workflow | [Repository instructions](../AGENTS.md) and [Claude workflows](../.claude/README.md) |
 

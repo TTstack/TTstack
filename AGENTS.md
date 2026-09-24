@@ -12,9 +12,8 @@ policies belong to callers, not to TTstack.
 - `crates/ctl` (`tt-ctl`): scheduling, environment lifecycle, fleet state, and UI.
 - `crates/cli` (`tt`): user commands, image recipes, and deployment tooling.
 
-Linux x86_64 is the primary platform. FreeBSD (Bhyve, Jail, and PF) is
-experimental; do not expand ordinary fixes into a FreeBSD parity project.
-Preserve its existing boundaries and report relevant unverified behavior.
+Linux x86_64 is the supported host platform. Keep the host implementation focused
+on QEMU/KVM, Firecracker, and Docker/Podman. Report unverified combinations clearly.
 
 ## Development and verification
 

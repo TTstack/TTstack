@@ -74,46 +74,13 @@ impl Config {
     }
 }
 
-/// Read total system memory in MiB.
-///
-/// Uses `/proc/meminfo` on Linux, `sysctl hw.physmem` on FreeBSD,
-/// `sysctl hw.memsize` on macOS.
+/// Read total system memory in MiB from the Linux host.
 fn read_total_mem_mb() -> Option<u32> {
-    #[cfg(target_os = "linux")]
-    {
-        let content = std::fs::read_to_string("/proc/meminfo").ok()?;
-        parse_mem_total(&content)
-    }
-    #[cfg(target_os = "freebsd")]
-    {
-        let output = std::process::Command::new("sysctl")
-            .arg("-n")
-            .arg("hw.physmem")
-            .output()
-            .ok()?;
-        let bytes: u64 = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse()
-            .ok()?;
-        return Some((bytes / (1024 * 1024)) as u32);
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-    {
-        let output = std::process::Command::new("sysctl")
-            .arg("-n")
-            .arg("hw.memsize")
-            .output()
-            .ok()?;
-        let bytes: u64 = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse()
-            .ok()?;
-        Some((bytes / (1024 * 1024)) as u32)
-    }
+    let content = std::fs::read_to_string("/proc/meminfo").ok()?;
+    parse_mem_total(&content)
 }
 
 /// Parse MemTotal from /proc/meminfo content.
-#[cfg(any(target_os = "linux", test))]
 fn parse_mem_total(content: &str) -> Option<u32> {
     for line in content.lines() {
         if line.starts_with("MemTotal:") {

@@ -384,6 +384,11 @@ sudo chmod 600 {path}
         r#"#!/bin/sh
 set -e
 
+if [ "$(uname -s)" != "Linux" ]; then
+    echo "deployment requires a Linux host" >&2
+    exit 1
+fi
+
 # Create service user (portable: works on glibc and busybox)
 if id {user} >/dev/null 2>&1; then
     echo "[deploy] user '{user}' exists"
@@ -630,7 +635,7 @@ fn check_output(output: std::process::Output, action: &str) -> Result<()> {
 pub async fn deploy_local(role: &str, release_dir: &str) -> Result<()> {
     if !cfg!(target_os = "linux") || !Path::new("/run/systemd/system").is_dir() {
         return Err(eg!(
-            "local deploy requires Linux with systemd; use distributed deploy for OpenRC. FreeBSD support is experimental and requires manual setup"
+            "local deploy requires Linux with systemd; use distributed deploy for Linux with OpenRC"
         ));
     }
     let uid = std::fs::read_to_string("/proc/self/status")
@@ -986,6 +991,27 @@ host = "10.0.0.3"
         assert!(script.contains("EnvironmentFile=/opt/tt/etc/tt-agent.env"));
         assert!(script.contains("TT_API_KEY=test-key"));
         assert!(!script.contains("--api-key"));
+
+        // Refuse unsupported hosts before creating users, paths or services.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tools = tempfile::tempdir().unwrap();
+            let uname = tools.path().join("uname");
+            std::fs::write(&uname, "#!/bin/sh\necho UnsupportedOS\n").unwrap();
+            std::fs::set_permissions(&uname, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let result = std::process::Command::new("/bin/sh")
+                .args(["-c", &script])
+                .env("PATH", tools.path())
+                .output()
+                .unwrap();
+            assert!(!result.status.success());
+            assert!(result.stdout.is_empty());
+            assert_eq!(
+                String::from_utf8_lossy(&result.stderr),
+                "deployment requires a Linux host\n"
+            );
+        }
     }
 }
 

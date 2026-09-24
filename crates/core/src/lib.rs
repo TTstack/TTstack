@@ -7,7 +7,7 @@
 //! by all components (CLI, controller, agent).
 //!
 //! The [`engine`], [`net`], and [`storage`] modules contain host-specific
-//! implementations. Linux is primary; FreeBSD support is experimental.
+//! implementations for Linux hosts.
 
 pub mod api;
 pub mod auth;

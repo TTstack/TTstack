@@ -386,6 +386,36 @@ mod tests {
     // ── Host CRUD ───────────────────────────────────────────────────
 
     #[test]
+    fn engine_sets_roundtrip_and_unknown_records_fail_without_mutation() {
+        let db = test_db();
+        let mut host = make_host("host");
+        host.engines = vec![Engine::Qemu, Engine::Firecracker, Engine::Docker];
+        db.put_host(&host).unwrap();
+        assert_eq!(db.get_host("host").unwrap().unwrap().engines, host.engines);
+        for engine in &host.engines {
+            let mut vm = make_vm(&engine.to_string(), "env", "host");
+            vm.engine = *engine;
+            vm.state = VmState::Stopped;
+            db.put_vm(&vm).unwrap();
+            assert_eq!(db.get_vm(&vm.id).unwrap().unwrap().engine, *engine);
+        }
+        let mut old = serde_json::to_value(&host).unwrap();
+        old["engines"] = serde_json::json!(["unsupported-engine"]);
+        let original = old.to_string();
+        db.conn
+            .execute("UPDATE hosts SET data=?1 WHERE id='host'", [&original])
+            .unwrap();
+        assert!(db.get_host("host").is_err());
+        assert!(db.list_hosts().is_err());
+        let stored: String = db
+            .conn
+            .query_row("SELECT data FROM hosts WHERE id='host'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, original);
+        assert_eq!(db.vm_count().unwrap(), 3);
+    }
+
+    #[test]
     fn host_crud() {
         let db = test_db();
         assert_eq!(db.host_count().unwrap(), 0);

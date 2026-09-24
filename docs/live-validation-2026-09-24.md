@@ -72,5 +72,5 @@ that every platform/backend or later revision is verified. See
 Rust 1.88 checks for every workspace target, and a locked release build.
 
 This run did not reboot physical hosts or test throughput, high concurrency, ZFS/zvol,
-Podman, Ubuntu guests, or FreeBSD. FreeBSD remains experimental. Running state reports
+Podman, Ubuntu guests, or other host platforms. Running state reports
 an observed engine process/container, not completion of guest boot or application readiness.

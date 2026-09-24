@@ -60,7 +60,7 @@ impl Sandbox {
                 "runtime directory is too long for a Firecracker Unix socket; use a shorter --runtime-dir"
             ));
         }
-        std::fs::create_dir_all(&sandbox.root).c(d!("create Firecracker jail"))?;
+        std::fs::create_dir_all(&sandbox.root).c(d!("create Firecracker sandbox"))?;
         let [a, b, c, d] = vm
             .ip
             .parse::<std::net::Ipv4Addr>()
@@ -87,7 +87,7 @@ impl Sandbox {
             }
             let target = sandbox.root.join(name);
             remove_file(&target)?;
-            std::fs::hard_link(&source, &target).c(d!("link image into Firecracker jail"))?;
+            std::fs::hard_link(&source, &target).c(d!("link image into Firecracker sandbox"))?;
             chown(&target, Some(uid), Some(uid)).c(d!("guest file ownership"))?;
             std::fs::set_permissions(
                 &target,
@@ -141,10 +141,14 @@ impl Sandbox {
     }
 
     pub fn cleanup(&self) -> Result<()> {
-        match std::fs::remove_dir_all(self.root.parent().ok_or_else(|| eg!("invalid jail path"))?) {
+        match std::fs::remove_dir_all(
+            self.root
+                .parent()
+                .ok_or_else(|| eg!("invalid sandbox path"))?,
+        ) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).c(d!("remove Firecracker jail")),
+            Err(e) => return Err(e).c(d!("remove Firecracker sandbox")),
         }
         match std::fs::remove_dir(&self.cgroup) {
             Ok(()) => Ok(()),

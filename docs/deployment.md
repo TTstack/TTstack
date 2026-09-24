@@ -36,7 +36,7 @@ their next cold start needs the new prerequisites. The jailer uses a chroot unde
 `runtime_dir/.jailer`, a per-VM UID/GID in **100000–165535** derived from the allocated
 guest IP, and cgroups under `/sys/fs/cgroup/ttstack`. Reserve this UID/GID range
 from host accounts and other services. Keep runtime storage private and on one
-filesystem: jail resources hard-link the VM's existing disk rather than copying
+filesystem: Firecracker sandbox resources hard-link the VM's existing disk rather than copying
 or replacing it. Avoid long runtime paths because Unix sockets have a 108-byte limit.
 
 Each VMM has a CPU quota of its vCPU count, a memory ceiling of guest RAM + 128 MiB,
@@ -126,7 +126,7 @@ keys must use only letters, digits, `-`, `_` and `.`.
 Distributed deployment detects systemd or OpenRC. OpenRC and musl targets are
 implemented but not covered by the current live validation. The fallback on hosts
 with neither init system is an unmanaged background process, not a persistent
-service setup. FreeBSD deployment is **experimental and manual**.
+service setup. Deployment targets must be Linux hosts.
 
 Deployment does **not** register agents or distribute images. Configure the CLI
 with the printed controller address/key, prepare images on the relevant hosts,
@@ -173,3 +173,16 @@ guests after a host reboot. Inspect their observed state and start stopped guest
 See [lifecycle and recovery](rest-api.md#lifecycle-and-recovery) for timeouts,
 failed operations and expiry cleanup, and [compatibility](compatibility.md) for
 tested combinations.
+
+## Upgrade compatibility
+
+Before upgrading, back up controller and agent SQLite state together with retained
+VM disks. All tracked engines must be among the current `qemu`, `firecracker`,
+and `docker` values, including cached host engine lists. Unknown engine values
+are rejected, never mapped to another backend or silently deleted. If old state
+contains an unsupported engine, use its compatible prior release to drain/remove
+those workloads and unregister their hosts before upgrading. Do not edit raw state
+to pretend that an existing workload uses a different engine.
+
+The retained engine names and state schema are unchanged. Ordinary Linux
+workspaces keep their identities, disks and lifecycle state through an upgrade.

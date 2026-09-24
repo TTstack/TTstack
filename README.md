@@ -8,8 +8,8 @@ TTstack manages VMs and containers across a small fleet of hosts for developers
 and small teams. Its focus is creating temporary environments, accessing them,
 and reliably stopping, restarting and deleting them.
 
-Linux x86_64 is the primary host platform. **FreeBSD support is experimental**
-(Bhyve, Jail and PF), outside the primary reliability and CI scope.
+Linux x86_64 is the supported host platform, with QEMU/KVM, Firecracker, and
+Docker/Podman engines.
 
 ## Architecture
 
@@ -85,8 +85,7 @@ For multiple hosts, use [distributed deployment](docs/deployment.md#distributed-
   Limits of 50 hosts and 1000 tracked VMs are guardrails, not tested fleet capacity.
 - QEMU cloud images support root SSH key injection and virtual-disk growth.
   Firecracker uses a prepared kernel/rootfs and supports creation-time ext4 growth;
-  its built-in recipe only checks boot
-  and networking. Docker requires a long-running image default command.
+  its built-in recipe only checks boot and networking. Docker requires a long-running image default command.
 - Firecracker uses jailer and per-VM resource limits, supports opaque read-only
   guest configuration, and requests orderly shutdown before forced termination.
   Linux QEMU/Firecracker can opt into host-enforced guest network isolation. See

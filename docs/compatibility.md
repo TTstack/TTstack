@@ -1,9 +1,7 @@
 # Compatibility and validation scope
 
-Linux x86_64 is the primary host implementation and CI target. **All FreeBSD
-support is experimental**, including Bhyve, Jail, PF networking and manual service
-setup. It is outside the primary reliability/fix scope and has no guarantee of
-complete lifecycle or guest compatibility.
+Linux x86_64 is the supported host implementation and CI target. The host agent
+requires Linux. QEMU/KVM, Firecracker and Docker/Podman are the available engines.
 
 ## Implementation versus live verification
 
@@ -17,7 +15,6 @@ complete lifecycle or guest compatibility.
 | Ubuntu cloud guest | Built-in QEMU recipe | Not covered by this run |
 | Linux/systemd deployment | Local and distributed service generation | Temporary systemd services exercised; not every deploy configuration |
 | Linux/OpenRC, musl binaries | Distributed deployment support | Not covered by this run |
-| FreeBSD Bhyve/Jail/PF | Experimental, manual setup; Bhyve rejects in-place restart | Not covered by this run |
 | Other host platforms | No validated agent deployment path | No support commitment |
 
 The [2026-09-24 validation record](live-validation-2026-09-24.md) identifies the
@@ -29,6 +26,11 @@ The [Firecracker follow-up record](firecracker-validation-2026-09-24.md) covers
 configuration drives, jailed execution, shutdown fallback and isolation. Its stated
 limits include QEMU isolation and legacy unjailed-VMM upgrades, which remain untested
 in that run.
+
+The [Linux host upgrade record](linux-host-upgrade-validation-2026-09-24.md)
+checks the retained engines across an agent/controller binary upgrade, new
+provisioning, stop/start, access, persistence and cleanup. Refer to that record
+for its exact fixture and validation limits.
 
 ## Build and CI
 
@@ -98,7 +100,8 @@ binary also passed. This check did not boot guests or exercise the remote hosts.
 - No automatic guest restart after host reboot, migration, HA, distributed storage,
   image distribution or application/database provisioning.
 - Docker does not support managed SSH keys, disk quotas or outgoing restrictions.
-  Firecracker does not support managed SSH keys, interactive consoles or disk resizing.
+  Firecracker supports creation-time ext4 growth, but not managed SSH keys,
+  interactive consoles or resizing existing VMs.
 - Runtime and guest dependencies remain the operator's responsibility. Prefer
   QEMU cloud images for full VMs and prepared long-running Docker images for services.
 

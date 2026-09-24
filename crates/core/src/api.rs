@@ -23,7 +23,7 @@ pub struct CreateVmReq {
     /// UTF-8 files on a read-only configuration drive (Firecracker only).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub guest_config: crate::guest_config::GuestConfig,
-    /// Root SSH public keys for QEMU cloud-init or experimental Jail.
+    /// Root SSH public keys for QEMU cloud-init.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ssh_keys: Vec<String>,
 }

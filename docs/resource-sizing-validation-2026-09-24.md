@@ -51,7 +51,7 @@ ext4 regression checks file preservation, exact filesystem growth, no-op sizing,
 shrink refusal and invalid-image failure. Scheduler tests cover legacy-agent
 capability refusal and configuration-drive capacity accounting across multiple VMs.
 
-Large resource ceilings, performance, resizing an existing VM, FreeBSD and other
+Large resource ceilings, performance, resizing an existing VM, other host platforms and other
 storage engines were not tested or added by this change. Resource policy remains
 with callers; TTstack checks generic engine support and host capacity.
 

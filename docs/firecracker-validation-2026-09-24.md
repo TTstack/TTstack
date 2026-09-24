@@ -40,7 +40,7 @@ it is a functional check, not a performance or security certification.
 | Routed egress | Guest reached a controlled HTTP endpoint outside the guest network namespace |
 | Host access | Guest could not reach the agent via either the bridge address or the namespace's external interface address |
 | Peer access | Guest could not reach the second isolated guest's HTTP service |
-| Jailer | Distinct non-root UIDs 100002 and 100003; `/proc/PID/root` inode matched each jail root; seccomp filtering was active |
+| Jailer | Distinct non-root UIDs 100002 and 100003; `/proc/PID/root` inode matched each sandbox root; seccomp filtering was active |
 | Kernel resource ceilings | Per-VMM `cpu.max`, `memory.max` and cgroup placement matched the requested limits |
 | Agent restart | Existing guests remained running, boot counters stayed at 2, and forwarding worked after firewall recovery |
 | Controller restart | Existing environment/VM identity survived reopening the same database |
@@ -77,7 +77,7 @@ remote runs exercised the same disk layout, jailer, shutdown and firewall paths.
 
 This run did not reboot the physical host, test a legacy unjailed VMM upgrade,
 exercise QEMU with the new isolation option, or perform adversarial packet fuzzing.
-It did not verify public Internet connectivity, IPv6 applications, ARM, FreeBSD,
+It did not verify public Internet connectivity, IPv6 applications, ARM, other host platforms,
 ZFS, high concurrency or maximum capacity. MAC/IP/ARP and IPv6 filtering rules were
 installed successfully but were not exhaustively attacked. Use host firewalls and
 application authentication to restrict published ports; guest isolation is not a

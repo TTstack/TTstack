@@ -24,7 +24,7 @@ axum = "0.8.9"
 reqwest = { version = "0.13.5", features = ["json"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 uuid = { version = "1.26.1", features = ["v4"] }
-nix = { version = "0.31.3", features = ["net", "socket", "ioctl", "fs", "signal"] }
+nix = { version = "0.31.3", features = ["signal"] }
 tempfile = "3.27.0"
 toml = "1.1.6"
 sha2 = "0.11.0"

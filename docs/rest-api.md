@@ -67,18 +67,18 @@ Each `VmSpec` accepts:
 | Field | Type | Default / meaning |
 |---|---|---|
 | `image` | string | Required; file/zvol image name or container image reference |
-| `engine` | string | `qemu` by default; JSON values: `qemu`, `firecracker`, `docker`, `bhyve`, `jail` |
+| `engine` | string | `qemu` by default; JSON values: `qemu`, `firecracker`, `docker` |
 | `cpu` | integer | Positive vCPU count; default 2 |
 | `mem` | integer | Positive memory in MiB; default 1024 |
 | `disk` | integer | Disk size in MiB. QEMU defaults to 40960; Firecracker defaults to the base rootfs size and allows creation-time ext4 growth. Omit for other engines |
-| `ports` | integer[] | TCP guest ports to expose; default empty; port 22 is added for QEMU/Bhyve/Jail |
+| `ports` | integer[] | TCP guest ports to expose; default empty; port 22 is added for QEMU |
 | `deny_outgoing` | boolean | Default false; block routed outgoing initiation, not host/guest isolation; rejected for Docker |
 | `isolated_network` | boolean | Default false; Linux QEMU/Firecracker only; block peers, guest-initiated host access, private/link-local destinations and IPv6; allow public IPv4 egress and replies to inbound connections |
 | `guest_config` | object | Default `{}`; Firecracker only; up to 32 simple file names mapped to UTF-8 strings, 64 KiB total names/content; attached as a read-only config drive |
-| `ssh_keys` | string[] | Empty; merged with environment keys; QEMU cloud-init / experimental Jail only |
+| `ssh_keys` | string[] | Empty; merged with environment keys; QEMU cloud-init only |
 
 CLI engine aliases such as `kvm`, `fc` and `podman` are not JSON enum values.
-Bhyve and Jail are experimental. SSH keys are complete public-key strings in JSON,
+SSH keys are complete public-key strings in JSON,
 not local file paths. If an environment mixes engines, use per-VM keys only for
 engines that support injection. Other engine-specific requirements are in the
 [image guide](guest-images.md).

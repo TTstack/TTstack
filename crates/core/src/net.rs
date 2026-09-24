@@ -6,16 +6,15 @@
 //! - Firewall NAT rules for port forwarding
 //!
 //! **Linux**: uses `ip`, `nftables`
-//! **FreeBSD**: uses `ifconfig`, `pf`
 
 use crate::command::CommandExt;
 #[cfg(target_os = "linux")]
 mod isolation;
 #[cfg(target_os = "linux")]
 pub use isolation::{isolate, remove_isolation};
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(target_os = "linux")]
 use ruc::*;
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(target_os = "linux")]
 use std::process::Command;
 
 /// Default bridge name on each host.
@@ -266,188 +265,25 @@ mod platform {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// FreeBSD implementation
-// ═══════════════════════════════════════════════════════════════════
-
-#[cfg(target_os = "freebsd")]
-mod platform {
-    use super::*;
-
-    pub fn setup_bridge() -> Result<()> {
-        if bridge_exists()? {
-            return Ok(());
-        }
-
-        run(&["ifconfig", "bridge", "create", "name", BRIDGE_NAME])?;
-        run(&["ifconfig", BRIDGE_NAME, "inet", BRIDGE_CIDR])?;
-        run(&["ifconfig", BRIDGE_NAME, "up"])?;
-
-        // Enable IP forwarding
-        run(&["sysctl", "net.inet.ip.forwarding=1"])?;
-
-        Ok(())
-    }
-
-    pub fn bridge_exists() -> Result<bool> {
-        let output = Command::new("ifconfig")
-            .arg(BRIDGE_NAME)
-            .bounded_output()
-            .c(d!())?;
-        Ok(output.status.success())
-    }
-
-    pub fn create_tap(vm_id: &str) -> Result<()> {
-        let tap = tap_name(vm_id);
-
-        run(&["ifconfig", "tap", "create", "name", &tap])?;
-        run(&["ifconfig", BRIDGE_NAME, "addm", &tap])?;
-        run(&["ifconfig", &tap, "up"])?;
-
-        Ok(())
-    }
-
-    pub fn destroy_tap(vm_id: &str) -> Result<()> {
-        let tap = tap_name(vm_id);
-        let _ = run(&["ifconfig", &tap, "destroy"]);
-        Ok(())
-    }
-
-    pub fn setup_nat() -> Result<()> {
-        // PF should be configured in /etc/pf.conf
-        // We only enable it here
-        let _ = run(&["pfctl", "-e"]);
-        Ok(())
-    }
-
-    pub fn add_port_forward(host_port: u16, vm_ip_addr: &str, guest_port: u16) -> Result<()> {
-        // Add a PF rdr rule via pfctl
-        let rule = format!(
-            "rdr pass on egress proto tcp from any to any port {host_port} -> {vm_ip_addr} port {guest_port}"
-        );
-        let output = Command::new("sh")
-            .args(["-c", &format!(r#"echo '{rule}' | pfctl -a ttstack -f -"#)])
-            .bounded_output()
-            .c(d!("pfctl rdr"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(eg!("pfctl rdr failed: {}", stderr));
-        }
-        Ok(())
-    }
-
-    pub fn remove_port_forwards(vm_ip_addr: &str) -> Result<()> {
-        // List current rules and remove only those matching this VM's IP
-        let output = Command::new("pfctl")
-            .args(["-a", "ttstack", "-s", "rules"])
-            .bounded_output();
-
-        if let Ok(output) = output {
-            let rules = String::from_utf8_lossy(&output.stdout);
-            let remaining: Vec<&str> = rules
-                .lines()
-                .filter(|line| !line.contains(vm_ip_addr))
-                .collect();
-
-            if remaining.is_empty() {
-                // No rules left — flush the anchor
-                let _ = run(&["pfctl", "-a", "ttstack", "-F", "rules"]);
-            } else {
-                // Reload only the remaining rules
-                let new_rules = remaining.join("\n");
-                let _ = Command::new("sh")
-                    .args([
-                        "-c",
-                        &format!(r#"echo '{}' | pfctl -a ttstack -f -"#, new_rules),
-                    ])
-                    .bounded_output();
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn deny_outgoing(vm_ip_addr: &str) -> Result<()> {
-        let rule = format!("block out quick on egress from {vm_ip_addr} to any");
-        let output = Command::new("sh")
-            .args([
-                "-c",
-                &format!(r#"echo '{rule}' | pfctl -a ttstack/deny -f -"#),
-            ])
-            .bounded_output()
-            .c(d!("pfctl deny"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(eg!("pfctl deny failed: {}", stderr));
-        }
-        Ok(())
-    }
-
-    pub fn allow_outgoing(vm_ip_addr: &str) -> Result<()> {
-        // List current deny rules and remove only those matching this VM's IP
-        let output = Command::new("pfctl")
-            .args(["-a", "ttstack/deny", "-s", "rules"])
-            .bounded_output();
-
-        if let Ok(output) = output {
-            let rules = String::from_utf8_lossy(&output.stdout);
-            let remaining: Vec<&str> = rules
-                .lines()
-                .filter(|line| !line.contains(vm_ip_addr))
-                .collect();
-
-            if remaining.is_empty() {
-                let _ = run(&["pfctl", "-a", "ttstack/deny", "-F", "rules"]);
-            } else {
-                let new_rules = remaining.join("\n");
-                let _ = Command::new("sh")
-                    .args([
-                        "-c",
-                        &format!(r#"echo '{}' | pfctl -a ttstack/deny -f -"#, new_rules),
-                    ])
-                    .bounded_output();
-            }
-        }
-
-        Ok(())
-    }
-
-    fn run(args: &[&str]) -> Result<()> {
-        let output = Command::new(args[0])
-            .args(&args[1..])
-            .bounded_output()
-            .c(d!(args.join(" ")))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(eg!("{}: {}", args.join(" "), stderr));
-        }
-
-        Ok(())
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════
 // Public re-exports (dispatches to platform module)
 // ═══════════════════════════════════════════════════════════════════
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(target_os = "linux")]
 pub fn setup_bridge() -> Result<()> {
     platform::setup_bridge()
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(target_os = "linux")]
 pub fn setup_nat() -> Result<()> {
     platform::setup_nat()
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(target_os = "linux")]
 pub fn create_tap(vm_id: &str, _vm_ip_addr: &str) -> Result<()> {
     platform::create_tap(vm_id)
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(target_os = "linux")]
 pub fn destroy_tap(vm_id: &str) -> Result<()> {
     platform::destroy_tap(vm_id)
 }
@@ -459,22 +295,22 @@ pub fn prepare_jailed_tap(vm_id: &str, uid: u32) -> Result<()> {
     platform::create_tap_owned(vm_id, Some(uid))
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(target_os = "linux")]
 pub fn add_port_forward(host_port: u16, vm_ip_addr: &str, guest_port: u16) -> Result<()> {
     platform::add_port_forward(host_port, vm_ip_addr, guest_port)
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(target_os = "linux")]
 pub fn remove_port_forwards(vm_ip_addr: &str) -> Result<()> {
     platform::remove_port_forwards(vm_ip_addr)
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(target_os = "linux")]
 pub fn deny_outgoing(vm_ip_addr: &str) -> Result<()> {
     platform::deny_outgoing(vm_ip_addr)
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(target_os = "linux")]
 pub fn allow_outgoing(vm_ip_addr: &str) -> Result<()> {
     platform::allow_outgoing(vm_ip_addr)
 }
