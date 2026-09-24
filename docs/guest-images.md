@@ -124,6 +124,16 @@ userspace dependencies. TTstack passes `root=/dev/vda rw init=/sbin/init` plus a
 static `ip=ADDRESS::10.10.0.1:255.255.0.0::eth0:off` argument. The guest must apply
 that address, either through kernel IP configuration or its init process.
 
+TTstack attaches a rate-limited virtio entropy device for reliable cold starts.
+Use a maintained guest kernel with built-in `CONFIG_HW_RANDOM=y` and
+`CONFIG_HW_RANDOM_VIRTIO=y`; without its driver, applications that need secure
+randomness can wait minutes for the kernel's random pool to initialize. Do not
+reuse a fixed random seed or disable secure randomness to shorten boot time.
+The Firecracker binary must support the
+[entropy device configuration](https://github.com/firecracker-microvm/firecracker/blob/main/docs/entropy.md)
+(verified with Firecracker 1.17.0). The built-in `fc-alpine` recipe is only a boot
+smoke test; its legacy kernel is not a maintained application image.
+
 ```bash
 sudo /opt/ttstack/bin/tt image create fc-alpine
 /opt/ttstack/bin/tt env create micro --image fc-alpine --engine firecracker \

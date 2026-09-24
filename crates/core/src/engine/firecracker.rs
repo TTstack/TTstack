@@ -34,6 +34,9 @@ fn configuration(vm: &Vm, mac: &str) -> serde_json::Value {
             "boot_args": format!("console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/sbin/init ip={}::10.10.0.1:255.255.0.0::eth0:off", vm.ip)
         },
         "drives": drives,
+        // Cold guests need a source of entropy before applications can safely
+        // use getrandom(); waiting for incidental device activity can take minutes.
+        "entropy": { "rate_limiter": { "bandwidth": { "size": 4096, "refill_time": 100 } } },
         "machine-config": { "vcpu_count": vm.cpu, "mem_size_mib": vm.mem },
         "network-interfaces": [{ "iface_id": "eth0", "host_dev_name": crate::net::tap_name(&vm.id), "guest_mac": mac }]
     })
