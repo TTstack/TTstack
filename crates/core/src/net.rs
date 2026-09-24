@@ -8,6 +8,7 @@
 //! **Linux**: uses `ip`, `nftables`
 //! **FreeBSD**: uses `ifconfig`, `pf`
 
+use crate::command::CommandExt;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use ruc::*;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -57,6 +58,7 @@ mod platform {
 
     pub fn setup_bridge() -> Result<()> {
         if bridge_exists()? {
+            std::fs::write("/proc/sys/net/ipv4/ip_forward", "1").c(d!("enable ip_forward"))?;
             return Ok(());
         }
 
@@ -73,7 +75,7 @@ mod platform {
     pub fn bridge_exists() -> Result<bool> {
         let output = Command::new("ip")
             .args(["link", "show", BRIDGE_NAME])
-            .output()
+            .bounded_output()
             .c(d!())?;
         Ok(output.status.success())
     }
@@ -81,7 +83,9 @@ mod platform {
     pub fn create_tap(vm_id: &str) -> Result<()> {
         let tap = tap_name(vm_id);
 
-        run(&["ip", "tuntap", "add", "dev", &tap, "mode", "tap"])?;
+        if !link_exists(&tap)? {
+            run(&["ip", "tuntap", "add", "dev", &tap, "mode", "tap"])?;
+        }
         run(&["ip", "link", "set", &tap, "master", BRIDGE_NAME])?;
         run(&["ip", "link", "set", &tap, "up"])?;
 
@@ -90,7 +94,9 @@ mod platform {
 
     pub fn destroy_tap(vm_id: &str) -> Result<()> {
         let tap = tap_name(vm_id);
-        let _ = run(&["ip", "link", "del", &tap]);
+        if link_exists(&tap)? {
+            run(&["ip", "link", "del", &tap])?;
+        }
         Ok(())
     }
 
@@ -108,8 +114,21 @@ mod platform {
         // Flush both chains on startup to avoid duplicate/stale rules.
         // Per-VM port forwards in prerouting will be restored from the
         // database by the agent's recovery loop.
-        let _ = nft(&format!("flush chain ip {NFT_TABLE} postrouting"));
-        let _ = nft(&format!("flush chain ip {NFT_TABLE} prerouting"));
+        nft(&format!("flush chain ip {NFT_TABLE} postrouting"))?;
+        nft(&format!("flush chain ip {NFT_TABLE} prerouting"))?;
+        nft(&format!(
+            "add set ip {NFT_TABLE} denylist {{ type ipv4_addr; }}"
+        ))?;
+        nft(&format!(
+            "add chain ip {NFT_TABLE} forward {{ type filter hook forward priority 0; policy accept; }}"
+        ))?;
+        nft(&format!("flush chain ip {NFT_TABLE} forward"))?;
+        nft(&format!(
+            "add rule ip {NFT_TABLE} forward ct direction reply accept"
+        ))?;
+        nft(&format!(
+            "add rule ip {NFT_TABLE} forward ip saddr @denylist drop"
+        ))?;
 
         nft(&format!(
             "add rule ip {NFT_TABLE} postrouting ip saddr 10.10.0.0/16 masquerade"
@@ -127,83 +146,103 @@ mod platform {
     pub fn remove_port_forwards(vm_ip_addr: &str) -> Result<()> {
         let output = Command::new("nft")
             .args(["-a", "list", "chain", "ip", NFT_TABLE, "prerouting"])
-            .output()
+            .bounded_output()
             .c(d!())?;
 
         if !output.status.success() {
-            return Ok(());
+            return Err(eg!(
+                "cannot list NAT rules: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
         }
 
         let listing = String::from_utf8_lossy(&output.stdout);
         for line in listing.lines() {
-            if line.contains(vm_ip_addr)
+            if line
+                .split_whitespace()
+                .any(|part| part.split(':').next() == Some(vm_ip_addr))
                 && let Some(handle) = line
                     .rsplit("handle ")
                     .next()
                     .and_then(|h| h.trim().parse::<u64>().ok())
             {
-                let _ = nft(&format!(
+                nft(&format!(
                     "delete rule ip {NFT_TABLE} prerouting handle {handle}"
-                ));
+                ))?;
             }
         }
 
         Ok(())
     }
 
-    pub fn deny_outgoing(vm_ip_addr: &str) -> Result<()> {
-        let _ = nft(&format!(
-            "add set ip {NFT_TABLE} denylist {{ type ipv4_addr; }}"
-        ));
-        let _ = nft(&format!(
-            "add chain ip {NFT_TABLE} forward {{ type filter hook forward priority 0; policy accept; }}"
-        ));
-        let _ = nft(&format!(
-            "add rule ip {NFT_TABLE} forward ip saddr @denylist drop"
-        ));
-
-        nft(&format!(
-            "add element ip {NFT_TABLE} denylist {{ {vm_ip_addr} }}"
-        ))
+    fn is_denied(vm_ip_addr: &str) -> Result<bool> {
+        let output = Command::new("nft")
+            .args(["list", "set", "ip", NFT_TABLE, "denylist"])
+            .output_timeout(std::time::Duration::from_secs(10))
+            .c(d!("list denylist"))?;
+        if !output.status.success() {
+            return Err(eg!("cannot read outgoing firewall rules"));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .split(|c: char| c.is_whitespace() || ",{}".contains(c))
+            .any(|s| s == vm_ip_addr))
     }
-
+    pub fn deny_outgoing(vm_ip_addr: &str) -> Result<()> {
+        if !is_denied(vm_ip_addr)? {
+            nft(&format!(
+                "add element ip {NFT_TABLE} denylist {{ {vm_ip_addr} }}"
+            ))?;
+        }
+        Ok(())
+    }
     pub fn allow_outgoing(vm_ip_addr: &str) -> Result<()> {
-        let _ = nft(&format!(
-            "delete element ip {NFT_TABLE} denylist {{ {vm_ip_addr} }}"
-        ));
+        if is_denied(vm_ip_addr)? {
+            nft(&format!(
+                "delete element ip {NFT_TABLE} denylist {{ {vm_ip_addr} }}"
+            ))?;
+        }
         Ok(())
     }
 
-    fn nft(rule: &str) -> Result<()> {
-        use std::io::Write;
-        let mut child = Command::new("nft")
-            .arg("-f")
-            .arg("-")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .c(d!("nft spawn"))?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(rule.as_bytes());
-            let _ = stdin.write_all(b"\n");
-        }
-
-        let output = child.wait_with_output().c(d!("nft wait"))?;
-
+    fn link_exists(name: &str) -> Result<bool> {
+        let output = Command::new("ip")
+            .args(["-j", "link", "show"])
+            .output_timeout(std::time::Duration::from_secs(10))
+            .c(d!("list links"))?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(eg!("nft {}: {}", rule, stderr));
+            return Err(eg!("cannot list network interfaces"));
         }
+        let links: Vec<serde_json::Value> =
+            serde_json::from_slice(&output.stdout).c(d!("parse interfaces"))?;
+        Ok(links
+            .iter()
+            .any(|link| link["ifname"].as_str() == Some(name)))
+    }
 
+    fn nft(rule: &str) -> Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut input = tempfile::tempfile().c(d!("nft input"))?;
+        writeln!(input, "{rule}").c(d!("write nft input"))?;
+        input.seek(SeekFrom::Start(0)).c(d!())?;
+        let output = Command::new("nft")
+            .args(["-f", "-"])
+            .stdin(input)
+            .output_timeout(std::time::Duration::from_secs(10))
+            .c(d!("nft"))?;
+        if !output.status.success() {
+            return Err(eg!(
+                "nft {}: {}",
+                rule,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
         Ok(())
     }
 
     fn run(args: &[&str]) -> Result<()> {
         let output = Command::new(args[0])
             .args(&args[1..])
-            .output()
+            .bounded_output()
             .c(d!(args.join(" ")))?;
 
         if !output.status.success() {
@@ -239,7 +278,10 @@ mod platform {
     }
 
     pub fn bridge_exists() -> Result<bool> {
-        let output = Command::new("ifconfig").arg(BRIDGE_NAME).output().c(d!())?;
+        let output = Command::new("ifconfig")
+            .arg(BRIDGE_NAME)
+            .bounded_output()
+            .c(d!())?;
         Ok(output.status.success())
     }
 
@@ -273,7 +315,7 @@ mod platform {
         );
         let output = Command::new("sh")
             .args(["-c", &format!(r#"echo '{rule}' | pfctl -a ttstack -f -"#)])
-            .output()
+            .bounded_output()
             .c(d!("pfctl rdr"))?;
 
         if !output.status.success() {
@@ -287,7 +329,7 @@ mod platform {
         // List current rules and remove only those matching this VM's IP
         let output = Command::new("pfctl")
             .args(["-a", "ttstack", "-s", "rules"])
-            .output();
+            .bounded_output();
 
         if let Ok(output) = output {
             let rules = String::from_utf8_lossy(&output.stdout);
@@ -307,7 +349,7 @@ mod platform {
                         "-c",
                         &format!(r#"echo '{}' | pfctl -a ttstack -f -"#, new_rules),
                     ])
-                    .output();
+                    .bounded_output();
             }
         }
 
@@ -321,7 +363,7 @@ mod platform {
                 "-c",
                 &format!(r#"echo '{rule}' | pfctl -a ttstack/deny -f -"#),
             ])
-            .output()
+            .bounded_output()
             .c(d!("pfctl deny"))?;
 
         if !output.status.success() {
@@ -335,7 +377,7 @@ mod platform {
         // List current deny rules and remove only those matching this VM's IP
         let output = Command::new("pfctl")
             .args(["-a", "ttstack/deny", "-s", "rules"])
-            .output();
+            .bounded_output();
 
         if let Ok(output) = output {
             let rules = String::from_utf8_lossy(&output.stdout);
@@ -353,7 +395,7 @@ mod platform {
                         "-c",
                         &format!(r#"echo '{}' | pfctl -a ttstack/deny -f -"#, new_rules),
                     ])
-                    .output();
+                    .bounded_output();
             }
         }
 
@@ -363,7 +405,7 @@ mod platform {
     fn run(args: &[&str]) -> Result<()> {
         let output = Command::new(args[0])
             .args(&args[1..])
-            .output()
+            .bounded_output()
             .c(d!(args.join(" ")))?;
 
         if !output.status.success() {
@@ -451,7 +493,10 @@ mod tests {
             assert!(seen.insert(ip.clone()), "duplicate IP at index {i}: {ip}");
             // Verify no .0 or .255 in last octet
             let lo: u32 = ip.rsplit('.').next().unwrap().parse().unwrap();
-            assert!(lo >= 1 && lo <= 254, "invalid lo octet {lo} at index {i}");
+            assert!(
+                (1..=254).contains(&lo),
+                "invalid lo octet {lo} at index {i}"
+            );
         }
     }
 

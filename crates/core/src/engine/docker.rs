@@ -1,9 +1,10 @@
 //! Docker / Podman container engine implementation.
 //!
 //! Auto-detects whether `docker` or `podman` is available and uses
-//! whichever is found (preferring podman for rootless operation).
+//! whichever is found (preferring Docker).
 
 use super::VmEngine;
+use crate::command::CommandExt;
 use crate::model::{Vm, VmState};
 use ruc::*;
 use std::process::Command;
@@ -16,7 +17,7 @@ use std::sync::LazyLock;
 static RUNTIME: LazyLock<&'static str> = LazyLock::new(|| {
     if Command::new("docker")
         .arg("--version")
-        .output()
+        .bounded_output()
         .map(|o| o.status.success())
         .unwrap_or(false)
     {
@@ -41,6 +42,35 @@ impl DockerEngine {
 
     fn runtime() -> &'static str {
         &RUNTIME
+    }
+
+    fn inspect(&self, vm: &Vm) -> Result<Option<VmState>> {
+        let output = Command::new(Self::runtime())
+            .args([
+                "inspect",
+                "-f",
+                "{{.State.Status}}",
+                &Self::container_name(vm),
+            ])
+            .output_timeout(std::time::Duration::from_secs(10))
+            .c(d!("inspect container"))?;
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            let lower = error.to_lowercase();
+            if lower.contains("no such object")
+                || lower.contains("no such container")
+                || lower.contains("no container with name or id")
+            {
+                return Ok(None);
+            }
+            return Err(eg!(format!("container inspect failed: {error}")));
+        }
+        Ok(Some(match String::from_utf8_lossy(&output.stdout).trim() {
+            "running" => VmState::Running,
+            "paused" => VmState::Paused,
+            "exited" | "created" => VmState::Stopped,
+            _ => VmState::Failed,
+        }))
     }
 
     /// Container name derived from VM id.
@@ -73,25 +103,44 @@ impl VmEngine for DockerEngine {
         // The image name is used directly as the container image reference
         cmd.arg(&vm.image);
 
-        let output = cmd.output().c(d!("failed to spawn container"))?;
+        let output = cmd.bounded_output().c(d!("failed to spawn container"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(eg!("{} run failed: {}", rt, stderr));
         }
 
+        if self.state(vm)? != VmState::Running {
+            return Err(eg!(
+                "container exited during creation; use an image with a long-running command"
+            ));
+        }
         Ok(())
     }
 
     fn start(&self, vm: &Vm) -> Result<()> {
         let name = Self::container_name(vm);
+        let action = if self.state(vm)? == VmState::Paused {
+            "unpause"
+        } else {
+            "start"
+        };
         let output = Command::new(Self::runtime())
-            .args(["start", &name])
-            .output()
+            .args([action, &name])
+            .bounded_output()
             .c(d!())?;
 
         if !output.status.success() {
-            return Err(eg!("container start failed"));
+            return Err(eg!(
+                "container {action} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        if self.state(vm)? != VmState::Running {
+            return Err(eg!(
+                "container exited during startup; check {} logs {name}",
+                Self::runtime()
+            ));
         }
         Ok(())
     }
@@ -100,7 +149,7 @@ impl VmEngine for DockerEngine {
         let name = Self::container_name(vm);
         let output = Command::new(Self::runtime())
             .args(["stop", "-t", "10", &name])
-            .output()
+            .bounded_output()
             .c(d!())?;
 
         if !output.status.success() {
@@ -110,11 +159,14 @@ impl VmEngine for DockerEngine {
     }
 
     fn destroy(&self, vm: &Vm) -> Result<()> {
+        if self.inspect(vm)?.is_none() {
+            return Ok(());
+        }
         let name = Self::container_name(vm);
         // Force remove the container
         let output = Command::new(Self::runtime())
             .args(["rm", "-f", &name])
-            .output()
+            .bounded_output()
             .c(d!())?;
 
         if !output.status.success() {
@@ -124,23 +176,7 @@ impl VmEngine for DockerEngine {
     }
 
     fn state(&self, vm: &Vm) -> Result<VmState> {
-        let name = Self::container_name(vm);
-        let output = Command::new(Self::runtime())
-            .args(["inspect", "-f", "{{.State.Status}}", &name])
-            .output()
-            .c(d!())?;
-
-        if !output.status.success() {
-            return Ok(VmState::Stopped);
-        }
-
-        let status = String::from_utf8_lossy(&output.stdout);
-        match status.trim() {
-            "running" => Ok(VmState::Running),
-            "paused" => Ok(VmState::Paused),
-            "exited" | "dead" | "created" => Ok(VmState::Stopped),
-            _ => Ok(VmState::Failed),
-        }
+        Ok(self.inspect(vm)?.unwrap_or(VmState::Failed))
     }
 
     fn name(&self) -> &'static str {

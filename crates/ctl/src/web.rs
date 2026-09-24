@@ -189,12 +189,12 @@ const FRONTEND_HTML: &str = r##"<!DOCTYPE html>
     </div>
     <div class="row">
       <div><label>Engine</label>
-        <select id="env-engine">
+        <select id="env-engine" onchange="updateEngineOptions()">
           <option value="qemu">QEMU</option>
           <option value="firecracker">Firecracker</option>
           <option value="docker">Docker</option>
-          <option value="bhyve">Bhyve</option>
-          <option value="jail">Jail</option>
+          <option value="bhyve">Bhyve (experimental)</option>
+          <option value="jail">Jail (experimental)</option>
         </select>
       </div>
       <div><label>Replicas</label><input id="env-dup" type="number" value="1" min="1"></div>
@@ -202,13 +202,13 @@ const FRONTEND_HTML: &str = r##"<!DOCTYPE html>
     <div class="row">
       <div><label>CPU Cores</label><input id="env-cpu" type="number" value="2" min="1"></div>
       <div><label>Memory (MB)</label><input id="env-mem" type="number" value="1024" min="64"></div>
-      <div><label>Disk (MB)</label><input id="env-disk" type="number" value="40960" min="128"></div>
+      <div><label>QEMU disk (MiB)</label><input id="env-disk" type="number" value="40960" min="128"></div>
     </div>
     <label>Ports (comma-separated)</label>
     <input id="env-ports" placeholder="22, 80, 443" value="22">
     <div class="row">
-      <div><label>Lifetime (seconds, 0 = default 6h)</label>
-        <input id="env-lifetime" type="number" value="0" min="0">
+      <div><label>Lifetime (seconds, 0 = no expiry)</label>
+        <input id="env-lifetime" type="number" value="21600" min="0">
       </div>
     </div>
     <div class="checkbox-row">
@@ -231,6 +231,7 @@ const FRONTEND_HTML: &str = r##"<!DOCTYPE html>
 const API = '';
 let refreshTimer = null;
 let currentTab = 'status';
+let selectedEnv = null;
 
 function getApiKey() { return sessionStorage.getItem('tt_api_key'); }
 function setApiKey(k) { sessionStorage.setItem('tt_api_key', k); }
@@ -339,36 +340,42 @@ async function loadHosts() {
 async function loadEnvs() {
   var envs = await api('GET', '/api/envs');
   var tbody = document.getElementById('envs-body');
-  document.getElementById('env-detail-panel').style.display = 'none';
-  if (!envs.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty">No environments</td></tr>'; return; }
+  if (!envs.length) { selectedEnv = null; document.getElementById('env-detail-panel').style.display = 'none'; tbody.innerHTML = '<tr><td colspan="6" class="empty">No environments</td></tr>'; return; }
   tbody.innerHTML = envs.map(function(e) {
     return '<tr>' +
       '<td><a href="#" onclick="showEnv(\'' + esc(e.id) + '\'); return false;" style="color:var(--accent)">' + esc(e.id) + '</a></td>' +
       '<td>' + esc(e.owner) + '</td>' +
-      '<td>' + badge(e.state) + '</td>' +
+      '<td>' + badge(e.state) + (e.error ? '<div>' + esc(e.error) + '</div>' : '') + '</td>' +
       '<td>' + esc(e.vm_ids.length) + '</td>' +
       '<td>' + formatExpiry(e.expires_at) + '</td>' +
       '<td>' +
-        '<button class="btn btn-sm" onclick="toggleEnv(\'' + esc(e.id) + '\',\'' + esc(e.state) + '\')">' + (e.state === 'active' ? 'Stop' : 'Start') + '</button> ' +
+        (['active', 'stopped', 'failed'].includes(e.state) ?
+          '<button class="btn btn-sm" onclick="toggleEnv(\'' + esc(e.id) + '\',\'stopped\')">Start</button> ' +
+          '<button class="btn btn-sm" onclick="toggleEnv(\'' + esc(e.id) + '\',\'active\')">Stop</button> ' : '') +
         '<button class="btn btn-sm btn-danger" onclick="deleteEnv(\'' + esc(e.id) + '\')">Delete</button>' +
       '</td>' +
       '</tr>';
   }).join('');
+  if (selectedEnv && envs.some(e => e.id === selectedEnv)) await showEnv(selectedEnv);
+  else { selectedEnv = null; document.getElementById('env-detail-panel').style.display = 'none'; }
 }
 
 async function showEnv(id) {
+  selectedEnv = id;
   try {
     var detail = await api('GET', '/api/envs/' + encodeURIComponent(id));
+    var hosts = await api('GET', '/api/hosts');
+    var addresses = Object.fromEntries(hosts.map(h => [h.id, new URL('http://' + h.addr).hostname]));
     document.getElementById('env-detail-title').textContent = 'VMs in ' + id;
     document.getElementById('env-detail-panel').style.display = 'block';
     var tbody = document.getElementById('env-vms-body');
     tbody.innerHTML = detail.vms.map(function(vm) {
-      var ports = Object.entries(vm.port_map).map(function(e) { return e[1] + '\u2192' + e[0]; }).join(', ');
+      var ports = Object.entries(vm.port_map).map(function(e) { return (addresses[vm.host_id] || vm.host_id) + ':' + e[1] + '\u2192' + e[0]; }).join(', ');
       return '<tr>' +
         '<td>' + esc(vm.id) + '</td>' +
         '<td>' + esc(vm.image) + '</td>' +
         '<td>' + esc(vm.engine) + '</td>' +
-        '<td>' + badge(vm.state) + '</td>' +
+        '<td>' + badge(vm.state) + (vm.error ? '<div>' + esc(vm.error) + '</div>' : '') + '</td>' +
         '<td>' + esc(vm.ip) + '</td>' +
         '<td>' + esc(ports || '-') + '</td>' +
         '</tr>';
@@ -402,6 +409,13 @@ async function removeHost(id) {
   catch (e) { toast(e.message, true); }
 }
 
+function updateEngineOptions() {
+  const engine = document.getElementById('env-engine').value;
+  document.getElementById('env-disk').disabled = engine !== 'qemu';
+  document.getElementById('env-deny-outgoing').disabled = engine === 'docker';
+  document.getElementById('env-ssh-keys').disabled = !['qemu', 'jail'].includes(engine);
+}
+
 async function createEnv() {
   var name = document.getElementById('env-name').value.trim();
   var owner = document.getElementById('env-owner').value.trim() || 'web';
@@ -423,15 +437,15 @@ async function createEnv() {
 
   var vms = [];
   for (var i = 0; i < dup; i++) {
-    vms.push({ image: image, engine: engine, cpu: cpu, mem: mem, disk: disk, ports: ports, deny_outgoing: denyOutgoing, ssh_keys: [] });
+    vms.push({ image: image, engine: engine, cpu: cpu, mem: mem, disk: engine === 'qemu' ? disk : null, ports: ports, deny_outgoing: engine === 'docker' ? false : denyOutgoing, ssh_keys: [] });
   }
 
-  var body = { id: name, owner: owner, vms: vms, lifetime: lifetime > 0 ? lifetime : null, ssh_keys: sshKeys };
+  var body = { id: name, owner: owner, vms: vms, lifetime: lifetime, ssh_keys: ['qemu', 'jail'].includes(engine) ? sshKeys : [] };
 
   setBtn('btn-create-env', true);
   try {
     var result = await api('POST', '/api/envs', body);
-    hideModals(); toast('Environment created');
+    hideModals(); toast('Creation started; status will update automatically');
     if (result && result.warnings && result.warnings.length) {
       toast('Warnings: ' + result.warnings.join('; '), true);
     }
@@ -448,14 +462,14 @@ async function deleteEnv(id) {
 
 async function toggleEnv(id, state) {
   var action = state === 'active' ? 'stop' : 'start';
-  try { await api('POST', '/api/envs/' + encodeURIComponent(id) + '/' + action, {}); toast('Environment ' + action + 'ped'); loadEnvs(); }
+  try { await api('POST', '/api/envs/' + encodeURIComponent(id) + '/' + action, {}); toast(action === 'start' ? 'Environment started' : 'Environment stopped'); loadEnvs(); }
   catch (e) { toast(e.message, true); }
 }
 
 // Auto-refresh every 30 seconds
 function startAutoRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
-  refreshTimer = setInterval(function() { refresh(currentTab); }, 30000);
+  refreshTimer = setInterval(function() { refresh(currentTab); }, 5000);
 }
 
 // Initial load

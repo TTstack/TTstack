@@ -1,106 +1,130 @@
-//! HTTP API handlers for the host agent.
+//! HTTP handlers. Mutations run off the async executor; reads use SQLite snapshots.
+use crate::runtime::{self, Runtime};
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
+use std::sync::Arc;
+use ttcore::{api::*, model::Vm};
 
-use crate::runtime::Runtime;
-use axum::Json;
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use std::sync::{Arc, Mutex, MutexGuard};
-use ttcore::api::*;
-use ttcore::model::Vm;
+pub struct AgentShared {
+    pub runtime: Arc<tokio::sync::Mutex<Runtime>>,
+    pub db_path: String,
+    pub info: AgentInfo,
+    pub image_dir: String,
+}
+pub type AppState = Arc<AgentShared>;
 
-/// Shared application state.
-pub type AppState = Arc<Mutex<Runtime>>;
+type Reply<T> = (StatusCode, Json<ApiResp<T>>);
+fn failure<T>(e: impl std::fmt::Display) -> Reply<T> {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiResp::err(e.to_string())),
+    )
+}
 
-/// Lock the runtime mutex, recovering from poisoning if a prior
-/// handler panicked while holding the lock.
-fn lock_rt(rt: &AppState) -> MutexGuard<'_, Runtime> {
-    rt.lock().unwrap_or_else(|e| {
-        eprintln!("[agent] WARN: runtime mutex was poisoned, recovering");
-        e.into_inner()
+async fn read_snapshot(state: AppState) -> Result<(AgentInfo, Vec<Vm>), String> {
+    tokio::task::spawn_blocking(move || {
+        let vms = runtime::read_vms(&state.db_path).map_err(|e| e.to_string())?;
+        let mut info = state.info.clone();
+        info.resource = runtime::resources_for(&info.resource, &vms);
+        Ok((info, vms))
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
-/// GET /api/info — report host resources and capabilities.
-pub async fn get_info(State(rt): State<AppState>) -> impl IntoResponse {
-    let rt = lock_rt(&rt);
-    Json(ApiResp::success(rt.agent_info()))
+async fn read_images(state: AppState) -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        ttcore::storage::create_store(state.info.storage)
+            .list_images(&state.image_dir)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
-/// GET /api/images — list available base images.
-pub async fn list_images(State(rt): State<AppState>) -> impl IntoResponse {
-    let rt = lock_rt(&rt);
-    Json(ApiResp::success(rt.list_images()))
+pub async fn get_info(State(state): State<AppState>) -> impl IntoResponse {
+    let images = match read_images(state.clone()).await {
+        Ok(images) => images,
+        Err(e) => return failure(e),
+    };
+    match read_snapshot(state).await {
+        Ok((mut info, _)) => {
+            info.images = images;
+            (StatusCode::OK, Json(ApiResp::success(info)))
+        }
+        Err(e) => failure(e),
+    }
+}
+pub async fn list_images(State(state): State<AppState>) -> impl IntoResponse {
+    match read_images(state).await {
+        Ok(images) => (StatusCode::OK, Json(ApiResp::success(images))),
+        Err(e) => failure(e),
+    }
+}
+pub async fn list_vms(State(state): State<AppState>) -> impl IntoResponse {
+    match read_snapshot(state).await {
+        Ok((_, vms)) => (StatusCode::OK, Json(ApiResp::success(vms))),
+        Err(e) => failure(e),
+    }
+}
+pub async fn get_vm(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    match read_snapshot(state).await {
+        Ok((_, vms)) => match vms.into_iter().find(|vm| vm.id == id) {
+            Some(vm) => (StatusCode::OK, Json(ApiResp::success(vm))),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(ApiResp::err(format!("VM not found: {id}"))),
+            ),
+        },
+        Err(e) => failure(e),
+    }
 }
 
-/// POST /api/vms — create a new VM.
+async fn mutate<T: Send + 'static>(
+    state: AppState,
+    f: impl FnOnce(&mut Runtime) -> ruc::Result<T> + Send + 'static,
+) -> Result<T, String> {
+    // Once accepted, continue even if the caller disconnects or times out.
+    tokio::spawn(async move {
+        let mut guard = state.runtime.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || f(&mut guard).map_err(|e| e.to_string()))
+            .await
+            .map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 pub async fn create_vm(
-    State(rt): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<CreateVmReq>,
 ) -> impl IntoResponse {
-    let mut rt = lock_rt(&rt);
-    match rt.create_vm(&req) {
+    match mutate(state, move |rt| rt.create_vm(&req)).await {
         Ok(vm) => (
             StatusCode::CREATED,
             Json(ApiResp::success(CreateVmResp { vm })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResp::<CreateVmResp>::err(e.to_string())),
-        ),
+        Err(e) => failure(e),
     }
 }
-
-/// GET /api/vms — list all VMs on this host.
-pub async fn list_vms(State(rt): State<AppState>) -> impl IntoResponse {
-    let rt = lock_rt(&rt);
-    Json(ApiResp::success(rt.list_vms()))
+pub async fn destroy_vm(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    action(mutate(state, move |rt| rt.destroy_vm(&id)).await)
 }
-
-/// GET /api/vms/:id — get a specific VM.
-pub async fn get_vm(State(rt): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
-    let rt = lock_rt(&rt);
-    match rt.get_vm(&id) {
-        Some(vm) => (StatusCode::OK, Json(ApiResp::success(vm))),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(ApiResp::<Vm>::err(format!("VM not found: {id}"))),
-        ),
-    }
+pub async fn stop_vm(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    action(mutate(state, move |rt| rt.stop_vm(&id)).await)
 }
-
-/// DELETE /api/vms/:id — destroy a VM.
-pub async fn destroy_vm(State(rt): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
-    let mut rt = lock_rt(&rt);
-    match rt.destroy_vm(&id) {
+pub async fn start_vm(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    action(mutate(state, move |rt| rt.start_vm(&id)).await)
+}
+fn action(result: Result<(), String>) -> Reply<()> {
+    match result {
         Ok(()) => (StatusCode::OK, Json(ApiRespEmpty::ok())),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiRespEmpty::err(e.to_string())),
-        ),
-    }
-}
-
-/// POST /api/vms/:id/stop — stop a VM.
-pub async fn stop_vm(State(rt): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
-    let mut rt = lock_rt(&rt);
-    match rt.stop_vm(&id) {
-        Ok(()) => (StatusCode::OK, Json(ApiRespEmpty::ok())),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiRespEmpty::err(e.to_string())),
-        ),
-    }
-}
-
-/// POST /api/vms/:id/start — start a stopped VM.
-pub async fn start_vm(State(rt): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
-    let mut rt = lock_rt(&rt);
-    match rt.start_vm(&id) {
-        Ok(()) => (StatusCode::OK, Json(ApiRespEmpty::ok())),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiRespEmpty::err(e.to_string())),
-        ),
+        Err(e) => failure(e),
     }
 }

@@ -3,6 +3,7 @@ name = "tt-agent"
 description = "TTstack host agent — manages VMs and containers on a single physical host."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 

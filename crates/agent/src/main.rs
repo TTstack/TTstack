@@ -5,7 +5,7 @@
 //!
 //! Supported platforms:
 //! - **Linux**: all engines (Qemu, Firecracker, Docker)
-//! - **FreeBSD**: Bhyve, Jail
+//! - **FreeBSD (experimental)**: Bhyve, Jail
 //! - **Other Unix** (macOS, etc.): Docker/Podman only
 
 mod auth;
@@ -19,12 +19,14 @@ use clap::Parser;
 use config::Config;
 use handler::AppState;
 use runtime::Runtime;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use ttcore::model::Resource;
 
 #[tokio::main]
 async fn main() {
     let cfg = Config::parse();
+    #[cfg(target_os = "freebsd")]
+    eprintln!("WARNING: FreeBSD support is experimental and outside the primary validation scope");
 
     let db_path = format!("{}/agent.db", cfg.data_dir);
     std::fs::create_dir_all(&cfg.data_dir).unwrap_or_else(|e| {
@@ -57,7 +59,30 @@ async fn main() {
         std::process::exit(1);
     });
 
-    let state: AppState = Arc::new(Mutex::new(rt));
+    let info = rt.agent_info().unwrap_or_else(|e| {
+        eprintln!("Failed to read agent info: {e}");
+        std::process::exit(1);
+    });
+    let state: AppState = Arc::new(handler::AgentShared {
+        runtime: Arc::new(tokio::sync::Mutex::new(rt)),
+        db_path,
+        info,
+        image_dir: cfg.image_dir.clone(),
+    });
+    let recovery = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            if let Ok(mut rt) = recovery.runtime.clone().try_lock_owned() {
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Err(e) = rt.reconcile() {
+                        eprintln!("[agent] reconciliation failed: {e}");
+                    }
+                })
+                .await;
+            }
+        }
+    });
 
     let app = Router::new()
         .route("/api/info", get(handler::get_info))
@@ -97,6 +122,14 @@ async fn main() {
 }
 
 async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
+        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+    }
+    #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
     eprintln!("received shutdown signal");
 }

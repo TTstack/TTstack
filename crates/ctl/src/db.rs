@@ -9,7 +9,7 @@ use ttcore::api::FleetStatus;
 use ttcore::model::*;
 
 /// Current schema version. Bump this when schema changes.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 /// Fleet database — the single source of truth for the controller.
 pub struct Db {
@@ -101,7 +101,7 @@ impl Db {
             Some(row) => {
                 let val: String = row.get(0).c(d!())?;
                 val.parse::<u32>()
-                    .map_err(|_| eg!("invalid schema_version: {val}"))
+                    .map_err(|_| eg!(format!("invalid schema_version: {val}")))
             }
             None => Ok(0), // fresh database
         }
@@ -162,6 +162,20 @@ impl Db {
                 rusqlite::params![env.id, data],
             )
             .c(d!("put env"))?;
+        Ok(())
+    }
+
+    /// Save the complete creation plan atomically before contacting any agent.
+    pub fn put_environment(&self, env: &Env, vms: &[Vm]) -> Result<()> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .c(d!("begin environment plan"))?;
+        self.put_env(env)?;
+        for vm in vms {
+            self.put_vm(vm)?;
+        }
+        tx.commit().c(d!("commit environment plan"))?;
         Ok(())
     }
 
@@ -332,6 +346,7 @@ mod tests {
             state: HostState::Online,
             engines: vec![Engine::Qemu],
             storage: Storage::File,
+            images: vec![],
             registered_at: 1000,
         }
     }
@@ -343,6 +358,7 @@ mod tests {
             vm_ids: vec!["vm1".into()],
             created_at: 1000,
             expires_at: 2000,
+            error: None,
             state: EnvState::Active,
         }
     }
@@ -359,6 +375,8 @@ mod tests {
             disk: 40960,
             ip: "10.10.0.1".into(),
             port_map: BTreeMap::new(),
+            options: VmOptions::default(),
+            error: None,
             state: VmState::Running,
             created_at: 1000,
         }

@@ -1,19 +1,13 @@
-//! VM runtime management on a single host.
-//!
-//! Owns the lifecycle of all VMs on this host, backed by SQLite for
-//! crash-recoverable persistent state.
-
+//! Durable VM lifecycle management for one host.
 use ruc::*;
 use rusqlite::Connection;
 use std::collections::{BTreeMap, HashSet};
-use std::sync::atomic::{AtomicU32, Ordering};
 use ttcore::api::{AgentInfo, CreateVmReq};
 use ttcore::engine;
 use ttcore::model::*;
 use ttcore::net;
 use ttcore::storage::{self, ImageStore};
 
-/// Manages all VMs on this host.
 pub struct Runtime {
     pub host_id: String,
     db: Connection,
@@ -22,12 +16,12 @@ pub struct Runtime {
     storage: Storage,
     image_dir: String,
     runtime_dir: String,
+    network_ready: bool,
     pub resource: Resource,
-    next_ip_idx: AtomicU32,
+    engine_factory: fn(Engine) -> Result<Box<dyn engine::VmEngine>>,
 }
 
 impl Runtime {
-    /// Initialize the runtime, restoring state from SQLite if available.
     pub fn new(
         host_id: String,
         storage: Storage,
@@ -36,183 +30,130 @@ impl Runtime {
         db_path: &str,
         resource: Resource,
     ) -> Result<Self> {
-        std::fs::create_dir_all(&image_dir).c(d!("create image_dir"))?;
-        std::fs::create_dir_all(&runtime_dir).c(d!("create runtime_dir"))?;
-        std::fs::create_dir_all(ttcore::model::RUN_DIR).c(d!("create run dir"))?;
-
-        let db = Connection::open(db_path).c(d!("open agent db"))?;
+        if storage == Storage::File {
+            std::fs::create_dir_all(&image_dir).c(d!("create image_dir"))?;
+            std::fs::create_dir_all(&runtime_dir).c(d!("create runtime_dir"))?;
+        }
+        std::fs::create_dir_all(RUN_DIR).c(d!("create run dir"))?;
+        let db = Connection::open(db_path).c(d!("open agent DB"))?;
         init_db(&db)?;
-
-        let store = storage::create_store(storage);
-        let engines = detect_engines();
-
-        // Restore state from database
-        let vms = load_all_vms(&db)?;
-
-        // Clean up VMs stuck in "Creating" state (agent crashed mid-creation).
-        // These VMs may have partial resources allocated that need cleanup.
-        for vm in &vms {
-            if vm.state == VmState::Creating {
-                eprintln!(
-                    "[agent] cleaning up orphaned VM {} (stuck in Creating state)",
-                    vm.id
-                );
-                let eng = engine::create_engine(vm.engine);
-                let _ = eng.destroy(vm);
-                let _ = storage::create_store(storage)
-                    .remove_image(&format!("{}/clone-{}", runtime_dir, vm.id));
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                net::destroy_tap(&vm.id).unwrap_or(());
-                let _ = delete_vm(&db, &vm.id);
-            }
-        }
-
-        // Reload after cleanup
-        let vms = load_all_vms(&db)?;
-
-        let max_idx = vms
-            .iter()
-            .filter_map(|vm| ip_to_index(&vm.ip))
-            .max()
-            .unwrap_or(0);
-
-        let mut cpu_used = 0u32;
-        let mut mem_used = 0u32;
-        let mut disk_used = 0u32;
-        let mut vm_count = 0u32;
-        for vm in &vms {
-            if vm.state == VmState::Running || vm.state == VmState::Paused {
-                cpu_used += vm.cpu;
-                mem_used += vm.mem;
-                disk_used += vm.disk;
-                vm_count += 1;
-            }
-        }
-
-        let resource = Resource {
-            cpu_used,
-            mem_used,
-            disk_used,
-            vm_count,
-            ..resource
-        };
-
-        // Set up networking (only on platforms with host-managed networking)
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        {
-            net::setup_bridge().c(d!("bridge setup"))?;
-            net::setup_nat().c(d!("NAT setup"))?;
-        }
-
-        // Restore network rules for persisted VMs
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        for vm in &vms {
-            if vm.state == VmState::Running || vm.state == VmState::Paused {
-                if let Err(e) = net::create_tap(&vm.id, &vm.ip) {
-                    eprintln!("[agent] WARN: failed to restore TAP for VM {}: {e}", vm.id);
-                }
-                for (&guest, &host) in &vm.port_map {
-                    if let Err(e) = net::add_port_forward(host, &vm.ip, guest) {
-                        eprintln!(
-                            "[agent] WARN: failed to restore port forward {}->{}:{} for VM {}: {e}",
-                            host, vm.ip, guest, vm.id
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok(Self {
+        let mut rt = Self {
             host_id,
             db,
-            engines,
-            store,
+            engines: detect_engines(),
+            store: storage::create_store(storage),
             storage,
             image_dir,
             runtime_dir,
             resource,
-            next_ip_idx: AtomicU32::new(max_idx + 1),
-        })
+            engine_factory: engine::create_engine,
+            network_ready: false,
+        };
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if rt.list_vms()?.iter().any(|vm| vm.engine != Engine::Docker) {
+            rt.ensure_network()?;
+        }
+        rt.reconcile()?;
+        for vm in rt.list_vms()? {
+            if matches!(vm.state, VmState::Running | VmState::Paused)
+                && let Err(e) = rt.restore_network(&vm)
+            {
+                let mut vm = vm;
+                vm.error = Some(format!("network recovery failed: {e}"));
+                save_vm(&rt.db, &vm)?;
+            }
+        }
+        Ok(rt)
     }
 
-    /// Create a new VM.
     pub fn create_vm(&mut self, req: &CreateVmReq) -> Result<Vm> {
-        // Input validation
         validate_name(&req.vm_id, "vm_id").map_err(|e| eg!(e))?;
-        validate_name(&req.image, "image").map_err(|e| eg!(e))?;
-
-        if req.cpu == 0 {
-            return Err(eg!("cpu must be > 0"));
+        validate_name(&req.env_id, "env_id").map_err(|e| eg!(e))?;
+        validate_image(&req.image, req.engine).map_err(|e| eg!(e))?;
+        validate_vm_options(
+            req.engine,
+            (req.disk > 0).then_some(req.disk),
+            req.deny_outgoing,
+            &req.ssh_keys,
+            &req.ports,
+        )
+        .map_err(|e| eg!(e))?;
+        if !self.engines.contains(&req.engine) {
+            return Err(eg!("engine {} is unavailable on this host", req.engine));
         }
-        if req.mem == 0 {
-            return Err(eg!("mem must be > 0"));
+        if self.storage == Storage::Zvol && matches!(req.engine, Engine::Firecracker | Engine::Jail)
+        {
+            return Err(eg!("{} requires file storage", req.engine));
         }
-        if req.disk == 0 {
-            return Err(eg!("disk must be > 0"));
+        if req.engine == Engine::Qemu && req.disk == 0 {
+            return Err(eg!("QEMU disk size must be > 0"));
         }
-
-        if !self.resource.can_fit(req.cpu, req.mem, req.disk) {
+        if req.cpu == 0 || req.mem == 0 {
+            return Err(eg!("cpu and memory must be > 0"));
+        }
+        let options = VmOptions {
+            ports: req.ports.clone(),
+            ssh_keys: req.ssh_keys.clone(),
+            deny_outgoing: req.deny_outgoing,
+            requested_disk: req.disk,
+        };
+        if let Some(vm) = load_vm(&self.db, &req.vm_id)? {
+            if vm.env_id != req.env_id
+                || vm.image != req.image
+                || vm.engine != req.engine
+                || vm.cpu != req.cpu
+                || vm.mem != req.mem
+                || vm.options != options
+            {
+                return Err(eg!(
+                    "VM ID already exists with different creation parameters"
+                ));
+            }
+            if matches!(vm.state, VmState::Failed | VmState::Deleting) {
+                return Err(eg!(
+                    "VM {} is {}; inspect and delete it before recreating",
+                    vm.id,
+                    vm.state
+                ));
+            }
+            return Ok(vm);
+        }
+        self.recount()?;
+        let base_image = format!("{}/{}", self.image_dir, req.image);
+        let disk = match req.engine {
+            Engine::Docker => 0,
+            Engine::Firecracker => {
+                let bytes = std::fs::metadata(format!("{base_image}/rootfs.ext4"))
+                    .c(d!("rootfs.ext4"))?
+                    .len();
+                u32::try_from(bytes.div_ceil(1024 * 1024)).c(d!("rootfs too large"))?
+            }
+            _ => req.disk,
+        };
+        if !self.resource.can_fit(req.cpu, req.mem, disk) {
             return Err(eg!("insufficient resources on host {}", self.host_id));
         }
-
         if self.resource.vm_count as usize >= MAX_VMS {
             return Err(eg!("VM limit reached"));
         }
-
-        // Allocate IP, skipping any indices already in use by existing VMs
-        let existing_ips: HashSet<String> = load_all_vms(&self.db)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|vm| vm.ip)
-            .collect();
-        let (ip_idx, ip) = loop {
-            let idx = self.next_ip_idx.fetch_add(1, Ordering::SeqCst);
-            if idx > 65000 {
-                return Err(eg!("IP address space exhausted"));
-            }
-            let candidate = net::vm_ip(idx);
-            if !existing_ips.contains(&candidate) {
-                break (idx, candidate);
-            }
+        let vms = self.list_vms()?;
+        let used_ips: HashSet<_> = vms.iter().map(|v| v.ip.as_str()).collect();
+        let ip = if req.engine == Engine::Docker {
+            String::new()
+        } else {
+            (0..65000)
+                .map(net::vm_ip)
+                .find(|ip| !used_ips.contains(ip.as_str()))
+                .ok_or_else(|| eg!("IP address space exhausted"))?
         };
-
-        // Docker/Podman manages its own images, networking, and port mapping;
-        // other engines need local image clones, TAP devices, and nftables rules.
-        // Host-managed networking is only available on Linux and FreeBSD.
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        let host_managed_net = req.engine != Engine::Docker;
-        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-        let host_managed_net = false;
-
-        let clone_path = format!("{}/clone-{}", self.runtime_dir, req.vm_id);
-        if host_managed_net {
-            let base_image = format!("{}/{}", self.image_dir, req.image);
-            self.store
-                .clone_image(&base_image, &clone_path)
-                .c(d!("image clone"))?;
-        }
-
-        if host_managed_net {
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            net::create_tap(&req.vm_id, &ip).c(d!("TAP setup"))?;
-        }
-
-        // Allocate port mappings (use checked arithmetic to avoid u16 overflow)
-        // Always include port 22 for SSH access
         let mut ports = req.ports.clone();
-        if !ports.contains(&22) {
-            ports.insert(0, 22);
+        if matches!(req.engine, Engine::Qemu | Engine::Bhyve | Engine::Jail) && !ports.contains(&22)
+        {
+            ports.push(22);
         }
-        let mut port_map = BTreeMap::new();
-        let base_port = 20000u32.saturating_add(ip_idx.saturating_mul(100));
-        for (i, &guest_port) in ports.iter().enumerate() {
-            let host_port = base_port.saturating_add(i as u32);
-            if host_port > 65535 {
-                break; // silently skip ports that can't be allocated
-            }
-            port_map.insert(guest_port, host_port as u16);
-        }
-
+        let port_map = allocate_ports(&vms, &ports, |p| {
+            std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, p)).is_ok()
+        })?;
         let mut vm = Vm {
             id: req.vm_id.clone(),
             env_id: req.env_id.clone(),
@@ -221,187 +162,290 @@ impl Runtime {
             engine: req.engine,
             cpu: req.cpu,
             mem: req.mem,
-            disk: req.disk,
-            ip: ip.clone(),
-            port_map: port_map.clone(),
+            disk,
+            ip,
+            port_map,
+            options,
+            error: None,
             state: VmState::Creating,
             created_at: now(),
         };
-
+        // Reserve identity, ports and resources before the first external side effect.
         save_vm(&self.db, &vm)?;
-
-        // Resolve the disk path and format from the storage backend
-        let disk_path = self.store.resolve_disk(&clone_path);
-        let disk_format = self.store.disk_format();
-
-        // Launch using the appropriate engine
-        let eng = engine::create_engine(req.engine);
-        if let Err(e) = eng.create(&vm, &disk_path, disk_format, &req.ssh_keys) {
-            if host_managed_net {
-                let _ = self.store.remove_image(&clone_path);
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                net::destroy_tap(&req.vm_id).unwrap_or(());
-            }
-            delete_vm(&self.db, &vm.id)?;
-            return Err(e).c(d!("engine create"));
-        }
-
-        // Set up nftables port forwarding and outgoing rules.
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        if host_managed_net {
-            let post_create = || -> Result<()> {
-                for (&guest_port, &host_port) in &port_map {
-                    net::add_port_forward(host_port, &ip, guest_port).c(d!("port forward"))?;
+        self.recount()?;
+        let result = (|| -> Result<()> {
+            if req.engine != Engine::Docker {
+                self.ensure_network()?;
+                let clone_path = self.clone_path(&vm);
+                self.store.clone_image(&base_image, &clone_path)?;
+                if vm.engine == Engine::Qemu {
+                    self.store.resize_disk(&clone_path, vm.disk)?;
                 }
-                if req.deny_outgoing {
-                    net::deny_outgoing(&ip).c(d!("deny outgoing"))?;
-                }
-                Ok(())
-            };
-
-            if let Err(e) = post_create() {
-                let _ = net::remove_port_forwards(&ip);
-                let _ = net::allow_outgoing(&ip);
-                let _ = eng.destroy(&vm);
-                let _ = self.store.remove_image(&clone_path);
-                let _ = net::destroy_tap(&req.vm_id);
-                let _ = delete_vm(&self.db, &vm.id);
-                return Err(e).c(d!("post-create setup"));
+                self.restore_network(&vm)?;
             }
+            let path = self.image_path(&vm);
+            (self.engine_factory)(vm.engine)?.create(
+                &vm,
+                &path,
+                self.store.disk_format(),
+                &vm.options.ssh_keys,
+            )?;
+            Ok(())
+        })();
+        if let Err(e) = result {
+            // Preserve the record, including partial resources, for reliable cleanup.
+            vm.state = VmState::Failed;
+            vm.error = Some(e.to_string());
+            save_vm(&self.db, &vm)?;
+            return Err(e);
         }
-
-        // Update resource tracking
-        self.resource.cpu_used += req.cpu;
-        self.resource.mem_used += req.mem;
-        self.resource.disk_used += req.disk;
-        self.resource.vm_count += 1;
-
         vm.state = VmState::Running;
         save_vm(&self.db, &vm)?;
-
         Ok(vm)
     }
 
-    pub fn stop_vm(&mut self, vm_id: &str) -> Result<()> {
-        let mut vm = load_vm(&self.db, vm_id)?.ok_or_else(|| eg!("VM not found: {}", vm_id))?;
-
-        match vm.state {
-            VmState::Running => {}
-            VmState::Paused | VmState::Stopped => return Ok(()),
-            _ => return Err(eg!("cannot stop VM in state {}", vm.state)),
+    fn ensure_network(&mut self) -> Result<()> {
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if !self.network_ready {
+            net::setup_bridge()?;
+            net::setup_nat()?;
+            self.network_ready = true;
         }
+        Ok(())
+    }
 
-        let eng = engine::create_engine(vm.engine);
-        eng.stop(&vm).c(d!("stop VM"))?;
-
-        // FC/QEMU pause (preserve process); others fully stop
-        let pauses = matches!(vm.engine, Engine::Qemu | Engine::Firecracker);
-        if pauses {
-            vm.state = VmState::Paused;
+    fn clone_path(&self, vm: &Vm) -> String {
+        format!("{}/clone-{}", self.runtime_dir, vm.id)
+    }
+    fn image_path(&self, vm: &Vm) -> String {
+        let path = self.clone_path(vm);
+        if matches!(vm.engine, Engine::Firecracker | Engine::Jail) {
+            path
         } else {
-            vm.state = VmState::Stopped;
-            self.resource.cpu_used = self.resource.cpu_used.saturating_sub(vm.cpu);
-            self.resource.mem_used = self.resource.mem_used.saturating_sub(vm.mem);
+            self.store.resolve_disk(&path)
         }
-        save_vm(&self.db, &vm)?;
-
-        Ok(())
     }
-
-    pub fn start_vm(&mut self, vm_id: &str) -> Result<()> {
-        let mut vm = load_vm(&self.db, vm_id)?.ok_or_else(|| eg!("VM not found: {}", vm_id))?;
-
-        let prev_state = vm.state;
-        match prev_state {
-            VmState::Stopped | VmState::Paused => {}
-            VmState::Running => return Ok(()),
-            _ => return Err(eg!("cannot start VM in state {}", vm.state)),
-        }
-
-        // Only check/allocate resources when resuming from fully Stopped
-        if prev_state == VmState::Stopped && !self.resource.can_fit(vm.cpu, vm.mem, 0) {
-            return Err(eg!("insufficient resources to restart VM"));
-        }
-
-        let eng = engine::create_engine(vm.engine);
-        eng.start(&vm).c(d!("start VM"))?;
-
-        vm.state = VmState::Running;
-        save_vm(&self.db, &vm)?;
-
-        if prev_state == VmState::Stopped {
-            self.resource.cpu_used += vm.cpu;
-            self.resource.mem_used += vm.mem;
-        }
-
-        Ok(())
-    }
-
-    pub fn destroy_vm(&mut self, vm_id: &str) -> Result<()> {
-        let vm = match load_vm(&self.db, vm_id)? {
-            Some(vm) => vm,
-            None => return Ok(()),
-        };
-
-        let eng = engine::create_engine(vm.engine);
-        let _ = eng.destroy(&vm);
-
-        // Clean up host-managed networking and image clones.
-        // Docker handles its own network teardown.
+    fn restore_network(&self, vm: &Vm) -> Result<()> {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if vm.engine != Engine::Docker {
-            net::remove_port_forwards(&vm.ip).unwrap_or(());
-            net::allow_outgoing(&vm.ip).unwrap_or(());
-            net::destroy_tap(vm_id).unwrap_or(());
+            net::create_tap(&vm.id, &vm.ip)?;
+            net::remove_port_forwards(&vm.ip)?;
+            for (&guest, &host) in &vm.port_map {
+                net::add_port_forward(host, &vm.ip, guest)?;
+            }
+            if vm.options.deny_outgoing {
+                net::deny_outgoing(&vm.ip)?;
+            }
         }
-
-        if vm.engine != Engine::Docker {
-            let clone_path = format!("{}/clone-{}", self.runtime_dir, vm_id);
-            let _ = self.store.remove_image(&clone_path);
-        }
-
-        if vm.state == VmState::Running
-            || vm.state == VmState::Paused
-            || vm.state == VmState::Creating
-        {
-            self.resource.cpu_used = self.resource.cpu_used.saturating_sub(vm.cpu);
-            self.resource.mem_used = self.resource.mem_used.saturating_sub(vm.mem);
-        }
-        self.resource.disk_used = self.resource.disk_used.saturating_sub(vm.disk);
-        self.resource.vm_count = self.resource.vm_count.saturating_sub(1);
-
-        delete_vm(&self.db, vm_id)?;
-
         Ok(())
     }
 
-    pub fn get_vm(&self, vm_id: &str) -> Option<Vm> {
-        load_vm(&self.db, vm_id).ok().flatten()
+    pub fn stop_vm(&mut self, id: &str) -> Result<()> {
+        let mut vm = load_vm(&self.db, id)?.ok_or_else(|| eg!(format!("VM not found: {id}")))?;
+        if vm.state == VmState::Stopped {
+            return Ok(());
+        }
+        if matches!(vm.state, VmState::Creating | VmState::Deleting) {
+            return Err(eg!("VM is {}", vm.state));
+        }
+        match (self.engine_factory)(vm.engine)?.stop(&vm) {
+            Ok(()) => {
+                vm.state = VmState::Stopped;
+                vm.error = None;
+            }
+            Err(e) => {
+                vm.error = Some(e.to_string());
+                save_vm(&self.db, &vm)?;
+                return Err(e);
+            }
+        }
+        save_vm(&self.db, &vm)?;
+        self.recount()
     }
 
-    pub fn list_vms(&self) -> Vec<Vm> {
-        load_all_vms(&self.db).unwrap_or_default()
+    pub fn start_vm(&mut self, id: &str) -> Result<()> {
+        let mut vm = load_vm(&self.db, id)?.ok_or_else(|| eg!(format!("VM not found: {id}")))?;
+        if vm.state == VmState::Running {
+            return Ok(());
+        }
+        if !matches!(vm.state, VmState::Stopped | VmState::Paused) {
+            return Err(eg!("cannot start VM in state {}", vm.state));
+        }
+        self.recount()?;
+        if vm.state == VmState::Stopped && !self.resource.can_fit(vm.cpu, vm.mem, 0) {
+            return Err(eg!("insufficient resources to restart VM"));
+        }
+        let previous = vm.state;
+        vm.state = VmState::Creating;
+        save_vm(&self.db, &vm)?;
+        let result = (|| -> Result<()> {
+            if vm.engine != Engine::Docker {
+                self.ensure_network()?;
+            }
+            self.restore_network(&vm)?;
+            let eng = (self.engine_factory)(vm.engine)?;
+            if previous == VmState::Stopped
+                && matches!(vm.engine, Engine::Qemu | Engine::Firecracker)
+            {
+                eng.create(
+                    &vm,
+                    &self.image_path(&vm),
+                    self.store.disk_format(),
+                    &vm.options.ssh_keys,
+                )
+            } else {
+                eng.start(&vm)
+            }
+        })();
+        match result {
+            Ok(()) => {
+                vm.state = VmState::Running;
+                vm.error = None;
+            }
+            Err(e) => {
+                vm.state = VmState::Failed;
+                vm.error = Some(e.to_string());
+                save_vm(&self.db, &vm)?;
+                self.recount()?;
+                return Err(e);
+            }
+        }
+        save_vm(&self.db, &vm)?;
+        self.recount()
     }
 
-    pub fn list_images(&self) -> Vec<String> {
-        self.store.list_images(&self.image_dir).unwrap_or_default()
+    pub fn destroy_vm(&mut self, id: &str) -> Result<()> {
+        let Some(mut vm) = load_vm(&self.db, id)? else {
+            return Ok(());
+        };
+        vm.state = VmState::Deleting;
+        save_vm(&self.db, &vm)?;
+        let result = (|| -> Result<()> {
+            (self.engine_factory)(vm.engine)?.destroy(&vm)?;
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            if vm.engine != Engine::Docker {
+                net::remove_port_forwards(&vm.ip)?;
+                net::allow_outgoing(&vm.ip)?;
+                net::destroy_tap(id)?;
+            }
+            if vm.engine != Engine::Docker {
+                self.store.remove_image(&self.clone_path(&vm))?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = result {
+            vm.error = Some(e.to_string());
+            save_vm(&self.db, &vm)?;
+            return Err(e);
+        }
+        delete_vm(&self.db, id)?;
+        self.recount()
     }
 
-    pub fn agent_info(&self) -> AgentInfo {
-        AgentInfo {
+    pub fn reconcile(&mut self) -> Result<()> {
+        for mut vm in self.list_vms()? {
+            if vm.state == VmState::Deleting {
+                if let Err(e) = self.destroy_vm(&vm.id) {
+                    eprintln!("[agent] cleanup {}: {e}", vm.id);
+                }
+                continue;
+            }
+            match (self.engine_factory)(vm.engine)?.state(&vm) {
+                Ok(actual) => {
+                    if vm
+                        .error
+                        .as_deref()
+                        .is_some_and(|e| e.starts_with("cannot query engine:"))
+                    {
+                        vm.error = None;
+                    }
+                    if vm.state == VmState::Creating
+                        && !matches!(actual, VmState::Running | VmState::Paused)
+                    {
+                        vm.state = VmState::Failed;
+                        vm.error = Some(
+                            "operation interrupted; delete this VM to clean up and recreate".into(),
+                        );
+                    } else if vm.state != VmState::Failed
+                        || matches!(actual, VmState::Running | VmState::Paused)
+                    {
+                        vm.state = actual;
+                    }
+                }
+                Err(e) => {
+                    vm.error = Some(format!("cannot query engine: {e}"));
+                }
+            }
+            save_vm(&self.db, &vm)?;
+        }
+        self.recount()
+    }
+    fn recount(&mut self) -> Result<()> {
+        self.resource = resources_for(&self.resource, &self.list_vms()?);
+        Ok(())
+    }
+    pub fn list_vms(&self) -> Result<Vec<Vm>> {
+        load_all_vms(&self.db)
+    }
+    pub fn agent_info(&self) -> Result<AgentInfo> {
+        Ok(AgentInfo {
             host_id: self.host_id.clone(),
             resource: self.resource.clone(),
             engines: self.engines.clone(),
             storage: self.storage,
-            images: self.list_images(),
-        }
+            images: self.store.list_images(&self.image_dir)?,
+        })
     }
+}
+
+pub fn resources_for(totals: &Resource, vms: &[Vm]) -> Resource {
+    let mut resource = Resource {
+        cpu_total: totals.cpu_total,
+        mem_total: totals.mem_total,
+        disk_total: totals.disk_total,
+        ..Default::default()
+    };
+    for vm in vms {
+        resource.account(vm);
+    }
+    resource
+}
+
+/// Readers use a separate SQLite connection; slow mutations never hold a read lock.
+pub fn read_vms(db_path: &str) -> Result<Vec<Vm>> {
+    let db = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .c(d!("open agent snapshot"))?;
+    db.busy_timeout(std::time::Duration::from_secs(2)).c(d!())?;
+    load_all_vms(&db)
+}
+
+fn allocate_ports(
+    vms: &[Vm],
+    ports: &[u16],
+    available: impl Fn(u16) -> bool,
+) -> Result<BTreeMap<u16, u16>> {
+    let used: HashSet<u16> = vms
+        .iter()
+        .flat_map(|v| v.port_map.values().copied())
+        .collect();
+    let mut free = (20000..=65535u16).filter(|p| !used.contains(p) && available(*p));
+    let mut result = BTreeMap::new();
+    for &guest in ports {
+        if result.contains_key(&guest) {
+            continue;
+        }
+        let port = free
+            .next()
+            .ok_or_else(|| eg!("host TCP port pool exhausted"))?;
+        result.insert(guest, port);
+    }
+    Ok(result)
 }
 
 // ── SQLite Schema & Operations ──────────────────────────────────────
 
 /// Current agent schema version.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 fn init_db(db: &Connection) -> Result<()> {
     db.execute_batch(
@@ -453,7 +497,7 @@ fn get_schema_version(db: &Connection) -> Result<u32> {
         Some(row) => {
             let val: String = row.get(0).c(d!())?;
             val.parse::<u32>()
-                .map_err(|_| eg!("invalid schema_version: {val}"))
+                .map_err(|_| eg!(format!("invalid schema_version: {val}")))
         }
         None => Ok(0),
     }
@@ -484,6 +528,7 @@ pub fn resolve_host_id(db_path: &str, cli_id: Option<String>) -> Result<String> 
     .c(d!("ensure meta table"))?;
 
     if let Some(id) = cli_id {
+        validate_name(&id, "host_id").map_err(|e| eg!(e))?;
         // CLI takes precedence — persist it
         conn.execute(
             "INSERT OR REPLACE INTO _meta (key, value) VALUES ('host_id', ?1)",
@@ -610,52 +655,9 @@ fn which(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn ip_to_index(ip: &str) -> Option<u32> {
-    let parts: Vec<&str> = ip.split('.').collect();
-    if parts.len() != 4 {
-        return None;
-    }
-    let hi: u32 = parts[2].parse().ok()?;
-    let lo: u32 = parts[3].parse().ok()?;
-    // Inverse of vm_ip: internal = hi*254 + (lo-1), index = internal - 1
-    let internal = hi * 254 + lo.checked_sub(1)?;
-    internal.checked_sub(1)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ttcore::net;
-
-    #[test]
-    fn ip_to_index_first() {
-        let ip = net::vm_ip(0);
-        assert_eq!(ip_to_index(&ip), Some(0));
-    }
-
-    #[test]
-    fn ip_to_index_sequential() {
-        for i in 0..100 {
-            let ip = net::vm_ip(i);
-            assert_eq!(ip_to_index(&ip), Some(i), "mismatch at index {i}: ip={ip}");
-        }
-    }
-
-    #[test]
-    fn ip_to_index_cross_octet() {
-        let ip = net::vm_ip(253);
-        let roundtrip = ip_to_index(&ip);
-        assert_eq!(roundtrip, Some(253), "ip={ip} roundtrip={roundtrip:?}");
-    }
-
-    #[test]
-    fn ip_to_index_invalid() {
-        assert_eq!(ip_to_index("not-an-ip"), None);
-        assert_eq!(ip_to_index("10.10.0"), None);
-        assert_eq!(ip_to_index("10.10.x.1"), None);
-    }
-
-    // ── SQLite DB operations ────────────────────────────────────────
 
     fn test_db() -> Connection {
         let db = Connection::open(":memory:").unwrap();
@@ -675,6 +677,8 @@ mod tests {
             disk: 40960,
             ip: "10.10.0.2".into(),
             port_map: BTreeMap::new(),
+            options: VmOptions::default(),
+            error: None,
             state,
             created_at: 1000,
         }
@@ -776,5 +780,178 @@ mod tests {
         // Persisted the CLI override
         let id3 = resolve_host_id(path_str, None).unwrap();
         assert_eq!(id3, "custom-id");
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use ttcore::engine::VmEngine;
+    static CREATES: AtomicUsize = AtomicUsize::new(0);
+    struct FakeEngine;
+    impl VmEngine for FakeEngine {
+        fn create(&self, _: &Vm, _: &str, _: &str, _: &[String]) -> Result<()> {
+            CREATES.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn start(&self, _: &Vm) -> Result<()> {
+            Ok(())
+        }
+        fn stop(&self, _: &Vm) -> Result<()> {
+            Ok(())
+        }
+        fn destroy(&self, vm: &Vm) -> Result<()> {
+            if vm.image == "fail-delete" {
+                Err(eg!("injected deletion failure"))
+            } else {
+                Ok(())
+            }
+        }
+        fn state(&self, vm: &Vm) -> Result<VmState> {
+            if vm.image == "live" {
+                Ok(VmState::Running)
+            } else {
+                Ok(VmState::Stopped)
+            }
+        }
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+    }
+    fn runtime(db: Connection) -> Runtime {
+        init_db(&db).unwrap();
+        Runtime {
+            host_id: "h1".into(),
+            db,
+            engines: vec![Engine::Docker],
+            store: storage::create_store(Storage::File),
+            storage: Storage::File,
+            image_dir: String::new(),
+            runtime_dir: String::new(),
+            resource: Resource {
+                cpu_total: 8,
+                mem_total: 8192,
+                disk_total: 100000,
+                ..Default::default()
+            },
+            engine_factory: |_| Ok(Box::new(FakeEngine)),
+            network_ready: false,
+        }
+    }
+    fn vm(id: &str, image: &str, state: VmState) -> Vm {
+        Vm {
+            id: id.into(),
+            env_id: "env".into(),
+            host_id: "h1".into(),
+            image: image.into(),
+            engine: Engine::Docker,
+            cpu: 2,
+            mem: 1024,
+            disk: 512,
+            ip: String::new(),
+            port_map: BTreeMap::new(),
+            options: Default::default(),
+            error: None,
+            state,
+            created_at: 0,
+        }
+    }
+    #[test]
+    fn failed_delete_keeps_record_and_reservations_then_retry_succeeds() {
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        let mut record = vm("vm", "fail-delete", VmState::Running);
+        save_vm(&rt.db, &record).unwrap();
+        rt.recount().unwrap();
+        assert!(rt.destroy_vm("vm").is_err());
+        let kept = load_vm(&rt.db, "vm").unwrap().unwrap();
+        assert_eq!(kept.state, VmState::Deleting);
+        assert!(kept.error.unwrap().contains("injected"));
+        assert_eq!(rt.resource.disk_used, 512);
+        record.image = "success".into();
+        save_vm(&rt.db, &record).unwrap();
+        rt.destroy_vm("vm").unwrap();
+        rt.destroy_vm("vm").unwrap();
+        assert!(load_vm(&rt.db, "vm").unwrap().is_none());
+        assert_eq!(rt.resource.vm_count, 0);
+    }
+    #[test]
+    fn repeated_create_is_idempotent_and_changed_request_is_rejected() {
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        let req = CreateVmReq {
+            vm_id: "idempotent".into(),
+            env_id: "env".into(),
+            image: "live".into(),
+            engine: Engine::Docker,
+            cpu: 1,
+            mem: 128,
+            disk: 0,
+            ports: vec![],
+            deny_outgoing: false,
+            ssh_keys: vec![],
+        };
+        let before = CREATES.load(Ordering::SeqCst);
+        let first = rt.create_vm(&req).unwrap();
+        let second = rt.create_vm(&req).unwrap();
+        assert_eq!(first.id, second.id);
+        assert_eq!(CREATES.load(Ordering::SeqCst) - before, 1);
+        assert_eq!(rt.resource.vm_count, 1);
+        let mut changed = req;
+        changed.mem += 1;
+        assert!(rt.create_vm(&changed).is_err());
+    }
+    #[test]
+    fn recovery_rechecks_processes_and_keeps_stopped_disk_allocations() {
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        save_vm(&rt.db, &vm("dead", "dead", VmState::Running)).unwrap();
+        save_vm(&rt.db, &vm("partial", "dead", VmState::Creating)).unwrap();
+        save_vm(&rt.db, &vm("booted", "live", VmState::Creating)).unwrap();
+        rt.reconcile().unwrap();
+        assert_eq!(
+            load_vm(&rt.db, "dead").unwrap().unwrap().state,
+            VmState::Stopped
+        );
+        assert_eq!(
+            load_vm(&rt.db, "partial").unwrap().unwrap().state,
+            VmState::Failed
+        );
+        assert_eq!(
+            load_vm(&rt.db, "booted").unwrap().unwrap().state,
+            VmState::Running
+        );
+        assert_eq!(rt.resource.disk_used, 1536);
+        assert_eq!(rt.resource.vm_count, 3);
+    }
+    #[test]
+    fn ports_reuse_holes_skip_conflicts_and_fail_explicitly_when_exhausted() {
+        let mut first = vm("first", "live", VmState::Running);
+        first.port_map.insert(22, 20000);
+        let next = allocate_ports(&[first], &[22, 80, 22], |p| p != 20001).unwrap();
+        assert_eq!(next[&22], 20002);
+        assert_eq!(next[&80], 20003);
+        assert_eq!(allocate_ports(&[], &[22], |_| true).unwrap()[&22], 20000);
+        assert!(allocate_ports(&[], &[22], |_| false).is_err());
+        let many = (1..=1000).collect::<Vec<_>>();
+        assert_eq!(allocate_ports(&[], &many, |_| true).unwrap().len(), 1000);
+    }
+    #[test]
+    fn snapshot_is_readable_while_mutation_lock_is_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("agent.db");
+        let rt = runtime(Connection::open(&path).unwrap());
+        save_vm(&rt.db, &vm("vm", "live", VmState::Creating)).unwrap();
+        let lock = std::sync::Mutex::new(rt);
+        let _guard = lock.lock().unwrap();
+        assert_eq!(read_vms(path.to_str().unwrap()).unwrap().len(), 1);
+    }
+    #[test]
+    fn firecracker_and_jail_receive_root_directories_not_qcow2_paths() {
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        rt.runtime_dir = "/tmp/tt-runtime".into();
+        let mut record = vm("guest", "image", VmState::Stopped);
+        record.engine = Engine::Firecracker;
+        assert_eq!(rt.image_path(&record), "/tmp/tt-runtime/clone-guest");
+        record.engine = Engine::Jail;
+        assert_eq!(rt.image_path(&record), "/tmp/tt-runtime/clone-guest");
     }
 }

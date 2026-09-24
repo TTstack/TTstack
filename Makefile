@@ -1,6 +1,6 @@
 PREFIX     ?= /opt/ttstack
 CARGO      ?= cargo
-CARGO_FLAG ?=
+CARGO_FLAG ?= --locked
 
 .PHONY: all build release test lint fmt fmt-check doc clean \
         install uninstall deploy-agent deploy-ctl deploy deploy-dist help

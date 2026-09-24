@@ -5,6 +5,7 @@
 //! makes copies near-instant.
 
 use super::ImageStore;
+use crate::command::CommandExt;
 use ruc::*;
 use std::path::Path;
 
@@ -17,7 +18,7 @@ impl ImageStore for FileStore {
         cmd.args(["--reflink=auto", "-a", base, target]);
         #[cfg(not(target_os = "linux"))]
         cmd.args(["-a", base, target]);
-        let output = cmd.output().c(d!("cp image"))?;
+        let output = cmd.bounded_output().c(d!("cp image"))?;
 
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr);
@@ -87,6 +88,50 @@ impl ImageStore for FileStore {
 
     fn disk_format(&self) -> &'static str {
         "qcow2"
+    }
+
+    fn resize_disk(&self, clone_path: &str, size_mib: u32) -> Result<()> {
+        let path = self.resolve_disk(clone_path);
+        let info = std::process::Command::new("qemu-img")
+            .args(["info", "--output=json", &path])
+            .bounded_output()
+            .c(d!("inspect disk"))?;
+        if !info.status.success() {
+            return Err(eg!(
+                "qemu-img info: {}",
+                String::from_utf8_lossy(&info.stderr)
+            ));
+        }
+        let info: serde_json::Value = serde_json::from_slice(&info.stdout).c(d!("disk info"))?;
+        let size = info["virtual-size"]
+            .as_u64()
+            .ok_or_else(|| eg!("missing virtual disk size"))?;
+        let format = info["format"]
+            .as_str()
+            .ok_or_else(|| eg!("missing disk format"))?;
+        if format != "qcow2" {
+            return Err(eg!("file storage currently requires a qcow2 QEMU image"));
+        }
+        let requested = u64::from(size_mib) * 1024 * 1024;
+        if requested < size {
+            return Err(eg!(
+                "requested disk is smaller than the base image; choose at least {} MiB",
+                size.div_ceil(1024 * 1024)
+            ));
+        }
+        if requested > size {
+            let output = std::process::Command::new("qemu-img")
+                .args(["resize", "-f", format, &path, &requested.to_string()])
+                .bounded_output()
+                .c(d!("resize disk"))?;
+            if !output.status.success() {
+                return Err(eg!(
+                    "resize disk: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn name(&self) -> &'static str {

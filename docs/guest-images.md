@@ -24,17 +24,17 @@ sudo tt image create alpine-cloud --image-dir /home/ttstack/images
 
 ## Accessing VMs
 
-All VMs and containers are accessed via **SSH**. When creating an environment,
-provide your SSH public key(s) — TTstack injects them into the guest via
-cloud-init (QEMU) or authorized_keys. Port 22 is always auto-included.
+QEMU cloud images support **SSH**. Provide SSH public keys when creating the
+environment; TTstack configures root access via cloud-init. Other engines have
+the access methods listed below. Port 22 is auto-included for QEMU / experimental Bhyve and Jail.
 
 | Engine | Access Method |
 |--------|--------------|
 | **QEMU** (cloud images) | SSH via port forwarding (key injected by cloud-init) |
 | **QEMU** (custom images) | SSH via port forwarding (your own key setup) |
 | **Docker** | SSH into container (if sshd installed) or `docker exec` from host |
-| **Firecracker** | Serial console only (no SSH by default) |
-| **Bhyve** (FreeBSD) | SSH via port forwarding |
+| **Firecracker** | Boot log on agent; custom guest workload (no managed SSH/console) |
+| **Bhyve** (experimental FreeBSD) | SSH via port forwarding |
 
 ### QEMU Cloud Images (SSH)
 
@@ -81,9 +81,9 @@ docker exec -it <container-id> sh
 
 ### Firecracker MicroVMs
 
-Firecracker VMs boot into a shell on the serial console but have
-no SSH daemon by default. They are designed for headless workloads.
-To add SSH, customize the rootfs image with an OpenSSH server.
+Firecracker's built-in image is a boot/network smoke-test workload. It has no
+managed SSH or interactive console. View boot output on the agent at
+`/home/ttstack/run/fc-<vm-id>.log`; use a custom rootfs for your workload.
 
 ## Image Formats by Engine
 
@@ -254,13 +254,16 @@ Guest VM ←→ TAP device ←→ tt0 bridge (10.10.0.1/16) ←→ NAT (nftables
 
 Docker containers use Docker's native networking with `-p` port publishing.
 
-FreeBSD uses PF instead of nftables:
+Experimental FreeBSD support uses PF instead of nftables:
 
 ```
 Guest VM ←→ TAP device ←→ tt0 bridge (10.10.0.1/16) ←→ NAT (PF) ←→ Host
 ```
 
-## Creating a FreeBSD Test VM on Linux
+## Experimental FreeBSD development notes
+
+The following is historical development guidance, not a supported deployment
+workflow. FreeBSD/Bhyve/Jail fixes and host validation are outside the primary scope.
 
 Running FreeBSD inside QEMU on a Linux host is useful for testing the
 FreeBSD agent, controller, and CLI. This section documents the
@@ -341,3 +344,19 @@ from disk.
 | `ifconfig <tap> create` fails for custom names | Must specify type first | Fixed in TTstack — uses `ifconfig tap create name <tap>` |
 | Bhyve TAP name mismatch | Old code used `tap-{id}` instead of hashed name | Fixed in TTstack — uses `net::tap_name()` |
 | OOM during Rust compilation on mfsBSD | mfsBSD runs in RAM; 4GB is insufficient | Use 8GB+ RAM or install to disk |
+
+## Current operational limits
+
+- Run `tt image create` locally on the target agent; image distribution is manual.
+- QEMU file storage requires qcow2. `--disk` grows the cloned virtual disk; the
+  guest must grow its partition/filesystem (cloud-init images commonly do this).
+  Requests smaller than the source virtual disk fail explicitly. Zvol uses raw.
+- Firecracker requires file storage and a directory containing `vmlinux` and
+  `rootfs.ext4`. Its root filesystem size is retained. The guest must configure its
+  IP from the kernel `ip=` argument; the built-in recipe does this. Regenerate older
+  `fc-alpine` images to replace their hard-coded address. Boot output is in
+  `/home/ttstack/run/fc-<id>.log`; managed SSH and interactive consoles are not provided.
+- Docker images must have a long-running default command. Base OS images may exit
+  immediately; database images may require configuration that TTstack does not
+  expose. Supply a prepared image with a suitable default command. Disk quotas,
+  outgoing network restrictions and SSH injection are not supported for Docker.

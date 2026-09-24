@@ -14,7 +14,7 @@
 prefix      = "/opt/ttstack"     # Install path on all hosts
 user        = "ttstack"          # Runtime user (created if absent)
 release_dir = "./target/release" # Local path to compiled binaries
-# api_key   = "my-secret-key"   # API key for auth (auto-generated if omitted)
+# api_key   = "my-secret-key"   # API key for auth (persisted in deploy.toml.api-key if omitted)
 
 # ── Controller ───────────────────────────────────────────────────────
 # One controller per fleet. Hosts the REST API and web dashboard.
@@ -74,9 +74,6 @@ host = "10.0.0.2"               # REQUIRED — agent IP or hostname
 #   image_dir   = "tank/ttstack/images"
 #   runtime_dir = "tank/ttstack/runtime"
 #
-# Multiple disk paths — comma-separated for images spread across disks:
-#   image_dir = "/data1/images,/data2/images"
-
 # ── Example: minimal agent (all auto-detected) ──────────────────────
 
 # [[agents]]
@@ -93,14 +90,3 @@ runtime_dir = "tank/ttstack/runtime"
 cpu_total   = 32               # 32 cores
 mem_total   = 65536            # 64 GiB
 disk_total  = "1000G"          # ~1 TiB
-
-# ── Example: multi-disk file node ─────────────────────────────────────
-
-# [[agents]]
-# host        = "10.0.0.5"
-# storage     = "file"
-# image_dir   = "/data1/images,/data2/images"
-# runtime_dir = "/data1/runtime"
-# cpu_total   = 8
-# mem_total   = 16384          # 16 GiB
-# disk_total  = "400G"

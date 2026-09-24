@@ -1,9 +1,11 @@
+//! Experimental FreeBSD support; outside the primary validation scope.
 //! Bhyve engine implementation (FreeBSD only).
 //!
 //! Bhyve is the native hypervisor on FreeBSD. This module is only
 //! compiled on FreeBSD targets via `#[cfg(target_os = "freebsd")]`.
 
 use super::VmEngine;
+use crate::command::CommandExt;
 use crate::model::{RUN_DIR, Vm, VmState};
 use crate::net;
 use ruc::*;
@@ -40,7 +42,7 @@ impl VmEngine for BhyveEngine {
             .args(["-m", &format!("{}M", vm.mem)])
             .args(["-d", image_path])
             .arg(&vm.id)
-            .output()
+            .bounded_output()
             .c(d!("failed to run bhyveload"))?;
 
         if !output.status.success() {
@@ -96,7 +98,7 @@ impl VmEngine for BhyveEngine {
 
         let output = Command::new("bhyvectl")
             .args(["--destroy", "--vm", &vm.id])
-            .output()
+            .bounded_output()
             .c(d!("bhyvectl destroy"))?;
 
         if !output.status.success() {
@@ -123,7 +125,7 @@ impl VmEngine for BhyveEngine {
         // Clean up the bhyve VM device
         let _ = Command::new("bhyvectl")
             .args(["--destroy", "--vm", &vm.id])
-            .output();
+            .bounded_output();
 
         let _ = std::fs::remove_file(Self::pid_path(vm));
 
@@ -133,7 +135,7 @@ impl VmEngine for BhyveEngine {
     fn state(&self, vm: &Vm) -> Result<VmState> {
         let output = Command::new("bhyvectl")
             .args(["--get-lowmem", "--vm", &vm.id])
-            .output();
+            .bounded_output();
 
         match output {
             Ok(o) if o.status.success() => Ok(VmState::Running),

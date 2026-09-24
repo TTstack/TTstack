@@ -3,6 +3,7 @@ name = "tt-ctl"
 description = "TTstack central controller — fleet management and VM scheduling."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 

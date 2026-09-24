@@ -37,6 +37,9 @@ pub trait ImageStore: Send + Sync {
     /// Disk format string for the engine (e.g. `"qcow2"` or `"raw"`).
     fn disk_format(&self) -> &'static str;
 
+    /// Grow a QEMU disk, rejecting shrink requests.
+    fn resize_disk(&self, clone_path: &str, size_mib: u32) -> Result<()>;
+
     /// Backend name for logging.
     fn name(&self) -> &'static str;
 }

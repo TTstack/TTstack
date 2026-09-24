@@ -40,7 +40,7 @@ impl Client {
     /// GET request, returning deserialized data.
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{path}", self.base_url);
-        let resp = self.http.get(&url).send().await.c(d!("request failed"))?;
+        let resp = self.http.get(&url).send().await.c(d!("request failed; a submitted operation may still be running — inspect the environment before retrying"))?;
         let status = resp.status();
         let body: ApiResp<T> = resp.json().await.c(d!("invalid response"))?;
 
@@ -60,7 +60,7 @@ impl Client {
             .json(body)
             .send()
             .await
-            .c(d!("request failed"))?;
+            .c(d!("request failed; a submitted operation may still be running — inspect the environment before retrying"))?;
         let status = resp.status();
         let body: ApiResp<T> = resp.json().await.c(d!("invalid response"))?;
 
@@ -74,7 +74,7 @@ impl Client {
     /// POST request with no request body, no response body.
     pub async fn post_action(&self, path: &str) -> Result<()> {
         let url = format!("{}{path}", self.base_url);
-        let resp = self.http.post(&url).send().await.c(d!("request failed"))?;
+        let resp = self.http.post(&url).timeout(std::time::Duration::from_secs(600)).send().await.c(d!("request failed; a submitted operation may still be running — inspect the environment before retrying"))?;
         let status = resp.status();
         let body: ApiResp<()> = resp.json().await.c(d!("invalid response"))?;
 
@@ -91,9 +91,10 @@ impl Client {
         let resp = self
             .http
             .delete(&url)
+            .timeout(std::time::Duration::from_secs(600))
             .send()
             .await
-            .c(d!("request failed"))?;
+            .c(d!("request failed; a submitted operation may still be running — inspect the environment before retrying"))?;
         let status = resp.status();
         let body: ApiResp<()> = resp.json().await.c(d!("invalid response"))?;
 

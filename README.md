@@ -2,12 +2,14 @@
 
 [![CI](https://github.com/rust-util-collections/TTstack/actions/workflows/ci.yml/badge.svg)](https://github.com/rust-util-collections/TTstack/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.86%2B-orange.svg)](https://www.rust-lang.org)
-[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20freebsd-green.svg)](#platform-support)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
+[![Platform](https://img.shields.io/badge/platform-linux-green.svg)](#platform-support)
 
 TTstack is a lightweight private cloud platform for mid-size teams and
 individual developers. Centralized management of VMs and containers
-across multiple physical hosts.
+across multiple physical hosts. Linux is the primary supported platform;
+FreeBSD (Bhyve, Jail and PF networking) is **experimental**, outside the
+primary reliability and CI scope.
 
 ## Quick Start
 
@@ -33,8 +35,8 @@ ssh root@<host-ip> -p <mapped-port>         # key-based auth
 | **QEMU** cloud images | `ssh root@<host> -p <mapped-port>` (SSH key injected via cloud-init) |
 | **QEMU** custom images | SSH via port forwarding (your own key setup) |
 | **Docker** | SSH (if sshd in image) or `docker exec` from host |
-| **Firecracker** | serial console only |
-| **Bhyve** (FreeBSD) | SSH via port forwarding |
+| **Firecracker** | Custom guest workloads; boot output in `/home/ttstack/run/fc-<id>.log` (no managed SSH or interactive console) |
+| **Bhyve** (experimental FreeBSD) | SSH via port forwarding |
 
 QEMU cloud images auto-configure via **cloud-init**: SSH public keys,
 networking — all set on first boot. See [docs/guest-images.md](docs/guest-images.md).
@@ -58,7 +60,7 @@ export TT_API_KEY=your-secret-key
 
 ## Built-in Images
 
-12 ready-to-use recipes — deploy and start creating VMs immediately:
+Built-in image recipes (guest workloads and container default commands must suit your use case):
 
 | Recipe | Engine | Description |
 |--------|--------|-------------|
@@ -66,7 +68,7 @@ export TT_API_KEY=your-secret-key
 | `nginx` `redis` `postgres` | Docker | Popular services |
 | `fc-alpine` | Firecracker | Alpine microVM (~50MB) |
 | `alpine-cloud` `debian-cloud` `ubuntu-cloud` | QEMU | SSH-ready cloud images |
-| `freebsd-base` | Jail | FreeBSD 14.3 base |
+| `freebsd-base` | Jail | Experimental FreeBSD base |
 
 ```bash
 tt image recipes                            # list all
@@ -79,7 +81,7 @@ See [docs/guest-images.md](docs/guest-images.md) for custom image creation.
 
 ## Key Features
 
-- **Multi-engine**: QEMU/KVM, Firecracker, Docker/Podman (Linux); Bhyve, Jail (FreeBSD)
+- **Multi-engine**: QEMU/KVM, Firecracker, Docker/Podman (Linux); Bhyve, Jail (experimental FreeBSD)
 - **Multi-host fleet**: up to 50 hosts, 1000 VM instances, best-fit scheduling
 - **Environments**: group VMs with lifecycle control and auto-expiry (default 6h)
 - **Storage backends**: ZFS zvol (instant clone), plain qcow2 file copies
@@ -127,19 +129,45 @@ tt deploy agent/ctl/all/dist        Deploy TTstack
 | `--engine <type>` | qemu, firecracker, docker, bhyve, jail | qemu |
 | `--cpu <N>` | vCPUs per VM | 2 |
 | `--mem <MiB>` | Memory per VM | 1024 |
-| `--disk <MiB>` | Disk per VM | 40960 |
+| `--disk <MiB>` | QEMU virtual disk size; grows the clone, never shrinks it | 40960 (QEMU only) |
 | `--dup <N>` | Replicas per image | 1 |
-| `--ssh-key <FILE>` | SSH public key file (repeatable) | *required for VMs* |
+| `--ssh-key <FILE>` | SSH public key file (repeatable; QEMU / experimental Jail) | Supply for SSH access |
 | `-p, --port <PORT>` | Guest port to expose (repeatable) | — |
-| `--lifetime <SEC>` | Auto-expiry (0 = 6h default) | 21600 |
+| `--lifetime <SEC>` | Auto-expiry (0 = no expiry; longer lifetimes allowed) | 21600 |
 | `--deny-outgoing` | Block outbound traffic | false |
+
+## Lifecycle and recovery
+
+`tt env create` submits a durable plan and waits for completion. Interrupted clients
+can inspect it with `tt env show <name>`. HTTP clients receive **202 Accepted** and
+poll `GET /api/envs/<name>` until the state leaves `creating`.
+
+On Linux, `stop` releases VM/container execution resources and retains the disk;
+`start` boots from that disk. QEMU attempts guest shutdown before terminating the
+VMM if necessary; Firecracker stop terminates the microVM. Save work before stopping.
+Failed operations expose errors in `env show`; incomplete deletion stays `deleting`
+and is retried. `running` means the VM/container process is running; guest SSH
+or application startup may still be in progress. A creation interrupted by a controller crash may become `failed`;
+inspect it and delete/recreate it. Resources are never forgotten just because an
+agent is unreachable. State snapshots refresh periodically (normally every 15s).
+
+An environment groups lifecycle operations; it does not create a cross-host private
+network. VM access uses each host's TCP port mappings. Docker uses its own network,
+does not enforce a disk quota, and rejects `--disk`, `--deny-outgoing` and SSH key
+injection. Use images with a long-running default command; a plain OS image that
+exits immediately will fail creation. Firecracker uses the existing rootfs size
+and also rejects disk resizing and SSH key injection.
+
+Image creation runs **on the local machine**. Run it on each intended agent host;
+TTstack does not distribute images. Docker registry references can be supplied
+directly to environment creation without a recipe.
 
 ## Platform Support
 
 | Platform | Engines | Networking |
 |----------|---------|------------|
 | **Linux** | QEMU/KVM, Firecracker, Docker/Podman | nftables NAT |
-| **FreeBSD** | Bhyve, Jail | PF NAT |
+| **FreeBSD (experimental)** | Bhyve, Jail | PF NAT; not part of the primary validation scope |
 
 ## Documentation
 

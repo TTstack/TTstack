@@ -47,10 +47,13 @@ async fn main() {
     // Background task: periodic host health check
     let heartbeat_state = state.clone();
     tokio::spawn(async move {
-        let client = handler::agent_client(heartbeat_state.api_key.as_deref(), 10);
+        let client = handler::agent_client(heartbeat_state.api_key.as_deref(), 5);
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            handler::refresh_all_hosts(&heartbeat_state, &client).await;
+            // Avoid racing a creation plan with an old host snapshot.
+            if let Ok(_operation) = heartbeat_state.operations.try_lock() {
+                handler::refresh_all_hosts(&heartbeat_state, &client).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
         }
     });
 
@@ -112,92 +115,41 @@ async fn main() {
 }
 
 async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
+        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+    }
+    #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
     eprintln!("received shutdown signal");
 }
 
-/// Maximum retries when contacting an agent during expiry cleanup.
-const EXPIRY_RETRIES: u32 = 2;
-
-/// Periodically destroy expired environments.
+/// Retry incomplete deletions and expire environments without forgetting failed cleanup.
 async fn expire_envs(state: &CtlState) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-
-    let expired = {
-        let db = state.lock_db();
-        db.list_envs()
-            .unwrap_or_default()
+    let ids = match state.lock_db().list_envs() {
+        Ok(envs) => envs
             .into_iter()
-            .filter(|e| e.expires_at > 0 && e.expires_at <= now)
+            .filter(|e| {
+                e.state == ttcore::model::EnvState::Deleting
+                    || (e.expires_at > 0 && e.expires_at <= now)
+            })
             .map(|e| e.id)
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            eprintln!("[ctl] expiry DB error: {e}");
+            return;
+        }
     };
-
-    let client = handler::agent_client(state.api_key.as_deref(), 15);
-
-    for env_id in expired {
-        eprintln!("expiring environment: {env_id}");
-
-        let (vms, hosts) = {
-            let db = state.lock_db();
-            let vms = db.vms_by_env(&env_id).unwrap_or_default();
-            let hosts = db.list_hosts().unwrap_or_default();
-            (vms, hosts)
-        };
-
-        for vm in &vms {
-            if let Some(host) = hosts.iter().find(|h| h.id == vm.host_id) {
-                let url = format!("http://{}/api/vms/{}", host.addr, vm.id);
-                let mut ok = false;
-                for attempt in 0..=EXPIRY_RETRIES {
-                    match client.delete(&url).send().await {
-                        Ok(r) if r.status().is_success() => {
-                            ok = true;
-                            break;
-                        }
-                        Ok(r) => {
-                            eprintln!(
-                                "[ctl] WARN: agent {} returned {} deleting VM {} (attempt {}/{})",
-                                host.addr,
-                                r.status(),
-                                vm.id,
-                                attempt + 1,
-                                EXPIRY_RETRIES + 1
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "[ctl] WARN: failed to reach {} to delete VM {} (attempt {}/{}): {e}",
-                                host.addr,
-                                vm.id,
-                                attempt + 1,
-                                EXPIRY_RETRIES + 1
-                            );
-                        }
-                    }
-                    if attempt < EXPIRY_RETRIES {
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    }
-                }
-                if !ok {
-                    eprintln!(
-                        "[ctl] ERROR: could not delete VM {} on host {} after {} attempts; \
-                         VM may be orphaned",
-                        vm.id,
-                        host.addr,
-                        EXPIRY_RETRIES + 1
-                    );
-                }
-            }
+    for id in ids {
+        if let Err((_, error)) = handler::expire_environment(state, &id).await {
+            eprintln!("[ctl] cleanup {id}: {error}");
         }
-
-        let db = state.lock_db();
-        for vm in &vms {
-            let _ = db.remove_vm(&vm.id);
-        }
-        let _ = db.remove_env(&env_id);
     }
 }

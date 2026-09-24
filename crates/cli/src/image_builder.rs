@@ -80,7 +80,7 @@ pub const RECIPES: &[ImageRecipe] = &[
     ImageRecipe {
         name: "freebsd-base",
         engine: "jail",
-        description: "FreeBSD 14.3 base (fetched from releases, ~180MB)",
+        description: "Experimental FreeBSD 14.3 base (fetched from releases, ~180MB)",
     },
 ];
 
@@ -148,7 +148,7 @@ async fn create_docker(name: &str) -> Result<()> {
 
     // Tag as the short name so `tt env create --image alpine` works
     if tag != name {
-        let _ = Command::new(rt).args(["tag", tag, name]).output().await;
+        run_cmd(rt, &["tag", tag, name]).await?;
     }
 
     println!("[image] {name} ready ({rt})");
@@ -168,7 +168,7 @@ async fn create_firecracker(name: &str, image_dir: &Path) -> Result<()> {
     tokio::fs::create_dir_all(&target).await.c(d!("mkdir"))?;
 
     let kernel = target.join("vmlinux");
-    let rootfs = target.join("rootfs.ext4");
+    let destination = target.join("rootfs.ext4");
 
     // Download kernel
     if !kernel.exists() {
@@ -180,11 +180,13 @@ async fn create_firecracker(name: &str, image_dir: &Path) -> Result<()> {
     }
 
     // Create rootfs with Alpine userspace
-    if rootfs.exists() {
+    if destination.exists() {
         println!("[image] rootfs already exists");
         return Ok(());
     }
 
+    let staging = tempfile::NamedTempFile::new_in(&target).c(d!("rootfs staging file"))?;
+    let rootfs = staging.path().to_path_buf();
     let rootfs_mb: u32 = 128;
     println!("[image] creating {rootfs_mb}MB rootfs with Alpine userspace...");
 
@@ -214,15 +216,16 @@ async fn create_firecracker(name: &str, image_dir: &Path) -> Result<()> {
     )
     .await?;
 
-    // Download and extract Alpine minirootfs
-    let tarball = format!("{}/alpine.tar.gz", mnt.display());
-    download_file(ALPINE_MINIROOTFS_URL, Path::new(&tarball)).await?;
-    run_cmd("tar", &["xzf", &tarball, "-C", &mnt.display().to_string()]).await?;
-    tokio::fs::remove_file(&tarball).await.ok();
+    let populate: Result<()> = async {
+        // Download and extract Alpine minirootfs
+        let tarball = format!("{}/alpine.tar.gz", mnt.display());
+        download_file(ALPINE_MINIROOTFS_URL, Path::new(&tarball)).await?;
+        run_cmd("tar", &["xzf", &tarball, "-C", &mnt.display().to_string()]).await?;
+        tokio::fs::remove_file(&tarball).await.ok();
 
-    // Create init wrapper that mounts essential filesystems
-    let init_script = format!(
-        r#"#!/bin/sh
+        // Create init wrapper that mounts essential filesystems
+        let init_script = format!(
+            r#"#!/bin/sh
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
@@ -233,45 +236,63 @@ echo "TTstack Firecracker guest [{name}] booted OK"
 
 # Set up networking if virtio-net is available
 ip link set eth0 up 2>/dev/null
-ip addr add 10.10.0.2/16 dev eth0 2>/dev/null
+# The agent supplies the allocated address through the kernel command line.
+for arg in $(cat /proc/cmdline); do
+    case "$arg" in
+        ip=*) addr=${{arg#ip=}}; addr=${{addr%%:*}}; ip addr add "$addr/16" dev eth0 2>/dev/null ;;
+    esac
+done
 ip route add default via 10.10.0.1 2>/dev/null
 
-# Start shell or sleep forever
-if [ -x /bin/sh ]; then
-    /bin/sh
-else
-    while true; do sleep 3600; done
-fi
+# This smoke-test image stays alive without an interactive serial session.
+# Custom images should start their own workload here.
+while true; do sleep 3600; done
 "#
-    );
-    let init_path = format!("{}/init", mnt.display());
-    tokio::fs::write(&init_path, init_script)
-        .await
-        .c(d!("write init"))?;
-    run_cmd("chmod", &["755", &init_path]).await?;
+        );
+        let init_path = format!("{}/init", mnt.display());
+        tokio::fs::write(&init_path, init_script)
+            .await
+            .c(d!("write init"))?;
+        run_cmd("chmod", &["755", &init_path]).await?;
 
-    // Ensure /sbin/init symlink
-    let sbin = format!("{}/sbin", mnt.display());
-    tokio::fs::create_dir_all(&sbin).await.ok();
-    let sbin_init = format!("{sbin}/init");
-    if !Path::new(&sbin_init).exists() {
-        tokio::fs::symlink("/init", &sbin_init).await.ok();
+        // Ensure /sbin/init symlink
+        let sbin = format!("{}/sbin", mnt.display());
+        tokio::fs::create_dir_all(&sbin).await.ok();
+        let sbin_init = format!("{sbin}/init");
+        let _ = tokio::fs::remove_file(&sbin_init).await;
+        tokio::fs::symlink("/init", &sbin_init)
+            .await
+            .c(d!("install guest init"))?;
+
+        // Set up DNS
+        let etc = format!("{}/etc", mnt.display());
+        tokio::fs::create_dir_all(&etc).await.ok();
+        tokio::fs::write(format!("{etc}/resolv.conf"), "nameserver 8.8.8.8\n")
+            .await
+            .ok();
+
+        Ok(())
     }
-
-    // Set up DNS
-    let etc = format!("{}/etc", mnt.display());
-    tokio::fs::create_dir_all(&etc).await.ok();
-    tokio::fs::write(format!("{etc}/resolv.conf"), "nameserver 8.8.8.8\n")
-        .await
-        .ok();
-
-    run_cmd("umount", &[&mnt.display().to_string()]).await?;
+    .await;
+    if let Err(e) = run_cmd("umount", &[&mnt.display().to_string()]).await {
+        let (_, saved) = staging.keep().map_err(|e| eg!(e.to_string()))?;
+        return Err(eg!(
+            "{}; staging rootfs retained at {}; unmount {} before removing it",
+            e,
+            saved.display(),
+            mnt.display()
+        ));
+    }
     tokio::fs::remove_dir(&mnt).await.ok();
+    populate?;
+    staging
+        .persist(&destination)
+        .map_err(|e| eg!(e.to_string()))?;
 
     println!(
         "[image] {name} ready: kernel={}, rootfs={}",
         human_size(&kernel).await,
-        human_size(&rootfs).await
+        human_size(&destination).await
     );
     Ok(())
 }
@@ -281,7 +302,7 @@ fi
 fn qemu_cloud_url(name: &str) -> Option<&'static str> {
     match name {
         "alpine-cloud" => Some(
-            "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/cloud/nocloud_alpine-3.21.3-x86_64-bios-cloudinit-r0.qcow2",
+            "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/cloud/nocloud_alpine-3.21.7-x86_64-bios-cloudinit-r0.qcow2",
         ),
         "debian-cloud" => Some(
             "https://cloud.debian.org/images/cloud/trixie/daily/latest/debian-13-generic-amd64-daily.qcow2",
@@ -301,31 +322,55 @@ async fn create_qemu(name: &str, image_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let url = qemu_cloud_url(name).ok_or_else(|| eg!("unknown QEMU image: {name}"))?;
+    let url = qemu_cloud_url(name).ok_or_else(|| eg!(format!("unknown QEMU image: {name}")))?;
 
     println!("[image] downloading {name} cloud image...");
-    download_file(url, &target).await?;
-
-    // Ensure it's qcow2 format
-    let ext = url.rsplit('.').next().unwrap_or("");
-    if ext == "img" {
-        // Convert raw to qcow2
-        let tmp = target.with_extension("raw");
-        tokio::fs::rename(&target, &tmp).await.c(d!("rename"))?;
-        run_cmd(
-            "qemu-img",
-            &[
-                "convert",
-                "-f",
-                "raw",
-                "-O",
-                "qcow2",
-                &tmp.display().to_string(),
-                &target.display().to_string(),
-            ],
-        )
-        .await?;
-        tokio::fs::remove_file(&tmp).await.ok();
+    let staging = tempfile::Builder::new()
+        .prefix(".tt-image-")
+        .tempdir_in(image_dir)
+        .c(d!("image staging directory"))?;
+    let downloaded = staging.path().join("download");
+    download_file(url, &downloaded).await?;
+    // Cloud providers use .img for both qcow2 and raw: inspect content, never guess by suffix.
+    let info = Command::new("qemu-img")
+        .args(["info", "--output=json"])
+        .arg(&downloaded)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .c(d!("inspect downloaded image"))?;
+    if !info.status.success() {
+        return Err(eg!(
+            "invalid cloud image: {}",
+            String::from_utf8_lossy(&info.stderr)
+        ));
+    }
+    let info: serde_json::Value =
+        serde_json::from_slice(&info.stdout).c(d!("cloud image format"))?;
+    match info["format"].as_str() {
+        Some("qcow2") => tokio::fs::rename(&downloaded, &target)
+            .await
+            .c(d!("publish image"))?,
+        Some("raw") => {
+            let converted = staging.path().join("disk.qcow2");
+            run_cmd(
+                "qemu-img",
+                &[
+                    "convert",
+                    "-f",
+                    "raw",
+                    "-O",
+                    "qcow2",
+                    &downloaded.display().to_string(),
+                    &converted.display().to_string(),
+                ],
+            )
+            .await?;
+            tokio::fs::rename(converted, &target)
+                .await
+                .c(d!("publish converted image"))?;
+        }
+        _ => return Err(eg!("unsupported cloud image format; expected raw or qcow2")),
     }
 
     println!("[image] {name} ready: {}", human_size(&target).await);
@@ -383,10 +428,11 @@ async fn create_jail(name: &str, image_dir: &Path) -> Result<()> {
 
 /// Create a specific image by recipe name.
 pub async fn create_image(name: &str, image_dir: &Path) -> Result<()> {
-    let recipe = RECIPES
-        .iter()
-        .find(|r| r.name == name)
-        .ok_or_else(|| eg!("unknown image recipe '{name}' (run 'tt image recipes' to list)"))?;
+    let recipe = RECIPES.iter().find(|r| r.name == name).ok_or_else(|| {
+        eg!(format!(
+            "unknown image recipe '{name}' (run 'tt image recipes' to list)"
+        ))
+    })?;
 
     match recipe.engine {
         "docker" => create_docker(name).await,
@@ -401,20 +447,26 @@ pub async fn create_image(name: &str, image_dir: &Path) -> Result<()> {
 pub async fn create_all_for_engine(engine: &str, image_dir: &Path) -> Result<()> {
     let matching: Vec<_> = RECIPES.iter().filter(|r| r.engine == engine).collect();
     if matching.is_empty() {
-        return Err(eg!("no recipes for engine '{engine}'"));
+        return Err(eg!(format!("no recipes for engine '{engine}'")));
     }
 
+    let mut failures = Vec::new();
     for recipe in matching {
         println!("\n--- {}: {} ---", recipe.name, recipe.description);
         if let Err(e) = create_image(recipe.name, image_dir).await {
-            eprintln!("[image] WARN: failed to create {}: {e}", recipe.name);
+            failures.push(format!("{}: {e}", recipe.name));
         }
     }
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(eg!("image creation failed: {}", failures.join("; ")))
+    }
 }
 
 /// Create all available images.
 pub async fn create_all(image_dir: &Path) -> Result<()> {
+    let mut failures = Vec::new();
     for recipe in RECIPES {
         // Skip jail on non-FreeBSD and skip FreeBSD-only on Linux
         if recipe.engine == "jail" && !cfg!(target_os = "freebsd") {
@@ -426,40 +478,60 @@ pub async fn create_all(image_dir: &Path) -> Result<()> {
 
         println!("\n--- {}: {} ---", recipe.name, recipe.description);
         if let Err(e) = create_image(recipe.name, image_dir).await {
-            eprintln!("[image] WARN: failed to create {}: {e}", recipe.name);
+            failures.push(format!("{}: {e}", recipe.name));
         }
     }
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(eg!("image creation failed: {}", failures.join("; ")))
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
 async fn download_file(url: &str, dest: &Path) -> Result<()> {
+    let parent = dest.parent().unwrap_or(Path::new("."));
+    let staging = tempfile::NamedTempFile::new_in(parent).c(d!("download staging file"))?;
     let output = Command::new("curl")
-        .args(["-fSL", "--progress-bar", "-o"])
-        .arg(dest)
+        .args([
+            "-fsSL",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "900",
+            "-o",
+        ])
+        .arg(staging.path())
         .arg(url)
+        .kill_on_drop(true)
         .output()
         .await
         .c(d!("curl failed"))?;
-
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(eg!("download {} failed: {}", url, stderr));
+        return Err(eg!(
+            "download {} failed: {}",
+            url,
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
+    staging.persist(dest).map_err(|e| eg!(e.to_string()))?;
     Ok(())
 }
 
 async fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
-    let output = Command::new(cmd)
-        .args(args)
-        .output()
+    let mut command = Command::new(cmd);
+    command.args(args).kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(300), command.output())
         .await
+        .c(d!("host command timed out"))?
         .c(d!(format!("run {cmd}")))?;
-
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(eg!("{} failed: {}", cmd, stderr));
+        return Err(eg!(
+            "{} failed: {}",
+            cmd,
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
     Ok(())
 }
@@ -520,5 +592,48 @@ mod tests {
         assert!(engines.contains("firecracker"));
         assert!(engines.contains("qemu"));
         assert!(engines.contains("jail"));
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[tokio::test]
+    async fn failed_download_keeps_previous_image_and_success_publishes_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("image");
+        std::fs::write(&dest, b"previous").unwrap();
+        for (response, success) in [
+            (
+                "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial",
+                false,
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\ncomplete",
+                true,
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/image", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request).await.unwrap();
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            });
+            assert_eq!(download_file(&url, &dest).await.is_ok(), success);
+            server.await.unwrap();
+            assert_eq!(
+                std::fs::read(&dest).unwrap(),
+                if success {
+                    b"complete".as_slice()
+                } else {
+                    b"previous".as_slice()
+                }
+            );
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
     }
 }

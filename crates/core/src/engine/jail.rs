@@ -1,9 +1,11 @@
+//! Experimental FreeBSD support; outside the primary validation scope.
 //! FreeBSD Jail engine implementation.
 //!
 //! Uses FreeBSD jails for lightweight OS-level virtualization.
 //! Each jail gets its own root filesystem, network stack, and process space.
 
 use super::VmEngine;
+use crate::command::CommandExt;
 use crate::model::{Vm, VmState};
 use ruc::*;
 use std::path::Path;
@@ -73,7 +75,7 @@ impl VmEngine for JailEngine {
             .arg(format!("ip4.addr={}", vm.ip))
             .arg("persist")
             .arg("mount.devfs")
-            .output()
+            .bounded_output()
             .c(d!("create jail"))?;
 
         if !output.status.success() {
@@ -92,7 +94,7 @@ impl VmEngine for JailEngine {
             .args(["-m"])
             .arg(format!("name={name}"))
             .arg("persist")
-            .output()
+            .bounded_output()
             .c(d!("start jail"))?;
 
         if !output.status.success() {
@@ -109,7 +111,7 @@ impl VmEngine for JailEngine {
         // Kill all processes then remove the jail
         let output = Command::new("jail")
             .args(["-r", &name])
-            .output()
+            .bounded_output()
             .c(d!("stop jail"))?;
 
         if !output.status.success() {
@@ -131,7 +133,7 @@ impl VmEngine for JailEngine {
 
         let output = Command::new("jls")
             .args(["-j", &name, "jid"])
-            .output()
+            .bounded_output()
             .c(d!("query jail"))?;
 
         if output.status.success() {

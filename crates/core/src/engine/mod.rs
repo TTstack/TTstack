@@ -37,7 +37,7 @@ pub trait VmEngine: Send + Sync {
     /// Start a previously stopped VM.
     fn start(&self, vm: &Vm) -> Result<()>;
 
-    /// Gracefully stop a running VM.
+    /// Stop execution and release memory; preserve the disk for restart.
     fn stop(&self, vm: &Vm) -> Result<()>;
 
     /// Destroy the VM and clean up all associated resources.
@@ -52,10 +52,9 @@ pub trait VmEngine: Send + Sync {
 
 /// Create an engine instance for the given [`Engine`] kind.
 ///
-/// # Panics
-/// Panics if the requested engine is not available on the current platform.
-pub fn create_engine(kind: Engine) -> Box<dyn VmEngine> {
-    match kind {
+/// Returns an error for unsupported platforms.
+pub fn create_engine(kind: Engine) -> Result<Box<dyn VmEngine>> {
+    Ok(match kind {
         #[cfg(target_os = "linux")]
         Engine::Qemu => Box::new(qemu::QemuEngine::new()),
         #[cfg(target_os = "linux")]
@@ -66,6 +65,45 @@ pub fn create_engine(kind: Engine) -> Box<dyn VmEngine> {
         #[cfg(target_os = "freebsd")]
         Engine::Jail => Box::new(jail::JailEngine::new()),
         #[allow(unreachable_patterns)]
-        other => panic!("engine {other} is not supported on this platform"),
+        other => {
+            return Err(eg!(format!(
+                "engine {other} is not supported on this platform"
+            )));
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn process_matches(pid: u32, marker: &str) -> Result<bool> {
+    match std::fs::read(format!("/proc/{pid}/cmdline")) {
+        Ok(cmdline) => Ok(cmdline
+            .split(|c| *c == 0)
+            .any(|arg| arg == marker.as_bytes())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).c(d!("read process identity")),
     }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn terminate(pid: u32, marker: &str) -> Result<()> {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    for signal in [Signal::SIGTERM, Signal::SIGKILL] {
+        if !process_matches(pid, marker)? {
+            return Ok(());
+        }
+        match kill(Pid::from_raw(pid as i32), signal) {
+            Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+            Err(e) => return Err(e).c(d!("terminate VM")),
+        }
+        for _ in 0..100 {
+            if !process_matches(pid, marker)? {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    Err(eg!(format!(
+        "VM process {pid} did not exit; resources retained"
+    )))
 }

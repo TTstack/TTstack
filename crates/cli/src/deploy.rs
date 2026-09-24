@@ -54,6 +54,69 @@ fn generate_api_key() -> String {
     )
 }
 
+fn parse_api_key(content: &str) -> Result<String> {
+    let key = content
+        .lines()
+        .find_map(|line| line.strip_prefix("TT_API_KEY="))
+        .unwrap_or(content.trim());
+    if key.is_empty()
+        || !key
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+    {
+        return Err(eg!(
+            "deployment API key must contain only letters, digits, '-', '_' or '.'"
+        ));
+    }
+    Ok(key.to_string())
+}
+
+fn save_secret(path: &Path, key: &str) -> Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).c(d!("create key directory"))?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).c(d!("create API key file"))?;
+    writeln!(file, "{key}").c(d!("save API key"))?;
+    file.sync_all().c(d!("sync API key"))?;
+    Ok(())
+}
+
+/// Migrate existing service keys once, then share one stable key across local roles.
+fn local_api_key(etc: &Path) -> Result<String> {
+    let shared = etc.join("api-key");
+    if shared.exists() {
+        return parse_api_key(&std::fs::read_to_string(shared).c(d!("read API key"))?);
+    }
+    let mut keys = Vec::new();
+    for name in ["tt-agent.env", "tt-ctl.env"] {
+        let path = etc.join(name);
+        match std::fs::read_to_string(path) {
+            Ok(content) => keys.push(parse_api_key(&content)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).c(d!("read existing service key")),
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    if keys.len() > 1 {
+        return Err(eg!(
+            "existing agent/controller keys differ; put the intended shared key in {}/api-key and deploy all",
+            etc.display()
+        ));
+    }
+    let key = keys.pop().unwrap_or_else(generate_api_key);
+    save_secret(&shared, &key)?;
+    Ok(key)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ControllerConfig {
     pub host: String,
@@ -119,13 +182,17 @@ fn default_disk_total() -> String {
 }
 
 /// Parse disk_total: "200G" → 204800 (MiB), plain number passes through.
-fn parse_disk(val: &str) -> u32 {
+fn parse_disk(val: &str) -> Result<u32> {
     let val = val.trim().trim_matches('"');
-    if let Some(num) = val.strip_suffix(['g', 'G']) {
-        num.parse::<u32>().unwrap_or(200) * 1024
-    } else {
-        val.parse().unwrap_or(204800)
-    }
+    let (number, factor) = match val.strip_suffix(['g', 'G']) {
+        Some(number) => (number, 1024),
+        None => (val, 1),
+    };
+    let number: u32 = number.parse().c(d!("invalid disk_total"))?;
+    number
+        .checked_mul(factor)
+        .filter(|n| *n > 0)
+        .ok_or_else(|| eg!("disk_total must be positive and fit in MiB"))
 }
 
 // ── SSH helpers ─────────────────────────────────────────────────────
@@ -141,7 +208,7 @@ impl SshTarget {
         let output = Command::new("ssh")
             .args([
                 "-o",
-                "StrictHostKeyChecking=no",
+                "StrictHostKeyChecking=accept-new",
                 "-o",
                 "ConnectTimeout=10",
                 "-p",
@@ -164,7 +231,7 @@ impl SshTarget {
         let output = Command::new("scp")
             .args([
                 "-o",
-                "StrictHostKeyChecking=no",
+                "StrictHostKeyChecking=accept-new",
                 "-o",
                 "ConnectTimeout=10",
                 "-P",
@@ -188,7 +255,8 @@ impl SshTarget {
 
 fn systemd_unit(name: &str, exec_start: &str, run_as_root: bool, env_file: Option<&str>) -> String {
     let user_lines = if run_as_root {
-        "# Runs as root (needs NET_ADMIN for bridge/TAP/nftables)".to_string()
+        "# VM processes must survive agent restarts\nKillMode=process\nTimeoutStopSec=360"
+            .to_string()
     } else {
         "User=ttstack\nGroup=ttstack".to_string()
     };
@@ -274,8 +342,23 @@ fn remote_setup_script(
         .join(" ");
 
     let env_file_path = env_file.map(|(p, _)| p);
-    let systemd_unit_content = systemd_unit(service_name, exec_cmd, true, env_file_path);
-    let openrc_initd_content = openrc_initd(service_name, exec_cmd);
+    let systemd_unit_content = systemd_unit(
+        service_name,
+        exec_cmd,
+        service_name == "tt-agent",
+        env_file_path,
+    )
+    .replace("User=ttstack", &format!("User={user}"))
+    .replace("Group=ttstack", &format!("Group={user}"));
+    let mut openrc_initd_content = openrc_initd(service_name, exec_cmd);
+    if let Some(path) = env_file_path {
+        openrc_initd_content.push_str(&format!(
+            "\nstart_pre() {{\n    . {path}\n    export TT_API_KEY\n}}\n"
+        ));
+    }
+    if service_name == "tt-ctl" {
+        openrc_initd_content.push_str(&format!("\ncommand_user=\"{user}:{user}\"\n"));
+    }
 
     // Shell snippet that writes the env file with 0600 permissions
     let env_file_setup = match env_file {
@@ -283,6 +366,7 @@ fn remote_setup_script(
             r#"
 # Write environment file (keeps secrets out of process args)
 sudo mkdir -p $(dirname {path})
+sudo install -m 600 /dev/null {path}
 printf '%s' '{content}' | sudo tee {path} > /dev/null
 sudo chmod 600 {path}
 "#,
@@ -453,9 +537,18 @@ async fn local_install_systemd(
                 .await
                 .c(d!("create env dir"))?;
         }
-        tokio::fs::write(path, content)
-            .await
-            .c(d!("write env file"))?;
+        {
+            use std::io::Write;
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(path).c(d!("open env file"))?;
+            file.write_all(content.as_bytes()).c(d!("write env file"))?;
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -469,16 +562,18 @@ async fn local_install_systemd(
     let path = format!("/etc/systemd/system/{name}.service");
     tokio::fs::write(&path, &unit).await.c(d!("write unit"))?;
 
-    Command::new("systemctl")
+    let output = Command::new("systemctl")
         .arg("daemon-reload")
         .output()
         .await
         .c(d!("daemon-reload"))?;
-    Command::new("systemctl")
+    check_output(output, "systemctl daemon-reload")?;
+    let output = Command::new("systemctl")
         .args(["enable", name])
         .output()
         .await
         .c(d!("enable service"))?;
+    check_output(output, "systemctl enable")?;
 
     println!("[deploy] unit {name} installed");
     Ok(())
@@ -496,19 +591,38 @@ async fn local_restart_service(name: &str) -> Result<()> {
         "start"
     };
 
-    Command::new("systemctl")
+    let output = Command::new("systemctl")
         .args([action, name])
         .output()
         .await
         .c(d!("restart service"))?;
+    check_output(output, "systemctl start/restart")?;
 
     let status = Command::new("systemctl")
         .args(["is-active", name])
         .output()
         .await
         .c(d!("check status"))?;
+    if !status.status.success() {
+        return Err(eg!(
+            "service {} is not active: {}",
+            name,
+            String::from_utf8_lossy(&status.stderr)
+        ));
+    }
     let state = String::from_utf8_lossy(&status.stdout);
     println!("[deploy] {name} is {}", state.trim());
+    Ok(())
+}
+
+fn check_output(output: std::process::Output, action: &str) -> Result<()> {
+    if !output.status.success() {
+        return Err(eg!(
+            "{} failed: {}",
+            action,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
     Ok(())
 }
 
@@ -516,6 +630,11 @@ async fn local_restart_service(name: &str) -> Result<()> {
 
 /// Deploy locally on this host (requires root).
 pub async fn deploy_local(role: &str, release_dir: &str) -> Result<()> {
+    if !cfg!(target_os = "linux") || !Path::new("/run/systemd/system").is_dir() {
+        return Err(eg!(
+            "local deploy requires Linux with systemd; use distributed deploy for OpenRC. FreeBSD support is experimental and requires manual setup"
+        ));
+    }
     let uid = std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|s| {
@@ -537,7 +656,7 @@ pub async fn deploy_local(role: &str, release_dir: &str) -> Result<()> {
     local_ensure_dirs(home, user).await?;
 
     let release = PathBuf::from(release_dir);
-    let api_key = generate_api_key();
+    let api_key = local_api_key(Path::new(prefix).join("etc").as_path())?;
     let env_content = format!("TT_API_KEY={api_key}\n");
 
     match role {
@@ -594,6 +713,14 @@ pub async fn deploy_distributed(config_path: &str) -> Result<()> {
     let cfg: DeployConfig =
         toml::from_str(&content).map_err(|e| eg!(format!("parse deploy.toml: {e}")))?;
 
+    // Validate the entire fleet configuration before changing any remote host.
+    for agent in &cfg.agents {
+        parse_disk(&agent.disk_total)?;
+        agent
+            .storage
+            .parse::<ttcore::model::Storage>()
+            .map_err(|e| eg!(e))?;
+    }
     let release_dir = PathBuf::from(&cfg.general.release_dir);
     let prefix = &cfg.general.prefix;
     let user = &cfg.general.user;
@@ -610,7 +737,49 @@ pub async fn deploy_distributed(config_path: &str) -> Result<()> {
         }
     }
 
-    let api_key = cfg.general.api_key.clone().unwrap_or_else(generate_api_key);
+    let sidecar = PathBuf::from(format!("{config_path}.api-key"));
+    let api_key = if let Some(ref key) = cfg.general.api_key {
+        use std::io::Write;
+        let key = parse_api_key(key)?;
+        let parent = sidecar
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut staging = tempfile::NamedTempFile::new_in(parent).c(d!("API key staging file"))?;
+        writeln!(staging, "{key}").c(d!("save configured API key"))?;
+        staging
+            .as_file()
+            .sync_all()
+            .c(d!("sync configured API key"))?;
+        staging.persist(&sidecar).map_err(|e| eg!(e.to_string()))?;
+        key
+    } else if sidecar.exists() {
+        parse_api_key(&std::fs::read_to_string(&sidecar).c(d!("read deployment key"))?)?
+    } else {
+        let target = if let Some(ctl) = &cfg.controller {
+            SshTarget {
+                user: ctl.ssh_user.clone(),
+                host: ctl.host.clone(),
+                port: ctl.ssh_port,
+            }
+        } else if let Some(agent) = cfg.agents.first() {
+            SshTarget {
+                user: agent.ssh_user.clone(),
+                host: agent.host.clone(),
+                port: agent.ssh_port,
+            }
+        } else {
+            return Err(eg!("deploy config has no controller or agents"));
+        };
+        let previous = target.exec(&format!("sudo sh -c 'if [ -f {prefix}/etc/tt-ctl.env ]; then cat {prefix}/etc/tt-ctl.env; elif [ -f {prefix}/etc/tt-agent.env ]; then cat {prefix}/etc/tt-agent.env; fi'" )).await?;
+        let key = if previous.trim().is_empty() {
+            generate_api_key()
+        } else {
+            parse_api_key(&previous)?
+        };
+        save_secret(&sidecar, &key)?;
+        key
+    };
     let env_content = format!("TT_API_KEY={api_key}\n");
 
     // Deploy controller
@@ -688,7 +857,7 @@ pub async fn deploy_distributed(config_path: &str) -> Result<()> {
             .runtime_dir
             .clone()
             .unwrap_or_else(|| format!("{home}/runtime"));
-        let disk = parse_disk(&agent.disk_total);
+        let disk = parse_disk(&agent.disk_total)?;
 
         let mut exec_cmd = format!(
             "{prefix}/bin/tt-agent --listen {listen} \
@@ -739,15 +908,15 @@ mod tests {
 
     #[test]
     fn parse_disk_gib() {
-        assert_eq!(parse_disk("200G"), 204800);
-        assert_eq!(parse_disk("100g"), 102400);
-        assert_eq!(parse_disk("\"500G\""), 512000);
+        assert_eq!(parse_disk("200G").unwrap(), 204800);
+        assert_eq!(parse_disk("100g").unwrap(), 102400);
+        assert_eq!(parse_disk("\"500G\"").unwrap(), 512000);
     }
 
     #[test]
     fn parse_disk_mib() {
-        assert_eq!(parse_disk("204800"), 204800);
-        assert_eq!(parse_disk("1024"), 1024);
+        assert_eq!(parse_disk("204800").unwrap(), 204800);
+        assert_eq!(parse_disk("1024").unwrap(), 1024);
     }
 
     #[test]
@@ -796,7 +965,7 @@ host = "10.0.0.3"
         assert_eq!(cfg.agents.len(), 2);
         assert_eq!(cfg.agents[0].storage, "zvol");
         assert_eq!(cfg.agents[0].host_id.as_deref(), Some("node-a"));
-        assert_eq!(parse_disk(&cfg.agents[0].disk_total), 1024000);
+        assert_eq!(parse_disk(&cfg.agents[0].disk_total).unwrap(), 1024000);
     }
 
     #[test]
@@ -819,5 +988,43 @@ host = "10.0.0.3"
         assert!(script.contains("EnvironmentFile=/opt/tt/etc/tt-agent.env"));
         assert!(script.contains("TT_API_KEY=test-key"));
         assert!(!script.contains("--api-key"));
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+    #[test]
+    fn deployments_reuse_existing_role_key_and_persist_shared_key() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tt-agent.env"), "TT_API_KEY=existing-key\n").unwrap();
+        assert_eq!(local_api_key(dir.path()).unwrap(), "existing-key");
+        assert_eq!(local_api_key(dir.path()).unwrap(), "existing-key");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(dir.path().join("api-key"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+    #[test]
+    fn mismatched_role_keys_are_not_silently_rotated() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tt-agent.env"), "TT_API_KEY=agent-key\n").unwrap();
+        std::fs::write(dir.path().join("tt-ctl.env"), "TT_API_KEY=ctl-key\n").unwrap();
+        assert!(local_api_key(dir.path()).is_err());
+        assert!(!dir.path().join("api-key").exists());
+    }
+    #[test]
+    fn invalid_disk_budgets_do_not_silently_fall_back_or_overflow() {
+        for value in ["oops", "0", "4294967295G"] {
+            assert!(parse_disk(value).is_err());
+        }
     }
 }

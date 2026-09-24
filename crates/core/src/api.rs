@@ -66,6 +66,7 @@ fn default_engine() -> Engine {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateEnvReq {
     pub id: String,
+    #[serde(default)]
     pub owner: String,
     pub vms: Vec<VmSpec>,
     /// Lifetime in seconds; `None` means use server default.

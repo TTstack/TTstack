@@ -30,7 +30,7 @@ pub fn place_vm(
 ) -> Result<Placement> {
     let cpu = spec.cpu.unwrap_or(VM_CPU_DEFAULT);
     let mem = spec.mem.unwrap_or(VM_MEM_DEFAULT);
-    let disk = spec.disk.unwrap_or(VM_DISK_DEFAULT);
+    let disk = spec.disk.unwrap_or(spec.engine.default_disk());
 
     // Docker images are managed by Docker, not by the image directory
     let check_images = !host_images.is_empty() && spec.engine != Engine::Docker;
@@ -40,6 +40,8 @@ pub fn place_vm(
         .filter(|h| {
             h.state == HostState::Online
                 && h.engines.contains(&spec.engine)
+                && !(h.storage == Storage::Zvol
+                    && matches!(spec.engine, Engine::Firecracker | Engine::Jail))
                 && h.resource.can_fit(cpu, mem, disk)
                 && (!check_images
                     || host_images
@@ -63,6 +65,8 @@ pub fn place_vm(
             .filter(|h| {
                 h.state == HostState::Online
                     && h.engines.contains(&spec.engine)
+                    && !(h.storage == Storage::Zvol
+                        && matches!(spec.engine, Engine::Firecracker | Engine::Jail))
                     && h.resource.can_fit(cpu, mem, disk)
             })
             .count();
@@ -118,7 +122,7 @@ pub fn schedule_env(
         if let Some(h) = shadow.iter_mut().find(|h| h.id == placement.host_id) {
             let cpu = spec.cpu.unwrap_or(VM_CPU_DEFAULT);
             let mem = spec.mem.unwrap_or(VM_MEM_DEFAULT);
-            let disk = spec.disk.unwrap_or(VM_DISK_DEFAULT);
+            let disk = spec.disk.unwrap_or(spec.engine.default_disk());
             h.resource.cpu_used += cpu;
             h.resource.mem_used += mem;
             h.resource.disk_used += disk;
@@ -151,6 +155,7 @@ mod tests {
             state: HostState::Online,
             engines,
             storage: Storage::File,
+            images: vec![],
             registered_at: 0,
         }
     }

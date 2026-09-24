@@ -16,3 +16,5 @@ pub mod model;
 pub mod engine;
 pub mod net;
 pub mod storage;
+
+pub mod command;

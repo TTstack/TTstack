@@ -25,7 +25,7 @@ pub struct Config {
 
     /// Storage backend: file or zvol.
     #[arg(long, default_value = "file")]
-    pub storage: String,
+    pub storage: Storage,
 
     /// Total CPU cores available for VMs (0 = auto-detect).
     #[arg(long, default_value_t = 0)]
@@ -50,7 +50,7 @@ pub struct Config {
 
 impl Config {
     pub fn storage_kind(&self) -> Storage {
-        self.storage.parse().unwrap_or(Storage::File)
+        self.storage
     }
 
     /// Auto-detect CPU count if set to 0.
@@ -161,9 +161,8 @@ MemAvailable:    9876543 kB";
     }
 
     #[test]
-    fn storage_kind_invalid_falls_back() {
-        let cfg = Config::parse_from(["tt-agent", "--storage", "foo"]);
-        assert_eq!(cfg.storage_kind(), Storage::File);
+    fn storage_kind_invalid_is_rejected() {
+        assert!(Config::try_parse_from(["tt-agent", "--storage", "foo"]).is_err());
     }
 
     #[test]

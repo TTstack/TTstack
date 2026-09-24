@@ -3,6 +3,7 @@ name = "ttcore"
 description = "TTstack core library — models, engine traits, and storage abstractions."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 
@@ -11,9 +12,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 ruc = { workspace = true }
 uuid = { workspace = true }
+tempfile = { workspace = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 nix = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }

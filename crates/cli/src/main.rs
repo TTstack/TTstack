@@ -84,7 +84,7 @@ enum EnvCmd {
         /// Image name (repeatable).
         #[arg(long, short, required = true)]
         image: Vec<String>,
-        /// Engine type: qemu, firecracker, docker (Linux); bhyve, jail (FreeBSD).
+        /// Engine type: qemu, firecracker, docker (Linux); bhyve, jail (experimental FreeBSD).
         #[arg(long, default_value = "qemu")]
         engine: String,
         /// CPU cores per VM.
@@ -93,7 +93,7 @@ enum EnvCmd {
         /// Memory per VM in MiB.
         #[arg(long)]
         mem: Option<u32>,
-        /// Disk per VM in MiB.
+        /// QEMU virtual disk size in MiB (other engines use the existing image size).
         #[arg(long)]
         disk: Option<u32>,
         /// Duplicate each image N times.
@@ -102,10 +102,10 @@ enum EnvCmd {
         /// Port to expose (repeatable).
         #[arg(long, short)]
         port: Vec<u16>,
-        /// Environment lifetime in seconds.
+        /// Environment lifetime in seconds (default 21600; 0 = no expiry).
         #[arg(long)]
         lifetime: Option<u64>,
-        /// Block outgoing network traffic from VMs.
+        /// Block routed outgoing traffic (unsupported for Docker; not host/VM isolation).
         #[arg(long)]
         deny_outgoing: bool,
         /// Owner identifier (defaults to $USER).
@@ -359,9 +359,7 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
             owner,
             ssh_key,
         } => {
-            let engine: Engine = engine
-                .parse()
-                .map_err(|e: Box<dyn std::error::Error>| eg!(e.to_string()))?;
+            let engine: Engine = engine.parse().map_err(|e: String| eg!(e))?;
 
             let owner = owner
                 .or_else(|| std::env::var("USER").ok())
@@ -381,13 +379,19 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
                         };
                         std::fs::read_to_string(&path)
                             .map(|s| s.trim().to_string())
-                            .unwrap_or(k)
+                            .map_err(|e| eg!("cannot read SSH public key {}: {}", path, e))
                     } else {
-                        k
+                        Ok(k)
                     }
                 })
-                .collect();
+                .collect::<Result<Vec<_>>>()?;
 
+            if dup == 0 || (image.len() as u64) * u64::from(dup) > MAX_VMS as u64 {
+                return Err(eg!(
+                    "replicas must be positive and total VM count must not exceed {}",
+                    MAX_VMS
+                ));
+            }
             let mut vms = Vec::new();
             for img in &image {
                 for _ in 0..dup {
@@ -412,7 +416,29 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
                 ssh_keys,
             };
 
-            let detail: EnvDetail = c.post("/api/envs", &req).await?;
+            let mut detail: EnvDetail = c.post("/api/envs", &req).await?;
+            eprintln!("Creating environment {name}; you can inspect it with 'tt env show {name}'.");
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
+            while detail.env.state == EnvState::Creating {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(eg!(
+                        "creation is still in progress; inspect it with 'tt env show {}'",
+                        name
+                    ));
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                detail = c.get(&format!("/api/envs/{name}")).await?;
+            }
+            if detail.env.state != EnvState::Active {
+                return Err(eg!(
+                    "environment {} is {:?}; resources retained. {}. Inspect with 'tt env show {}' or clean up with 'tt env delete {}'",
+                    name,
+                    detail.env.state,
+                    detail.warnings.join("; "),
+                    name,
+                    name
+                ));
+            }
             println!("Environment created: {name}");
             println!("  VMs: {}", detail.vms.len());
             for vm in &detail.vms {
@@ -421,6 +447,7 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
                     vm.id, vm.engine, vm.image, vm.ip, vm.port_map
                 );
             }
+            print_access(c, &detail.vms).await;
             for w in &detail.warnings {
                 eprintln!("  warning: {w}");
             }
@@ -448,10 +475,27 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
             println!("  Owner:   {}", detail.env.owner);
             println!("  State:   {:?}", detail.env.state);
             println!("  VMs:     {}", detail.vms.len());
+            for warning in &detail.warnings {
+                eprintln!("  warning: {warning}");
+            }
             println!();
             if !detail.vms.is_empty() {
+                let id_width = detail
+                    .vms
+                    .iter()
+                    .map(|v| v.id.len())
+                    .max()
+                    .unwrap_or(2)
+                    .max(2);
+                let image_width = detail
+                    .vms
+                    .iter()
+                    .map(|v| v.image.len())
+                    .max()
+                    .unwrap_or(5)
+                    .max(5);
                 println!(
-                    "  {:<14} {:<12} {:<10} {:<8} {:<16} PORTS",
+                    "  {:<id_width$} {:<image_width$} {:<10} {:<8} {:<16} PORTS",
                     "ID", "IMAGE", "ENGINE", "STATE", "IP"
                 );
                 for vm in &detail.vms {
@@ -462,11 +506,17 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
                         .collect::<Vec<_>>()
                         .join(", ");
                     println!(
-                        "  {:<14} {:<12} {:<10} {:<8} {:<16} {}",
-                        vm.id, vm.image, vm.engine, vm.state, vm.ip, ports
+                        "  {:<id_width$} {:<image_width$} {:<10} {:<8} {:<16} {}",
+                        vm.id,
+                        vm.image,
+                        vm.engine.to_string(),
+                        vm.state.to_string(),
+                        vm.ip,
+                        ports
                     );
                 }
             }
+            print_access(c, &detail.vms).await;
         }
         EnvCmd::Delete { name } => {
             c.delete(&format!("/api/envs/{name}")).await?;
@@ -482,6 +532,26 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn print_access(client: &Client, vms: &[Vm]) {
+    let hosts: Vec<Host> = match client.get("/api/hosts").await {
+        Ok(hosts) => hosts,
+        Err(e) => {
+            eprintln!("  Cannot resolve host access addresses: {e}");
+            return;
+        }
+    };
+    for vm in vms {
+        if let Some(host) = hosts.iter().find(|h| h.id == vm.host_id)
+            && let Ok(url) = reqwest::Url::parse(&format!("http://{}", host.addr))
+            && let Some(addr) = url.host_str()
+        {
+            for (&guest, &port) in &vm.port_map {
+                println!("  Access {}: {addr}:{port} -> guest TCP {guest}", vm.id);
+            }
+        }
+    }
 }
 
 async fn cmd_image(c: &Client, action: ImageCmd) -> Result<()> {

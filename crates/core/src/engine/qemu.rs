@@ -4,6 +4,7 @@
 //! Each VM gets its own tap device connected to the host bridge.
 
 use super::VmEngine;
+use crate::command::CommandExt;
 use crate::model::{RUN_DIR, Vm, VmState};
 use ruc::*;
 use std::path::Path;
@@ -22,7 +23,7 @@ impl QemuEngine {
         Self
     }
 
-    fn build_cmd(&self, vm: &Vm, disk_path: &str, disk_format: &str) -> Command {
+    fn build_cmd(&self, vm: &Vm, disk_path: &str, disk_format: &str) -> Result<Command> {
         let tap = crate::net::tap_name(&vm.id);
         let mut cmd = Command::new("qemu-system-x86_64");
         cmd.args(["-enable-kvm", "-daemonize"])
@@ -37,7 +38,13 @@ impl QemuEngine {
                 "-netdev",
                 &format!("tap,id=net0,ifname={tap},script=no,downscript=no"),
             ])
-            .args(["-device", "virtio-net-pci,netdev=net0"])
+            .args([
+                "-device",
+                &format!(
+                    "virtio-net-pci,netdev=net0,mac={}",
+                    Self::mac_address(&vm.ip)?
+                ),
+            ])
             .args(["-pidfile", &self.pid_path(vm)])
             .args([
                 "-monitor",
@@ -54,7 +61,35 @@ impl QemuEngine {
             ]);
         }
 
-        cmd
+        Ok(cmd)
+    }
+
+    // The allocated IPv4 address is stable and unique on this host's bridge.
+    // Use a locally administered unicast MAC instead of QEMU's shared default.
+    fn mac_address(ip: &str) -> Result<String> {
+        let [a, b, c, d] = ip
+            .parse::<std::net::Ipv4Addr>()
+            .c(d!("invalid guest IP"))?
+            .octets();
+        Ok(format!("02:54:{a:02x}:{b:02x}:{c:02x}:{d:02x}"))
+    }
+
+    fn network_config(vm: &Vm) -> Result<String> {
+        Ok(format!(
+            r#"version: 1
+config:
+  - type: physical
+    name: eth0
+    mac_address: "{mac}"
+    subnets:
+      - type: static
+        address: {ip}/16
+        gateway: 10.10.0.1
+        dns_nameservers: [8.8.8.8, 1.1.1.1]
+"#,
+            mac = Self::mac_address(&vm.ip)?,
+            ip = vm.ip,
+        ))
     }
 
     /// Generate a cloud-init NoCloud seed ISO for the VM.
@@ -69,25 +104,9 @@ impl QemuEngine {
         let meta_data = format!("instance-id: {}\nlocal-hostname: {}\n", vm.id, vm.id);
         std::fs::write(format!("{seed_dir}/meta-data"), meta_data).c(d!("write meta-data"))?;
 
-        // network-config (v2) — static IP on the virtio NIC
-        let network_config = format!(
-            r#"version: 2
-ethernets:
-  id0:
-    match:
-      driver: virtio_net
-    addresses:
-      - {ip}/16
-    routes:
-      - to: 0.0.0.0/0
-        via: 10.10.0.1
-    nameservers:
-      addresses:
-        - 8.8.8.8
-        - 1.1.1.1
-"#,
-            ip = vm.ip,
-        );
+        // V1 works with both Alpine's ENI renderer and netplan-based cloud images.
+        // Match the explicit NIC MAC; driver matching only works with networkd.
+        let network_config = Self::network_config(vm)?;
         std::fs::write(format!("{seed_dir}/network-config"), network_config)
             .c(d!("write network-config"))?;
 
@@ -99,9 +118,14 @@ ethernets:
         );
 
         if !ssh_keys.is_empty() {
-            user_data.push_str("ssh_authorized_keys:\n");
+            // Alpine's non-PAM sshd rejects locked accounts even with a valid key.
+            // An impossible password hash permits key login without a usable password.
+            user_data.push_str(
+                "users:\n  - name: root\n    lock_passwd: false\n    hashed_passwd: '*'\n    ssh_authorized_keys:\n",
+            );
             for key in ssh_keys {
-                user_data.push_str(&format!("  - {key}\n"));
+                let quoted = serde_json::to_string(key).c(d!("quote SSH key"))?;
+                user_data.push_str(&format!("      - {quoted}\n"));
             }
         }
 
@@ -126,13 +150,13 @@ ethernets:
                     "-output", &seed_iso, "-volid", "cidata", "-joliet", "-rock", "-quiet",
                 ])
                 .args([&meta, &user, &netcfg])
-                .output()
+                .bounded_output()
                 .c(d!("generate seed ISO"))?
         } else {
             Command::new("mkisofs")
                 .args(["-o", &seed_iso, "-V", "cidata", "-J", "-R", "-quiet"])
                 .args([&meta, &user, &netcfg])
-                .output()
+                .bounded_output()
                 .c(d!("generate seed ISO"))?
         };
 
@@ -159,14 +183,42 @@ ethernets:
         format!("{RUN_DIR}/seed-{}.iso", vm.id)
     }
 
-    fn read_pid(&self, vm: &Vm) -> Result<u32> {
-        let path = self.pid_path(vm);
-        let content = std::fs::read_to_string(&path).c(d!("read pid file"))?;
-        content.trim().parse::<u32>().c(d!("invalid pid"))
+    fn existing_pid(&self, vm: &Vm) -> Result<Option<u32>> {
+        match std::fs::read_to_string(self.pid_path(vm)) {
+            Ok(s) => Ok(Some(s.trim().parse::<u32>().c(d!("invalid QEMU PID"))?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).c(d!("read QEMU PID")),
+        }
     }
 
-    fn process_alive(pid: u32) -> bool {
-        Path::new(&format!("/proc/{pid}")).exists()
+    fn monitor(&self, vm: &Vm, command: &str) -> Result<String> {
+        use std::io::{Read, Write};
+        let mut stream =
+            std::os::unix::net::UnixStream::connect(self.monitor_path(vm)).c(d!("QEMU monitor"))?;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .c(d!())?;
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_secs(2)))
+            .c(d!())?;
+        let read_prompt = |stream: &mut std::os::unix::net::UnixStream| -> Result<String> {
+            let mut reply = String::new();
+            let mut buf = [0; 1024];
+            while reply.len() < 65536 {
+                let n = stream.read(&mut buf).c(d!("read QEMU monitor"))?;
+                if n == 0 {
+                    return Err(eg!("QEMU monitor closed"));
+                }
+                reply.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if reply.contains("(qemu)") {
+                    return Ok(reply);
+                }
+            }
+            Err(eg!("QEMU monitor response too large"))
+        };
+        read_prompt(&mut stream)?;
+        writeln!(stream, "{command}").c(d!("write QEMU monitor"))?;
+        read_prompt(&mut stream)
     }
 }
 
@@ -180,17 +232,14 @@ impl VmEngine for QemuEngine {
     ) -> Result<()> {
         std::fs::create_dir_all(RUN_DIR).c(d!("create runtime dir"))?;
 
-        // Generate cloud-init seed ISO (best-effort; non-cloud images ignore it)
-        if let Err(e) = self.generate_seed_iso(vm, ssh_keys) {
-            eprintln!(
-                "[qemu] WARN: could not create seed ISO for {}: {e} (cloud-init may not work)",
-                vm.id
-            );
-        }
+        // A broken seed means the guest may be unreachable: fail before booting.
+        self.generate_seed_iso(vm, ssh_keys)?;
+        let _ = std::fs::remove_file(self.monitor_path(vm));
+        let _ = std::fs::remove_file(self.pid_path(vm));
 
         let output = self
-            .build_cmd(vm, image_path, disk_format)
-            .output()
+            .build_cmd(vm, image_path, disk_format)?
+            .bounded_output()
             .c(d!("spawn qemu"))?;
 
         if !output.status.success() {
@@ -202,84 +251,53 @@ impl VmEngine for QemuEngine {
     }
 
     fn start(&self, vm: &Vm) -> Result<()> {
-        let sock = self.monitor_path(vm);
-        if !Path::new(&sock).exists() {
-            // Monitor socket gone means QEMU exited; re-create the VM.
-            return Err(eg!(
-                "VM {} has no monitor socket; it must be re-created",
-                vm.id
-            ));
-        }
-
-        // Send "cont" command to the QEMU monitor to resume execution
-        let output = Command::new("sh")
-            .args([
-                "-c",
-                &format!(r#"echo "cont" | socat - UNIX-CONNECT:{sock}"#),
-            ])
-            .output()
-            .c(d!("qemu monitor cont"))?;
-
-        if !output.status.success() {
-            return Err(eg!("failed to resume VM via QEMU monitor"));
-        }
+        self.monitor(vm, "cont")?;
         Ok(())
     }
 
     fn stop(&self, vm: &Vm) -> Result<()> {
-        // Pause the VM via QEMU monitor "stop" command.
-        // This freezes the vCPU without killing the QEMU process,
-        // allowing later resume via "cont".
-        let sock = self.monitor_path(vm);
-        if Path::new(&sock).exists() {
-            let _ = Command::new("sh")
-                .args([
-                    "-c",
-                    &format!(r#"echo "stop" | socat - UNIX-CONNECT:{sock}"#),
-                ])
-                .output();
+        if let Some(pid) = self.existing_pid(vm)? {
+            // Give a cooperative guest a chance to shut down before terminating the VMM.
+            let _ = self.monitor(vm, "system_powerdown");
+            for _ in 0..100 {
+                if !super::process_matches(pid, &vm.id)? {
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            super::terminate(pid, &vm.id)?;
         }
         Ok(())
     }
 
     fn destroy(&self, vm: &Vm) -> Result<()> {
-        if let Ok(pid) = self.read_pid(vm)
-            && Self::process_alive(pid)
-        {
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid as i32),
-                nix::sys::signal::Signal::SIGKILL,
-            );
+        if let Some(pid) = self.existing_pid(vm)? {
+            super::terminate(pid, &vm.id)?;
         }
-
-        let _ = std::fs::remove_file(self.pid_path(vm));
-        let _ = std::fs::remove_file(self.monitor_path(vm));
-        let _ = std::fs::remove_file(self.seed_path(vm));
-
+        for path in [self.pid_path(vm), self.monitor_path(vm), self.seed_path(vm)] {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).c(d!("remove QEMU runtime file")),
+            }
+        }
         Ok(())
     }
 
     fn state(&self, vm: &Vm) -> Result<VmState> {
-        match self.read_pid(vm) {
-            Ok(pid) if Self::process_alive(pid) => {
-                // Query QEMU monitor to distinguish Running vs Paused
-                let sock = self.monitor_path(vm);
-                if Path::new(&sock).exists()
-                    && let Ok(output) = Command::new("sh")
-                        .args([
-                            "-c",
-                            &format!(r#"echo "info status" | socat - UNIX-CONNECT:{sock}"#),
-                        ])
-                        .output()
-                {
-                    let body = String::from_utf8_lossy(&output.stdout);
-                    if body.contains("paused") {
-                        return Ok(VmState::Paused);
-                    }
-                }
-                Ok(VmState::Running)
-            }
-            _ => Ok(VmState::Stopped),
+        let Some(pid) = self.existing_pid(vm)? else {
+            return Ok(VmState::Stopped);
+        };
+        if !super::process_matches(pid, &vm.id)? {
+            return Ok(VmState::Stopped);
+        }
+        let status = self.monitor(vm, "info status")?;
+        if status.contains("paused") {
+            Ok(VmState::Paused)
+        } else if status.contains("running") {
+            Ok(VmState::Running)
+        } else {
+            Err(eg!(format!("unexpected QEMU status: {status}")))
         }
     }
 
@@ -291,6 +309,23 @@ impl VmEngine for QemuEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_macs_are_unique_across_the_address_pool() {
+        let mut macs = std::collections::HashSet::new();
+        for index in 0..65000 {
+            let ip = crate::net::vm_ip(index);
+            let mac = QemuEngine::mac_address(&ip).unwrap();
+            assert!(mac.starts_with("02:")); // locally administered, unicast
+            assert!(macs.insert(mac), "duplicate MAC for {ip}");
+        }
+        // Stable across restarts and toolchain upgrades; reject invalid persisted addresses.
+        assert_eq!(
+            QemuEngine::mac_address("10.10.0.2").unwrap(),
+            "02:54:0a:0a:00:02"
+        );
+        assert!(QemuEngine::mac_address("not-an-ip").is_err());
+    }
 
     #[test]
     fn build_cmd_uses_disk_format() {
@@ -307,11 +342,13 @@ mod tests {
             disk: 10240,
             ip: "10.10.0.2".into(),
             port_map: Default::default(),
+            options: crate::model::VmOptions::default(),
+            error: None,
             state: VmState::Creating,
             created_at: 0,
         };
 
-        let cmd = eng.build_cmd(&vm, "/dev/zvol/tank/clone-1", "raw");
+        let cmd = eng.build_cmd(&vm, "/dev/zvol/tank/clone-1", "raw").unwrap();
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -320,12 +357,22 @@ mod tests {
         assert!(drive_arg.contains("format=raw"));
         assert!(drive_arg.contains("/dev/zvol/tank/clone-1"));
 
-        let cmd2 = eng.build_cmd(&vm, "/tmp/disk.qcow2", "qcow2");
+        let cmd2 = eng.build_cmd(&vm, "/tmp/disk.qcow2", "qcow2").unwrap();
         let args2: Vec<_> = cmd2
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         let drive_arg2 = args2.iter().find(|a| a.starts_with("file=")).unwrap();
         assert!(drive_arg2.contains("format=qcow2"));
+        let nic = args2
+            .iter()
+            .find(|a| a.starts_with("virtio-net-pci,"))
+            .unwrap();
+        let mac = nic.split("mac=").nth(1).unwrap();
+        assert!(
+            QemuEngine::network_config(&vm)
+                .unwrap()
+                .contains(&format!("mac_address: \"{mac}\""))
+        );
     }
 }

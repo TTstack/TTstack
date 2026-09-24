@@ -1,6 +1,6 @@
 //! Data models for TTstack.
 //!
-//! All persistent types are serde-serializable for use with vsdb storage
+//! All persistent types are serde-serializable for use with SQLite storage
 //! and JSON API communication.
 
 use serde::{Deserialize, Serialize};
@@ -37,7 +37,7 @@ impl fmt::Display for Engine {
 }
 
 impl std::str::FromStr for Engine {
-    type Err = Box<dyn std::error::Error>;
+    type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_ascii_lowercase().as_str() {
             "qemu" | "kvm" => Ok(Self::Qemu),
@@ -45,7 +45,7 @@ impl std::str::FromStr for Engine {
             "bhyve" => Ok(Self::Bhyve),
             "docker" | "podman" => Ok(Self::Docker),
             "jail" => Ok(Self::Jail),
-            _ => Err(format!("unknown engine: {s}").into()),
+            _ => Err(format!("unknown engine: {s}")),
         }
     }
 }
@@ -70,12 +70,12 @@ impl fmt::Display for Storage {
 }
 
 impl std::str::FromStr for Storage {
-    type Err = Box<dyn std::error::Error>;
+    type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_ascii_lowercase().as_str() {
             "file" => Ok(Self::File),
             "zvol" => Ok(Self::Zvol),
-            _ => Err(format!("unknown storage backend: {s}").into()),
+            _ => Err(format!("unknown storage backend: {s}")),
         }
     }
 }
@@ -91,6 +91,7 @@ pub enum VmState {
     Paused,
     Creating,
     Failed,
+    Deleting,
 }
 
 impl fmt::Display for VmState {
@@ -101,6 +102,7 @@ impl fmt::Display for VmState {
             Self::Paused => write!(f, "paused"),
             Self::Creating => write!(f, "creating"),
             Self::Failed => write!(f, "failed"),
+            Self::Deleting => write!(f, "deleting"),
         }
     }
 }
@@ -111,6 +113,9 @@ impl fmt::Display for VmState {
 pub enum EnvState {
     Active,
     Stopped,
+    Creating,
+    Deleting,
+    Failed,
 }
 
 /// Online status of a physical host.
@@ -171,6 +176,8 @@ pub struct Host {
     pub state: HostState,
     /// Engines available on this host.
     pub engines: Vec<Engine>,
+    #[serde(default)]
+    pub images: Vec<String>,
     /// Storage backend used on this host.
     pub storage: Storage,
     pub registered_at: u64,
@@ -194,8 +201,21 @@ pub struct Vm {
     pub ip: String,
     /// guest_port → host_port mapping.
     pub port_map: BTreeMap<u16, u16>,
+    #[serde(default)]
+    pub options: VmOptions,
+    #[serde(default)]
+    pub error: Option<String>,
     pub state: VmState,
     pub created_at: u64,
+}
+
+/// Creation options retained for idempotency, restart and firewall recovery.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VmOptions {
+    pub ports: Vec<u16>,
+    pub ssh_keys: Vec<String>,
+    pub deny_outgoing: bool,
+    pub requested_disk: u32,
 }
 
 /// An environment — a logical group of related VMs.
@@ -207,6 +227,8 @@ pub struct Env {
     pub created_at: u64,
     /// Unix timestamp after which the env auto-expires (0 = never).
     pub expires_at: u64,
+    #[serde(default)]
+    pub error: Option<String>,
     pub state: EnvState,
 }
 
@@ -218,8 +240,8 @@ pub const VM_CPU_DEFAULT: u32 = 2;
 pub const VM_MEM_DEFAULT: u32 = 1024;
 /// Default disk per VM in MiB (40 GiB).
 pub const VM_DISK_DEFAULT: u32 = 40 * 1024;
-/// Maximum environment lifetime in seconds (6 hours).
-pub const MAX_LIFETIME: u64 = 6 * 3600;
+/// Default environment lifetime in seconds (6 hours); explicit zero means no expiry.
+pub const DEFAULT_LIFETIME: u64 = 6 * 3600;
 /// Maximum hosts in the fleet.
 pub const MAX_HOSTS: usize = 50;
 /// Maximum total VM instances across the fleet.
@@ -382,16 +404,6 @@ mod tests {
 
     // ── Constants ───────────────────────────────────────────────────
 
-    #[test]
-    fn constants_sane() {
-        assert!(VM_CPU_DEFAULT > 0);
-        assert!(VM_MEM_DEFAULT > 0);
-        assert!(VM_DISK_DEFAULT > 0);
-        assert!(MAX_LIFETIME > 0);
-        assert!(MAX_HOSTS > 0 && MAX_HOSTS <= 100);
-        assert!(MAX_VMS > 0 && MAX_VMS <= 10_000);
-    }
-
     // ── Validation ──────────────────────────────────────────────────
 
     #[test]
@@ -426,5 +438,122 @@ mod tests {
         assert!(validate_name("bad!", "env").is_err());
         assert!(validate_name("bad@name", "env").is_err());
         assert!(validate_name(".hidden", "env").is_err());
+    }
+}
+
+/// Container references are not filesystem paths; allow registry, tag and digest syntax.
+pub fn validate_image(image: &str, engine: Engine) -> std::result::Result<(), String> {
+    if engine != Engine::Docker {
+        return validate_name(image, "image");
+    }
+    if image.is_empty()
+        || image.len() > 512
+        || !image.as_bytes()[0].is_ascii_alphanumeric()
+        || !image
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"._-/:@".contains(&c))
+    {
+        return Err("invalid container image reference".into());
+    }
+    Ok(())
+}
+
+pub fn validate_vm_options(
+    engine: Engine,
+    disk: Option<u32>,
+    deny_outgoing: bool,
+    ssh_keys: &[String],
+    ports: &[u16],
+) -> std::result::Result<(), String> {
+    if disk.is_some() && engine != Engine::Qemu {
+        return Err("--disk is supported only by QEMU; other engines use the image's existing size (Docker has no disk quota)".into());
+    }
+    if deny_outgoing && engine == Engine::Docker {
+        return Err("--deny-outgoing is not supported by Docker".into());
+    }
+    if !ssh_keys.is_empty()
+        && matches!(engine, Engine::Docker | Engine::Firecracker | Engine::Bhyve)
+    {
+        return Err(format!("SSH key injection is not supported by {engine}"));
+    }
+    if ports.contains(&0) {
+        return Err("port must be between 1 and 65535".into());
+    }
+    for key in ssh_keys {
+        if key.contains(['\n', '\r'])
+            || !key
+                .split_whitespace()
+                .next()
+                .is_some_and(|k| k.starts_with("ssh-") || k.starts_with("ecdsa-"))
+            || key.split_whitespace().nth(1).is_none()
+        {
+            return Err("invalid SSH public key; provide one OpenSSH public key per entry".into());
+        }
+    }
+    Ok(())
+}
+
+impl Engine {
+    pub fn default_disk(self) -> u32 {
+        if self == Self::Qemu {
+            VM_DISK_DEFAULT
+        } else {
+            0
+        }
+    }
+}
+
+impl Resource {
+    /// Disk and instance slots remain reserved even when a VM is stopped.
+    pub fn account(&mut self, vm: &Vm) {
+        self.disk_used = self.disk_used.saturating_add(vm.disk);
+        self.vm_count = self.vm_count.saturating_add(1);
+        if vm.state != VmState::Stopped {
+            self.cpu_used = self.cpu_used.saturating_add(vm.cpu);
+            self.mem_used = self.mem_used.saturating_add(vm.mem);
+        }
+    }
+}
+
+#[cfg(test)]
+mod option_tests {
+    use super::*;
+    #[test]
+    fn image_names_respect_backend_format() {
+        for name in [
+            "ubuntu:24.04",
+            "registry.example:5000/team/app:v1",
+            "alpine@sha256:abcdef",
+        ] {
+            assert!(validate_image(name, Engine::Docker).is_ok());
+            assert!(validate_image(name, Engine::Qemu).is_err());
+        }
+        assert!(validate_image("--privileged", Engine::Docker).is_err());
+        assert!(validate_image("../image", Engine::Qemu).is_err());
+    }
+    #[test]
+    fn unsupported_options_are_rejected() {
+        assert!(validate_vm_options(Engine::Docker, None, true, &[], &[]).is_err());
+        assert!(validate_vm_options(Engine::Firecracker, Some(512), false, &[], &[]).is_err());
+        assert!(
+            validate_vm_options(
+                Engine::Qemu,
+                Some(512),
+                false,
+                &["/missing/key.pub".into()],
+                &[22]
+            )
+            .is_err()
+        );
+        assert!(
+            validate_vm_options(
+                Engine::Qemu,
+                Some(512),
+                true,
+                &["ssh-ed25519 AAAA user".into()],
+                &[22]
+            )
+            .is_ok()
+        );
     }
 }
