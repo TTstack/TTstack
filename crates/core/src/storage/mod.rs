@@ -40,6 +40,26 @@ pub trait ImageStore: Send + Sync {
     /// Grow a QEMU disk, rejecting shrink requests.
     fn resize_disk(&self, clone_path: &str, size_mib: u32) -> Result<()>;
 
+    /// Directory containing the Firecracker kernel, root disk and optional config.
+    fn firecracker_dir(&self, path: &str) -> Result<String> {
+        Ok(path.into())
+    }
+
+    /// Logical root disk capacity, excluding the separate configuration drive.
+    fn firecracker_size(&self, path: &str) -> Result<u64> {
+        let disk = std::fs::symlink_metadata(format!("{path}/rootfs.ext4"))
+            .c(d!("inspect Firecracker rootfs"))?;
+        if !disk.is_file() {
+            return Err(eg!("file storage requires a regular rootfs.ext4"));
+        }
+        Ok(disk.len())
+    }
+
+    /// Grow an offline clone's root disk and its unpartitioned ext4 filesystem.
+    fn resize_firecracker(&self, path: &str, size_mib: u32) -> Result<()> {
+        file::resize_ext4(&std::path::Path::new(path).join("rootfs.ext4"), size_mib)
+    }
+
     /// Backend name for logging.
     fn name(&self) -> &'static str;
 }

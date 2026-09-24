@@ -83,9 +83,6 @@ impl Runtime {
         if !self.engines.contains(&req.engine) {
             return Err(eg!("engine {} is unavailable on this host", req.engine));
         }
-        if self.storage == Storage::Zvol && req.engine == Engine::Firecracker {
-            return Err(eg!("{} requires file storage", req.engine));
-        }
         if req.engine == Engine::Qemu && req.disk == 0 {
             return Err(eg!("QEMU disk size must be > 0"));
         }
@@ -126,9 +123,7 @@ impl Runtime {
         let disk = match req.engine {
             Engine::Docker => 0,
             Engine::Firecracker => {
-                let bytes = std::fs::metadata(format!("{base_image}/rootfs.ext4"))
-                    .c(d!("rootfs.ext4"))?
-                    .len();
+                let bytes = self.store.firecracker_size(&base_image)?;
                 let base_mib =
                     u32::try_from(bytes.div_ceil(1024 * 1024)).c(d!("rootfs too large"))?;
                 if req.disk != 0 && req.disk < base_mib {
@@ -200,13 +195,10 @@ impl Runtime {
                 #[cfg(target_os = "linux")]
                 if vm.engine == Engine::Firecracker {
                     if req.disk > 0 {
-                        ttcore::storage::file::resize_ext4(
-                            &std::path::Path::new(&clone_path).join("rootfs.ext4"),
-                            req.disk,
-                        )?;
+                        self.store.resize_firecracker(&clone_path, req.disk)?;
                     }
                     ttcore::guest_config::write_disk(
-                        std::path::Path::new(&clone_path),
+                        std::path::Path::new(&self.store.firecracker_dir(&clone_path)?),
                         &req.guest_config,
                     )?;
                 }
@@ -215,7 +207,7 @@ impl Runtime {
                 }
                 self.restore_network(&vm)?;
             }
-            let path = self.image_path(&vm);
+            let path = self.image_path(&vm)?;
             (self.engine_factory)(vm.engine)?.create(
                 &vm,
                 &path,
@@ -249,12 +241,12 @@ impl Runtime {
     fn clone_path(&self, vm: &Vm) -> String {
         format!("{}/clone-{}", self.runtime_dir, vm.id)
     }
-    fn image_path(&self, vm: &Vm) -> String {
+    fn image_path(&self, vm: &Vm) -> Result<String> {
         let path = self.clone_path(vm);
         if vm.engine == Engine::Firecracker {
-            path
+            self.store.firecracker_dir(&path)
         } else {
-            self.store.resolve_disk(&path)
+            Ok(self.store.resolve_disk(&path))
         }
     }
     fn restore_network(&self, vm: &Vm) -> Result<()> {
@@ -331,7 +323,7 @@ impl Runtime {
             {
                 eng.create(
                     &vm,
-                    &self.image_path(&vm),
+                    &self.image_path(&vm)?,
                     self.store.disk_format(),
                     &vm.options.ssh_keys,
                 )
@@ -441,6 +433,7 @@ impl Runtime {
                     "isolated_network".into(),
                     "firecracker_jailer".into(),
                     "firecracker_disk_resize".into(),
+                    "firecracker_zvol".into(),
                 ]
             } else {
                 vec![]
@@ -1038,6 +1031,9 @@ mod lifecycle_tests {
         rt.runtime_dir = "/tmp/tt-runtime".into();
         let mut record = vm("guest", "image", VmState::Stopped);
         record.engine = Engine::Firecracker;
-        assert_eq!(rt.image_path(&record), "/tmp/tt-runtime/clone-guest");
+        assert_eq!(
+            rt.image_path(&record).unwrap(),
+            "/tmp/tt-runtime/clone-guest"
+        );
     }
 }

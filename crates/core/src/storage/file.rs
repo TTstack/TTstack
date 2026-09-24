@@ -25,6 +25,18 @@ pub fn resize_ext4(path: &Path, size_mib: u32) -> Result<()> {
     if requested == metadata.len() {
         return Ok(());
     }
+    check_ext4(path)?;
+    let disk = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .c(d!("open ext4 clone"))?;
+    disk.set_len(requested).c(d!("grow ext4 clone"))?;
+    grow_ext4(path)?;
+    disk.sync_all().c(d!("sync ext4 clone"))?;
+    Ok(())
+}
+
+pub(super) fn check_ext4(path: &Path) -> Result<()> {
     let check = std::process::Command::new("e2fsck")
         .args(["-f", "-p"])
         .arg(path)
@@ -38,11 +50,10 @@ pub fn resize_ext4(path: &Path, size_mib: u32) -> Result<()> {
             String::from_utf8_lossy(&check.stderr)
         ));
     }
-    let disk = std::fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .c(d!("open ext4 clone"))?;
-    disk.set_len(requested).c(d!("grow ext4 clone"))?;
+    Ok(())
+}
+
+pub(super) fn grow_ext4(path: &Path) -> Result<()> {
     let resize = std::process::Command::new("resize2fs")
         .arg(path)
         .bounded_output()
@@ -53,7 +64,6 @@ pub fn resize_ext4(path: &Path, size_mib: u32) -> Result<()> {
             String::from_utf8_lossy(&resize.stderr)
         ));
     }
-    disk.sync_all().c(d!("sync ext4 clone"))?;
     Ok(())
 }
 

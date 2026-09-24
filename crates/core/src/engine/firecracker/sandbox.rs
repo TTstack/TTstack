@@ -1,6 +1,6 @@
-//! Jailer launch resources. Disk hard links stay on the runtime filesystem.
+//! Jailer resources: persistent file hard links or private block-device nodes.
 use super::*;
-use std::os::unix::fs::{PermissionsExt, chown};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, chown};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct Sandbox {
@@ -78,16 +78,9 @@ impl Sandbox {
                 .map(|_| crate::guest_config::CONFIG_DISK),
         ) {
             let source = image.join(name);
-            if !std::fs::symlink_metadata(&source)
-                .c(d!("guest image file"))?
-                .file_type()
-                .is_file()
-            {
-                return Err(eg!("Firecracker image members must be regular files"));
-            }
             let target = sandbox.root.join(name);
             remove_file(&target)?;
-            std::fs::hard_link(&source, &target).c(d!("link image into Firecracker sandbox"))?;
+            stage_member(&source, &target, name == "rootfs.ext4")?;
             chown(&target, Some(uid), Some(uid)).c(d!("guest file ownership"))?;
             std::fs::set_permissions(
                 &target,
@@ -158,6 +151,38 @@ impl Sandbox {
     }
 }
 
+fn stage_member(source: &Path, target: &Path, writable_root: bool) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(source).c(d!("guest image member"))?;
+    if metadata.is_file() {
+        match std::fs::hard_link(source, target) {
+            Ok(()) => return Ok(()),
+            // ZFS kernel/config files can live in a different dataset from the
+            // jail. A writable file root must remain a link to its retained disk.
+            Err(e) if !writable_root && e.raw_os_error() == Some(nix::libc::EXDEV) => {
+                std::fs::copy(source, target).c(d!("copy read-only jail member"))?;
+                return Ok(());
+            }
+            Err(e) => return Err(e).c(d!("link persistent jail member")),
+        }
+    }
+    let device = std::fs::metadata(source).c(d!("resolve root block device"))?;
+    if !writable_root || !device.file_type().is_block_device() {
+        return Err(eg!(
+            "Firecracker requires regular kernel/config files and a regular or block root disk"
+        ));
+    }
+    // Never chown the host /dev/zvol node or expose the host's /dev directory.
+    // Only this VM's root disk is recreated inside its private jail.
+    nix::sys::stat::mknod(
+        target,
+        nix::sys::stat::SFlag::S_IFBLK,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        device.rdev(),
+    )
+    .c(d!("create jailed root block device"))?;
+    Ok(())
+}
+
 pub(super) fn private_write(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let mut file = tempfile::NamedTempFile::new_in(
@@ -190,5 +215,37 @@ pub(super) fn remove_file(path: &Path) -> Result<()> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e).c(d!("remove runtime file")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_root_keeps_the_persistent_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("rootfs.ext4");
+        let target = dir.path().join("jailed-root");
+        std::fs::write(&source, b"before").unwrap();
+        stage_member(&source, &target, true).unwrap();
+        std::fs::write(&target, b"after").unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), b"after");
+    }
+
+    #[test]
+    fn rejects_symlinked_regular_members_and_character_devices() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("link");
+        let target = dir.path().join("jailed");
+        std::os::unix::fs::symlink("/dev/null", &source).unwrap();
+        assert!(stage_member(&source, &target, true).is_err());
+        assert!(stage_member(&source, &target, false).is_err());
+        std::fs::remove_file(&source).unwrap();
+        std::fs::write(dir.path().join("file"), b"kernel").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("file"), &source).unwrap();
+        assert!(stage_member(&source, &target, false).is_err());
+        assert!(stage_member(&source, &target, true).is_err());
+        assert!(!target.exists());
     }
 }

@@ -30,7 +30,7 @@ fn disk_reservation(spec: &VmSpec) -> u32 {
 
 /// Choose the best host for a VM spec using a best-fit strategy.
 ///
-/// Prefers the host with the least free resources that can still
+/// Prefers usable ZFS storage for VMs, then the least free resources that can still
 /// accommodate the VM, to pack hosts densely and leave larger hosts
 /// available for bigger workloads.
 ///
@@ -57,6 +57,9 @@ pub fn place_vm(
             && (spec.engine != Engine::Firecracker
                 || spec.disk.is_none()
                 || has("firecracker_disk_resize"))
+            && (spec.engine != Engine::Firecracker
+                || h.storage != Storage::Zvol
+                || has("firecracker_zvol"))
     };
 
     let mut candidates: Vec<&Host> = hosts
@@ -65,7 +68,6 @@ pub fn place_vm(
             h.state == HostState::Online
                 && supports(h)
                 && h.engines.contains(&spec.engine)
-                && !(h.storage == Storage::Zvol && spec.engine == Engine::Firecracker)
                 && h.resource.can_fit(cpu, mem, disk)
                 && (!check_images
                     || host_images
@@ -81,7 +83,7 @@ pub fn place_vm(
                 .any(|h| h.state == HostState::Online && supports(h))
         {
             return Err(eg!(
-                "no online agent supports the requested capabilities; upgrade agents before using guest_config, isolated_network, jailed Firecracker or Firecracker disk sizing"
+                "no online agent supports the requested capabilities; upgrade agents before using guest_config, isolated_network, jailed Firecracker, disk sizing or Firecracker zvol storage"
             ));
         }
         // Provide a more helpful error message
@@ -98,7 +100,7 @@ pub fn place_vm(
             .filter(|h| {
                 h.state == HostState::Online
                     && h.engines.contains(&spec.engine)
-                    && !(h.storage == Storage::Zvol && spec.engine == Engine::Firecracker)
+                    && supports(h)
                     && h.resource.can_fit(cpu, mem, disk)
             })
             .count();
@@ -124,8 +126,13 @@ pub fn place_vm(
         }
     }
 
-    // Sort by free memory ascending (best-fit)
-    candidates.sort_by_key(|h| h.resource.mem_free());
+    // Prefer provisioned ZFS hosts; keep Docker independent of VM storage.
+    candidates.sort_by_key(|h| {
+        (
+            spec.engine != Engine::Docker && h.storage != Storage::Zvol,
+            h.resource.mem_free(),
+        )
+    });
 
     let host = candidates[0];
     Ok(Placement {
@@ -180,6 +187,7 @@ mod tests {
                 "isolated_network".into(),
                 "firecracker_jailer".into(),
                 "firecracker_disk_resize".into(),
+                "firecracker_zvol".into(),
             ],
             id: id.into(),
             addr: format!("{id}:9100"),
@@ -213,6 +221,75 @@ mod tests {
             deny_outgoing: false,
             ssh_keys: vec![],
         }
+    }
+
+    #[test]
+    fn vm_storage_prefers_usable_zfs_then_falls_back_to_files() {
+        for engine in [Engine::Qemu, Engine::Firecracker] {
+            let file = make_host("file", 4, 4096, vec![engine]);
+            let mut zfs = make_host("zfs", 8, 8192, vec![engine]);
+            zfs.storage = Storage::Zvol;
+            let mut spec = make_spec();
+            spec.engine = engine;
+            let hosts = [file.clone(), zfs.clone()];
+            assert_eq!(
+                place_vm(&hosts, &spec, &HashMap::new()).unwrap().host_id,
+                "zfs"
+            );
+            let only_file_image = images_for("file", &["ubuntu"]);
+            assert_eq!(
+                place_vm(&hosts, &spec, &only_file_image).unwrap().host_id,
+                "file"
+            );
+            zfs.resource.cpu_used = zfs.resource.cpu_total;
+            assert_eq!(
+                place_vm(&[file.clone(), zfs.clone()], &spec, &HashMap::new())
+                    .unwrap()
+                    .host_id,
+                "file"
+            );
+            zfs.resource.cpu_used = 0;
+            zfs.state = HostState::Offline;
+            assert_eq!(
+                place_vm(&[file, zfs], &spec, &HashMap::new())
+                    .unwrap()
+                    .host_id,
+                "file"
+            );
+        }
+    }
+
+    #[test]
+    fn firecracker_zvol_requires_an_upgraded_agent() {
+        let mut zfs = make_host("old-zfs", 8, 8192, vec![Engine::Firecracker]);
+        zfs.storage = Storage::Zvol;
+        zfs.capabilities.retain(|cap| cap != "firecracker_zvol");
+        let mut spec = make_spec();
+        spec.engine = Engine::Firecracker;
+        assert!(place_vm(std::slice::from_ref(&zfs), &spec, &HashMap::new()).is_err());
+        let file = make_host("file", 4, 4096, vec![Engine::Firecracker]);
+        assert_eq!(
+            place_vm(&[zfs, file], &spec, &HashMap::new())
+                .unwrap()
+                .host_id,
+            "file"
+        );
+    }
+
+    #[test]
+    fn docker_placement_does_not_prefer_vm_storage() {
+        let file = make_host("small", 4, 4096, vec![Engine::Docker]);
+        let mut zfs = make_host("large", 8, 8192, vec![Engine::Docker]);
+        zfs.storage = Storage::Zvol;
+        let mut spec = make_spec();
+        spec.engine = Engine::Docker;
+        spec.disk = None;
+        assert_eq!(
+            place_vm(&[file, zfs], &spec, &HashMap::new())
+                .unwrap()
+                .host_id,
+            "small"
+        );
     }
 
     #[test]
