@@ -76,6 +76,12 @@ pub const RECIPES: &[ImageRecipe] = &[
         engine: "qemu",
         description: "Ubuntu 24.04 cloud image (qcow2, current)",
     },
+    // Jail — FreeBSD containers
+    ImageRecipe {
+        name: "freebsd-base",
+        engine: "jail",
+        description: "Experimental FreeBSD base archive (derived from host release)",
+    },
 ];
 
 /// Print available image recipes.
@@ -377,6 +383,53 @@ async fn create_qemu(name: &str, image_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+// ── Jail images (FreeBSD) ───────────────────────────────────────────
+
+async fn create_jail(name: &str, image_dir: &Path) -> Result<()> {
+    let target = image_dir.join(name);
+
+    if target.exists() {
+        println!("[image] {name} already exists");
+        return Ok(());
+    }
+
+    println!("[image] fetching FreeBSD base for jail...");
+    tokio::fs::create_dir_all(&target).await.c(d!("mkdir"))?;
+
+    // Detect FreeBSD version
+    let ver = Command::new("freebsd-version")
+        .output()
+        .await
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "14.3-RELEASE".into());
+
+    // Extract major version for URL
+    let major = ver.split('.').next().unwrap_or("14");
+    let url = format!("https://download.freebsd.org/releases/amd64/{major}.3-RELEASE/base.txz");
+
+    let txz = format!("{}/base.txz", target.display());
+    download_file(&url, Path::new(&txz)).await?;
+
+    println!("[image] extracting base...");
+    run_cmd("tar", &["xf", &txz, "-C", &target.display().to_string()]).await?;
+    tokio::fs::remove_file(&txz).await.ok();
+
+    // Configure the jail root
+    let etc = target.join("etc");
+    tokio::fs::write(etc.join("resolv.conf"), "nameserver 8.8.8.8\n")
+        .await
+        .ok();
+    tokio::fs::write(
+        etc.join("rc.conf"),
+        "sendmail_enable=\"NONE\"\nsyslogd_flags=\"-ss\"\n",
+    )
+    .await
+    .ok();
+
+    println!("[image] {name} ready: FreeBSD jail base");
+    Ok(())
+}
+
 // ── Public entry point ──────────────────────────────────────────────
 
 /// Create a specific image by recipe name.
@@ -391,6 +444,7 @@ pub async fn create_image(name: &str, image_dir: &Path) -> Result<()> {
         "docker" => create_docker(name).await,
         "firecracker" => create_firecracker(name, image_dir).await,
         "qemu" => create_qemu(name, image_dir).await,
+        "jail" => create_jail(name, image_dir).await,
         _ => Err(eg!("unsupported engine: {}", recipe.engine)),
     }
 }
@@ -420,6 +474,14 @@ pub async fn create_all_for_engine(engine: &str, image_dir: &Path) -> Result<()>
 pub async fn create_all(image_dir: &Path) -> Result<()> {
     let mut failures = Vec::new();
     for recipe in RECIPES {
+        // Skip jail on non-FreeBSD and skip FreeBSD-only on Linux
+        if recipe.engine == "jail" && !cfg!(target_os = "freebsd") {
+            continue;
+        }
+        if recipe.engine == "firecracker" && cfg!(target_os = "freebsd") {
+            continue;
+        }
+
         println!("\n--- {}: {} ---", recipe.name, recipe.description);
         if let Err(e) = create_image(recipe.name, image_dir).await {
             failures.push(format!("{}: {e}", recipe.name));
@@ -535,7 +597,7 @@ mod tests {
         assert!(engines.contains("docker"));
         assert!(engines.contains("firecracker"));
         assert!(engines.contains("qemu"));
-        assert_eq!(engines.len(), 3);
+        assert!(engines.contains("jail"));
     }
 }
 

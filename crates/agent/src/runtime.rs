@@ -49,7 +49,7 @@ impl Runtime {
             engine_factory: engine::create_engine,
             network_ready: false,
         };
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if rt.list_vms()?.iter().any(|vm| vm.engine != Engine::Docker) {
             rt.ensure_network()?;
         }
@@ -82,6 +82,9 @@ impl Runtime {
         .map_err(|e| eg!(e))?;
         if !self.engines.contains(&req.engine) {
             return Err(eg!("engine {} is unavailable on this host", req.engine));
+        }
+        if self.storage == Storage::Zvol && req.engine == Engine::Jail {
+            return Err(eg!("Jail requires file storage"));
         }
         if req.engine == Engine::Qemu && req.disk == 0 {
             return Err(eg!("QEMU disk size must be > 0"));
@@ -162,7 +165,8 @@ impl Runtime {
                 .ok_or_else(|| eg!("IP address space exhausted"))?
         };
         let mut ports = req.ports.clone();
-        if req.engine == Engine::Qemu && !ports.contains(&22) {
+        if matches!(req.engine, Engine::Qemu | Engine::Bhyve | Engine::Jail) && !ports.contains(&22)
+        {
             ports.push(22);
         }
         let port_map = allocate_ports(&vms, &ports, |p| {
@@ -229,7 +233,7 @@ impl Runtime {
     }
 
     fn ensure_network(&mut self) -> Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if !self.network_ready {
             net::setup_bridge()?;
             net::setup_nat()?;
@@ -245,12 +249,14 @@ impl Runtime {
         let path = self.clone_path(vm);
         if vm.engine == Engine::Firecracker {
             self.store.firecracker_dir(&path)
+        } else if vm.engine == Engine::Jail {
+            Ok(path)
         } else {
             Ok(self.store.resolve_disk(&path))
         }
     }
     fn restore_network(&self, vm: &Vm) -> Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if vm.engine != Engine::Docker {
             #[cfg(target_os = "linux")]
             if vm.options.isolated_network {
@@ -356,7 +362,7 @@ impl Runtime {
         save_vm(&self.db, &vm)?;
         let result = (|| -> Result<()> {
             (self.engine_factory)(vm.engine)?.destroy(&vm)?;
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             if vm.engine != Engine::Docker {
                 net::remove_port_forwards(&vm.ip)?;
                 net::allow_outgoing(&vm.ip)?;
@@ -679,6 +685,16 @@ fn detect_engines() -> Vec<Engine> {
         }
     }
 
+    #[cfg(target_os = "freebsd")]
+    {
+        if which("bhyve") {
+            engines.push(Engine::Bhyve);
+        }
+        if which("jail") {
+            engines.push(Engine::Jail);
+        }
+    }
+
     // Detect the local container runtime.
     if which("docker") || which("podman") {
         engines.push(Engine::Docker);
@@ -740,7 +756,13 @@ mod tests {
     fn retained_engines_survive_database_reopen_and_unknown_engine_keeps_its_record() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("agent.db");
-        let engines = [Engine::Qemu, Engine::Firecracker, Engine::Docker];
+        let engines = [
+            Engine::Qemu,
+            Engine::Firecracker,
+            Engine::Docker,
+            Engine::Bhyve,
+            Engine::Jail,
+        ];
         {
             let db = Connection::open(&path).unwrap();
             init_db(&db).unwrap();
@@ -1026,11 +1048,45 @@ mod lifecycle_tests {
         assert_eq!(read_vms(path.to_str().unwrap()).unwrap().len(), 1);
     }
     #[test]
-    fn firecracker_receives_root_directory_not_qcow2_path() {
+    fn jail_rejects_zvol_before_creating_a_record_or_resources() {
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        rt.storage = Storage::Zvol;
+        rt.engines = vec![Engine::Jail];
+        let req = CreateVmReq {
+            vm_id: "jail-zvol".into(),
+            env_id: "env".into(),
+            image: "freebsd-base".into(),
+            engine: Engine::Jail,
+            cpu: 1,
+            mem: 128,
+            disk: 0,
+            ports: vec![],
+            deny_outgoing: false,
+            isolated_network: false,
+            guest_config: Default::default(),
+            ssh_keys: vec![],
+        };
+        assert!(
+            rt.create_vm(&req)
+                .unwrap_err()
+                .to_string()
+                .contains("file storage")
+        );
+        assert!(rt.list_vms().unwrap().is_empty());
+        assert_eq!(rt.resource.vm_count, 0);
+    }
+
+    #[test]
+    fn firecracker_and_jail_receive_root_directories_not_qcow2_paths() {
         let mut rt = runtime(Connection::open_in_memory().unwrap());
         rt.runtime_dir = "/tmp/tt-runtime".into();
         let mut record = vm("guest", "image", VmState::Stopped);
         record.engine = Engine::Firecracker;
+        assert_eq!(
+            rt.image_path(&record).unwrap(),
+            "/tmp/tt-runtime/clone-guest"
+        );
+        record.engine = Engine::Jail;
         assert_eq!(
             rt.image_path(&record).unwrap(),
             "/tmp/tt-runtime/clone-guest"

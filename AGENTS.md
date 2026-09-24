@@ -13,7 +13,9 @@ policies belong to callers, not to TTstack.
 - `crates/cli` (`tt`): user commands, image recipes, and deployment tooling.
 
 Linux x86_64 is the supported host platform. Keep the host implementation focused
-on QEMU/KVM, Firecracker, and Docker/Podman. Report unverified combinations clearly.
+on QEMU/KVM, Firecracker, and Docker/Podman. The restored FreeBSD Bhyve/Jail
+paths are experimental; see [compatibility](docs/compatibility.md#experimental-freebsd-restoration).
+Report unverified combinations clearly.
 
 ## Development and verification
 

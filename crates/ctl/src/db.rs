@@ -389,7 +389,13 @@ mod tests {
     fn engine_sets_roundtrip_and_unknown_records_fail_without_mutation() {
         let db = test_db();
         let mut host = make_host("host");
-        host.engines = vec![Engine::Qemu, Engine::Firecracker, Engine::Docker];
+        host.engines = vec![
+            Engine::Qemu,
+            Engine::Firecracker,
+            Engine::Docker,
+            Engine::Bhyve,
+            Engine::Jail,
+        ];
         db.put_host(&host).unwrap();
         assert_eq!(db.get_host("host").unwrap().unwrap().engines, host.engines);
         for engine in &host.engines {
@@ -412,7 +418,7 @@ mod tests {
             .query_row("SELECT data FROM hosts WHERE id='host'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(stored, original);
-        assert_eq!(db.vm_count().unwrap(), 3);
+        assert_eq!(db.vm_count().unwrap(), host.engines.len());
     }
 
     #[test]

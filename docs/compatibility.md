@@ -1,7 +1,8 @@
 # Compatibility and validation scope
 
-Linux x86_64 is the supported host implementation and CI target. The host agent
-requires Linux. QEMU/KVM, Firecracker and Docker/Podman are the available engines.
+Linux x86_64 is the supported host implementation and CI target, with QEMU/KVM,
+Firecracker and Docker/Podman. The agent also includes experimental FreeBSD
+Bhyve/Jail paths; this is outside the Linux support commitment and CI scope.
 
 ## Implementation versus live verification
 
@@ -16,6 +17,7 @@ requires Linux. QEMU/KVM, Firecracker and Docker/Podman are the available engine
 | Ubuntu cloud guest | Built-in QEMU recipe | Not covered by this run |
 | Linux/systemd deployment | Local and distributed service generation | Temporary systemd services exercised; not every deploy configuration |
 | Linux/OpenRC, musl binaries | Distributed deployment support | Not covered by this run |
+| FreeBSD Bhyve/Jail/PF | Restored experimental implementation, manual setup | No new native build or live verification; see [limits below](#experimental-freebsd-restoration) |
 | Other host platforms | No validated agent deployment path | No support commitment |
 
 The [2026-09-24 validation record](live-validation-2026-09-24.md) identifies the
@@ -32,6 +34,47 @@ The [Linux host upgrade record](linux-host-upgrade-validation-2026-09-24.md)
 checks the retained engines across an agent/controller binary upgrade, new
 provisioning, stop/start, access, persistence and cleanup. Refer to that record
 for its exact fixture and validation limits.
+
+## Experimental FreeBSD restoration
+
+This branch extracts the FreeBSD code removed by `8775fdb` and patches it onto
+`83b7e95`, retaining the later Linux Firecracker, ZFS and lifecycle fixes. It
+restores the `bhyve` and `jail` API values, engine detection, `sysctl hw.physmem`
+memory detection, ifconfig/PF networking, the `freebsd-base` recipe and CLI/UI
+entries. These paths remain experimental. The core library and its test targets
+pass cross-target checking for `x86_64-unknown-freebsd` on Linux; no native
+FreeBSD agent/controller build or guest boot was performed.
+
+Use native FreeBSD binaries and manual service setup; automated deployment still
+requires Linux. Bhyve invokes `bhyveload`, `bhyve` and `bhyvectl`, so its disk must
+already be bootable by that loader. There is no Bhyve image recipe, SSH injection
+or disk resizing. Zvol readiness accepts FreeBSD character devices, matching
+the [OpenZFS FreeBSD implementation](https://github.com/openzfs/zfs/blob/master/module/os/freebsd/zfs/zvol_os.c);
+Linux still requires block devices. Jail expects a copied root directory with file storage; zvols
+are rejected for Jail by both scheduler and agent. Its SSH-key support only writes
+`root/.ssh/authorized_keys`; the restored code does not start guest services or
+configure sshd. Jail CPU/memory values are scheduling reservations, not enforced
+host limits. Linux guest configuration drives and network isolation are rejected
+for both FreeBSD engines.
+
+The extraction preserves known limitations of the old implementation:
+
+- Bhyve rejects in-place restart. Jail stop removes the jail, while start tries
+  to modify an existing jail; do not assume Linux stop/start guarantees apply.
+- TAP creation is not idempotent, and the Jail path uses shared host networking.
+  Network recovery and repeated operations need native lifecycle validation.
+- PF requires operator configuration in `/etc/pf.conf`. The restored rule writer
+  reloads a shared anchor per rule; multiple forwards or guests can overwrite
+  earlier rules. Cleanup errors can be ignored by the legacy engine/network code.
+- `freebsd-base` uses the host major release with a fixed `.3-RELEASE` suffix
+  (fallback `14.3-RELEASE`). Download availability is unverified, and a failed
+  extraction can leave a directory that later attempts treat as complete.
+
+The Linux-only release cannot deserialize restored engine names in persisted
+VMs or cached host lists. Upgrade controller and agents together when trying this
+branch. Before returning to Linux-only binaries, use this branch to remove all
+FreeBSD workloads and unregister their hosts; keep consistent state/disk backups.
+Existing dated Linux reports below retain their original tested revisions and scope.
 
 ## Build and CI
 

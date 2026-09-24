@@ -65,11 +65,17 @@ fn wait_device(dataset: &str) -> Result<String> {
     let path = format!("/dev/zvol/{dataset}");
     let started = Instant::now();
     loop {
-        if std::fs::metadata(&path).is_ok_and(|m| m.file_type().is_block_device()) {
+        if std::fs::metadata(&path).is_ok_and(|m| {
+            if cfg!(target_os = "freebsd") {
+                m.file_type().is_char_device()
+            } else {
+                m.file_type().is_block_device()
+            }
+        }) {
             return Ok(path);
         }
         if started.elapsed() >= Duration::from_secs(5) {
-            return Err(eg!("ZFS block device did not appear: {path}"));
+            return Err(eg!("ZFS volume device did not appear: {path}"));
         }
         std::thread::sleep(Duration::from_millis(50));
     }

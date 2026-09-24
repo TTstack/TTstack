@@ -635,7 +635,7 @@ fn check_output(output: std::process::Output, action: &str) -> Result<()> {
 pub async fn deploy_local(role: &str, release_dir: &str) -> Result<()> {
     if !cfg!(target_os = "linux") || !Path::new("/run/systemd/system").is_dir() {
         return Err(eg!(
-            "local deploy requires Linux with systemd; use distributed deploy for Linux with OpenRC"
+            "local deploy requires Linux with systemd; use distributed deploy for Linux with OpenRC. Experimental FreeBSD hosts require manual setup"
         ));
     }
     let uid = std::fs::read_to_string("/proc/self/status")
