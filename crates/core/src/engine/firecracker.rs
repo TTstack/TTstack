@@ -145,26 +145,15 @@ impl VmEngine for FirecrackerEngine {
             let _ = child.wait();
             return Err(e);
         }
+        let result = wait_for_boot(&mut child, Duration::from_secs(10), || {
+            Path::new(&sandbox.socket()).exists() && matches!(self.state(vm), Ok(VmState::Running))
+        });
+        // Reap the owned child on every outcome, including a readiness timeout.
+        // A timeout leaves the VMM and its disks available for inspection.
         std::thread::spawn(move || {
             let _ = child.wait();
         });
-        let started = std::time::Instant::now();
-        while started.elapsed() < Duration::from_secs(10) {
-            if !super::process_matches(pid, &sandbox.marker)? {
-                return Err(eg!(
-                    "Firecracker jailer exited during boot; inspect the VM console log"
-                ));
-            }
-            if Path::new(&sandbox.socket()).exists()
-                && matches!(self.state(vm), Ok(VmState::Running))
-            {
-                return Ok(());
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        Err(eg!(
-            "Firecracker did not become ready; resources retained for inspection"
-        ))
+        result
     }
 
     fn start(&self, vm: &Vm) -> Result<()> {
@@ -239,5 +228,84 @@ impl VmEngine for FirecrackerEngine {
     }
     fn name(&self) -> &'static str {
         "firecracker"
+    }
+}
+
+// Jailer execs into Firecracker. /proc/PID/cmdline can be temporarily empty
+// during exec; a missing identity marker is not evidence that our child exited.
+fn wait_for_boot(
+    child: &mut std::process::Child,
+    timeout: Duration,
+    mut ready: impl FnMut() -> bool,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    while started.elapsed() < timeout {
+        if child
+            .try_wait()
+            .c(d!("inspect Firecracker child"))?
+            .is_some()
+        {
+            return Err(eg!(
+                "Firecracker jailer exited during boot; inspect the VM console log"
+            ));
+        }
+        if ready() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(eg!(
+        "Firecracker did not become ready; resources retained for inspection"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_waits_for_readiness_without_treating_missing_marker_as_exit() {
+        let mut child = Command::new("sleep").arg("5").spawn().unwrap();
+        assert!(!super::super::process_matches(child.id(), "/not-yet-visible.sock").unwrap());
+        let mut probes = 0;
+        let result = wait_for_boot(&mut child, Duration::from_secs(2), || {
+            probes += 1;
+            probes >= 2
+        });
+        let alive = child.try_wait().unwrap().is_none();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(result.is_ok());
+        assert!(alive);
+        assert_eq!(probes, 2);
+    }
+
+    #[test]
+    fn startup_reports_actual_exit_before_accepting_readiness() {
+        let mut child = Command::new("sh").args(["-c", "exit 7"]).spawn().unwrap();
+        child.wait().unwrap();
+        let result = wait_for_boot(&mut child, Duration::from_secs(1), || true);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("exited during boot")
+        );
+    }
+
+    #[test]
+    fn startup_timeout_retains_a_live_child_for_inspection() {
+        let mut child = Command::new("sleep").arg("5").spawn().unwrap();
+        let result = wait_for_boot(&mut child, Duration::from_millis(30), || false);
+        let alive = child.try_wait().unwrap().is_none();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("resources retained")
+        );
+        assert!(alive);
     }
 }
