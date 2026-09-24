@@ -226,7 +226,9 @@ qcow2 file's encoded bytes. The corresponding device is exposed at
 Firecracker can use the `file` backend on a mounted ZFS filesystem. This keeps
 its kernel/rootfs layout and per-VM file copies; it does not turn those disks
 into zvols or create a dataset/snapshot per VM. Place image, runtime and agent
-state directories on operator-provisioned datasets. Keep all files within a
+state directories on operator-provisioned datasets. Firecracker also stores
+PID, console and sandbox metadata in `/home/ttstack/run`; include that directory
+when placing all persistent VM state on ZFS. Keep all files within a
 VM's runtime tree on the same filesystem for jailer hard links. Snapshot stopped
 VMs for an offline recovery point; a running-disk snapshot is not an application
 consistency guarantee. Dataset quotas and agent disk reservations are separate
