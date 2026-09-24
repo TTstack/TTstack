@@ -11,11 +11,11 @@ pub struct Config {
     #[arg(long, default_value = "0.0.0.0:9100")]
     pub listen: String,
 
-    /// Directory containing base VM/container images.
+    /// Base image directory (file) or dataset (zvol); excludes Docker images.
     #[arg(long, default_value = "/home/ttstack/images")]
     pub image_dir: String,
 
-    /// Directory for runtime VM image clones.
+    /// Runtime clone directory (file) or dataset (zvol).
     #[arg(long, default_value = "/home/ttstack/runtime")]
     pub runtime_dir: String,
 
@@ -35,11 +35,11 @@ pub struct Config {
     #[arg(long, default_value_t = 0)]
     pub mem_total: u32,
 
-    /// Total disk for VMs in MiB (default: ~200 GiB).
+    /// Disk scheduling budget in MiB (default 200 GiB); not auto-detected or a quota.
     #[arg(long, default_value_t = 200 * 1024)]
     pub disk_total: u32,
 
-    /// Unique host identifier (auto-generated if not set).
+    /// Unique host identifier (generated once and persisted if not set).
     #[arg(long)]
     pub host_id: Option<String>,
     /// API key for authentication. If set, all API requests must include
@@ -74,7 +74,7 @@ impl Config {
     }
 }
 
-/// Read total system memory in MB.
+/// Read total system memory in MiB.
 ///
 /// Uses `/proc/meminfo` on Linux, `sysctl hw.physmem` on FreeBSD,
 /// `sysctl hw.memsize` on macOS.

@@ -80,8 +80,8 @@ impl Db {
             .c(d!("migration v1"))?;
         }
 
-        // Future migrations go here:
-        // if current < 2 { ... }
+        // v2 adds lifecycle fields in serialized records, decoded with serde defaults.
+        // The version guard prevents older binaries from opening this state.
 
         Self::set_schema_version(conn, SCHEMA_VERSION)?;
 

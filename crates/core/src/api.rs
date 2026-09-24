@@ -17,7 +17,7 @@ pub struct CreateVmReq {
     pub disk: u32,
     pub ports: Vec<u16>,
     pub deny_outgoing: bool,
-    /// SSH public keys to inject into the VM for tenant access.
+    /// Root SSH public keys for QEMU cloud-init or experimental Jail.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ssh_keys: Vec<String>,
 }
@@ -81,18 +81,18 @@ pub struct CreateEnvReq {
 pub struct EnvDetail {
     pub env: Env,
     pub vms: Vec<Vm>,
-    /// Non-fatal warnings (e.g. VMs that failed to create).
+    /// Operation diagnostics, including VM failures; inspect states and errors too.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
 
-/// Host registration request from CLI or auto-discovery.
+/// Explicit host registration request from a controller client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterHostReq {
     pub addr: String,
 }
 
-/// Summary of available images across the fleet.
+/// File/zvol image reported by an online host; excludes Docker image stores.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageInfo {
     pub name: String,

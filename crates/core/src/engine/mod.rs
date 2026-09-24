@@ -5,7 +5,7 @@
 //!
 //! Platform-specific engines:
 //! - **Linux**: Qemu, Firecracker, Docker/Podman
-//! - **FreeBSD**: Bhyve, Jail
+//! - **FreeBSD (experimental)**: Bhyve, Jail
 
 #[cfg(target_os = "freebsd")]
 pub mod bhyve;
@@ -25,7 +25,7 @@ pub trait VmEngine: Send + Sync {
     /// Create and boot a new VM from the given disk path.
     ///
     /// - `disk_format`: image format (`"qcow2"` for file-based, `"raw"` for zvol).
-    /// - `ssh_keys`: public keys to inject for tenant SSH access.
+    /// - `ssh_keys`: root public keys for QEMU cloud-init or experimental Jail.
     fn create(
         &self,
         vm: &Vm,

@@ -31,7 +31,7 @@ fmt:
 fmt-check:
 	$(CARGO) fmt -- --check
 
-## Generate API documentation
+## Generate Rust source API documentation (HTTP API: docs/rest-api.md)
 doc:
 	$(CARGO) doc --no-deps --document-private-items $(CARGO_FLAG)
 

@@ -13,7 +13,7 @@ use std::fmt;
 ///
 /// Platform availability:
 /// - **Linux**: Qemu, Firecracker, Docker
-/// - **FreeBSD**: Bhyve, Jail
+/// - **FreeBSD (experimental)**: Bhyve, Jail
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
@@ -50,11 +50,11 @@ impl std::str::FromStr for Engine {
     }
 }
 
-/// Storage backend for VM / container images.
+/// Storage backend for guest disk images; Docker uses its own image store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Storage {
-    /// Plain qcow2 file copies — works on any filesystem.
+    /// Filesystem copies: QEMU qcow2 files or Firecracker kernel/rootfs directories.
     File,
     /// ZFS zvol — raw block devices backed by ZFS volumes.
     Zvol,
@@ -128,20 +128,20 @@ pub enum HostState {
 
 // ── Resource Tracking ───────────────────────────────────────────────
 
-/// Aggregated resource information for a host.
+/// Host scheduling capacities and reservations, not measured resource usage.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Resource {
     pub cpu_total: u32,
     pub cpu_used: u32,
     /// Total memory in MiB.
     pub mem_total: u32,
-    /// Used memory in MiB.
+    /// Reserved memory in MiB.
     pub mem_used: u32,
     /// Total disk in MiB.
     pub disk_total: u32,
-    /// Used disk in MiB.
+    /// Reserved disk capacity in MiB, including stopped guests.
     pub disk_used: u32,
-    /// Number of active VMs / containers.
+    /// Number of tracked VMs / containers, including stopped and failed records.
     pub vm_count: u32,
 }
 
@@ -238,7 +238,7 @@ pub struct Env {
 pub const VM_CPU_DEFAULT: u32 = 2;
 /// Default memory per VM in MiB (1 GiB).
 pub const VM_MEM_DEFAULT: u32 = 1024;
-/// Default disk per VM in MiB (40 GiB).
+/// Default QEMU virtual disk size in MiB (40 GiB).
 pub const VM_DISK_DEFAULT: u32 = 40 * 1024;
 /// Default environment lifetime in seconds (6 hours); explicit zero means no expiry.
 pub const DEFAULT_LIFETIME: u64 = 6 * 3600;

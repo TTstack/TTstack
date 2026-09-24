@@ -6,8 +6,8 @@
 //! The [`api`] and [`model`] modules are platform-independent and used
 //! by all components (CLI, controller, agent).
 //!
-//! The [`engine`], [`net`], and [`storage`] modules are only available
-//! on Linux and FreeBSD where the agent daemon runs.
+//! The [`engine`], [`net`], and [`storage`] modules contain host-specific
+//! implementations. Linux is primary; FreeBSD support is experimental.
 
 pub mod api;
 pub mod auth;

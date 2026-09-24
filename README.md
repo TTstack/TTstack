@@ -1,198 +1,128 @@
 # TTstack — Lightweight Private Cloud
 
-[![CI](https://github.com/rust-util-collections/TTstack/actions/workflows/ci.yml/badge.svg)](https://github.com/rust-util-collections/TTstack/actions/workflows/ci.yml)
+[![CI](https://github.com/TTstack/TTstack/actions/workflows/ci.yml/badge.svg)](https://github.com/TTstack/TTstack/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
-[![Platform](https://img.shields.io/badge/platform-linux-green.svg)](#platform-support)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](Cargo.toml)
 
-TTstack is a lightweight private cloud platform for mid-size teams and
-individual developers. Centralized management of VMs and containers
-across multiple physical hosts. Linux is the primary supported platform;
-FreeBSD (Bhyve, Jail and PF networking) is **experimental**, outside the
-primary reliability and CI scope.
+TTstack manages VMs and containers across a small fleet of hosts for developers
+and small teams. Its focus is creating temporary environments, accessing them,
+and reliably stopping, restarting and deleting them.
 
-## Quick Start
-
-```bash
-make release
-sudo tt deploy all                          # deploy agent + controller
-sudo tt image create all --engine docker    # generate Docker images
-sudo tt image create alpine-cloud           # generate QEMU cloud image (SSH-ready)
-
-tt config <controller-ip>:9200 --api-key <api-key> # key printed by deploy
-tt host add <agent-ip>:9100                 # register a host
-
-tt env create demo --image alpine-cloud --engine qemu \
-  --ssh-key ~/.ssh/id_ed25519.pub
-tt env show demo                            # see port mappings
-ssh root@<host-ip> -p <mapped-port>         # key-based auth
-```
-
-## VM Access
-
-| Engine | How to access |
-|--------|--------------|
-| **QEMU** cloud images | `ssh root@<host> -p <mapped-port>` (SSH key injected via cloud-init) |
-| **QEMU** custom images | SSH via port forwarding (your own key setup) |
-| **Docker** | SSH (if sshd in image) or `docker exec` from host |
-| **Firecracker** | Custom guest workloads; boot output in `/home/ttstack/run/fc-<id>.log` (no managed SSH or interactive console) |
-| **Bhyve** (experimental FreeBSD) | SSH via port forwarding |
-
-QEMU cloud images auto-configure via **cloud-init**: SSH public keys,
-networking — all set on first boot. See [docs/guest-images.md](docs/guest-images.md).
-
-## Security
-
-All `/api/*` endpoints require a Bearer token when `--api-key` is set
-(auto-generated on deploy). The web dashboard (`/`) remains open.
-
-```bash
-# Set in deploy.toml:
-[general]
-api_key = "your-secret-key"
-
-# Or configure CLI directly:
-tt config <addr> --api-key <api-key>
-
-# Or via environment:
-export TT_API_KEY=your-secret-key
-```
-
-## Built-in Images
-
-Built-in image recipes (guest workloads and container default commands must suit your use case):
-
-| Recipe | Engine | Description |
-|--------|--------|-------------|
-| `alpine` `debian` `ubuntu` `rockylinux` | Docker | Base OS containers |
-| `nginx` `redis` `postgres` | Docker | Popular services |
-| `fc-alpine` | Firecracker | Alpine microVM (~50MB) |
-| `alpine-cloud` `debian-cloud` `ubuntu-cloud` | QEMU | SSH-ready cloud images |
-| `freebsd-base` | Jail | Experimental FreeBSD base |
-
-```bash
-tt image recipes                            # list all
-sudo tt image create all --engine docker    # all Docker images
-sudo tt image create alpine-cloud           # one QEMU cloud image
-sudo tt image create all                    # everything for this platform
-```
-
-See [docs/guest-images.md](docs/guest-images.md) for custom image creation.
-
-## Key Features
-
-- **Multi-engine**: QEMU/KVM, Firecracker, Docker/Podman (Linux); Bhyve, Jail (experimental FreeBSD)
-- **Multi-host fleet**: up to 50 hosts, 1000 VM instances, best-fit scheduling
-- **Environments**: group VMs with lifecycle control and auto-expiry (default 6h)
-- **Storage backends**: ZFS zvol (instant clone), plain qcow2 file copies
-- **SSH key injection**: provide public keys at create time; port 22 auto-included
-- **Web dashboard**: built-in monitoring UI at `http://<controller>:9200`
-- **Simple deploy**: three binaries, SQLite, one command (`tt deploy all`)
+Linux x86_64 is the primary host platform. **FreeBSD support is experimental**
+(Bhyve, Jail and PF), outside the primary reliability and CI scope.
 
 ## Architecture
 
-```
-┌──────────┐             ┌──────────────┐             ┌───────────┐
-│  tt CLI  ├──── HTTP ──►│   tt-ctl     ├──── HTTP ──►│ tt-agent  │ × N
-└──────────┘             │ (controller) │             │ (per-host)│
-┌──────────┐             │ + Web UI     │             └─────┬─────┘
-│ Browser  ├──── HTTP ──►└──────┬───────┘                   │
-└──────────┘                    │                    VM engines + storage
-                           SQLite DB
+```text
+tt CLI / Browser → HTTP → tt-ctl → HTTP → tt-agent (one per host)
+                          │                 │
+                     SQLite state      SQLite state
+                                       engines, disks, networking
 ```
 
-| Binary | Role |
-|--------|------|
-| **tt** | CLI client |
-| **tt-ctl** | Central controller: scheduling, state, web UI |
-| **tt-agent** | Host agent: VM lifecycle, images, networking |
+| Component | Responsibility |
+|---|---|
+| `tt` | CLI client, local image recipes, deployment over SSH |
+| `tt-ctl` | Scheduling, environment lifecycle, fleet state and web dashboard |
+| `tt-agent` | Host-local VM/container lifecycle, storage and networking |
+| `crates/core` | Shared API models, engine, storage and networking implementations |
 
-## CLI Reference
+The Rust workspace uses Tokio/Axum for HTTP and asynchronous coordination, SQLite
+for persistent state, and installed hypervisor/container tools to run workloads.
+There is one controller; no separate message queue or database server is required.
 
+## Quick start: one Linux/systemd host
+
+Install the [build and QEMU prerequisites](docs/deployment.md#prerequisites) first.
+Deployment installs TTstack binaries and services; it does not install engines,
+create guest images or register hosts. Run these commands from the repository on
+the intended host:
+
+```bash
+make release
+sudo ./target/release/tt deploy all --release-dir ./target/release
+export PATH="/opt/ttstack/bin:$PATH"
+
+# Replace the value with the key printed by the controller deployment.
+tt config 127.0.0.1:9200 --api-key 'PASTE_DEPLOYMENT_KEY_HERE'
+
+sudo mkdir -p /home/ttstack/images
+sudo /opt/ttstack/bin/tt image create alpine-cloud
+tt host add 127.0.0.1:9100
+
+# Use an existing SSH public key; never pass the private key.
+tt env create demo --image alpine-cloud --engine qemu \
+  --cpu 1 --mem 256 --disk 2048 --ssh-key ~/.ssh/id_ed25519.pub
+tt env show demo
 ```
-tt config <addr> [--api-key <api-key>]     Set controller address and API key
-tt status                           Fleet-wide status
 
-tt host add/list/show/remove        Manage hosts
-tt env create/list/show/delete      Manage environments
-tt env stop/start <name>            Lifecycle control
+Use the host and mapped SSH port printed by `env show`, for example
+`ssh -i ~/.ssh/id_ed25519 -p 20000 root@127.0.0.1` **if that is the assigned port**.
+`running` means the VM process is running; SSH may need more time to start.
+These loopback addresses assume the CLI and SSH client are on the same host.
+For remote access, register a host address reachable by the controller and use
+that host's reachable address for guest connections.
 
-tt image list/recipes/create        Manage images
-tt deploy agent/ctl/all/dist        Deploy TTstack
+```bash
+tt env stop demo
+tt env start demo
+tt env delete demo
 ```
 
-### `env create` options
+For containers or custom guests, see the [image guide](docs/guest-images.md).
+For multiple hosts, use [distributed deployment](docs/deployment.md#distributed-deployment).
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `-i, --image <name>` | Base image (repeatable) | *required* |
-| `--engine <type>` | qemu, firecracker, docker, bhyve, jail | qemu |
-| `--cpu <N>` | vCPUs per VM | 2 |
-| `--mem <MiB>` | Memory per VM | 1024 |
-| `--disk <MiB>` | QEMU virtual disk size; grows the clone, never shrinks it | 40960 (QEMU only) |
-| `--dup <N>` | Replicas per image | 1 |
-| `--ssh-key <FILE>` | SSH public key file (repeatable; QEMU / experimental Jail) | Supply for SSH access |
-| `-p, --port <PORT>` | Guest port to expose (repeatable) | — |
-| `--lifetime <SEC>` | Auto-expiry (0 = no expiry; longer lifetimes allowed) | 21600 |
-| `--deny-outgoing` | Block outbound traffic | false |
+## Core behavior and boundaries
 
-## Lifecycle and recovery
+- Environments group one or more VMs/containers. They expire after six hours by
+  default; `--lifetime 0` disables expiry and longer lifetimes are allowed.
+- Linux stop/start retains the disk but stops and boots the workload. It does not
+  preserve VM memory. Deleting an environment removes its runtime disks/containers.
+- Creation is persisted before execution. The CLI waits up to ten minutes; after
+  a timeout or interruption, inspect `tt env show NAME` before retrying. Incomplete
+  deletion remains visible and is retried while the controller is running.
+- Scheduling uses configured CPU, memory and disk reservations, not measured load.
+  Limits of 50 hosts and 1000 tracked VMs are guardrails, not tested fleet capacity.
+- QEMU cloud images support root SSH key injection and virtual-disk growth.
+  Firecracker uses a prepared kernel/rootfs; its built-in recipe only checks boot
+  and networking. Docker requires a long-running image default command.
+- Image preparation happens on each agent host. There is no automatic image
+  distribution, cross-host private network, guest migration or high availability.
 
-`tt env create` submits a durable plan and waits for completion. Interrupted clients
-can inspect it with `tt env show <name>`. HTTP clients receive **202 Accepted** and
-poll `GET /api/envs/<name>` until the state leaves `creating`.
+Resource and lifecycle details, including failure recovery, are in the
+[API reference](docs/rest-api.md#lifecycle-and-recovery). Use `tt --help` and
+`tt env create --help` for CLI options; request defaults are listed in the
+[API request reference](docs/rest-api.md#environment-requests).
 
-On Linux, `stop` releases VM/container execution resources and retains the disk;
-`start` boots from that disk. QEMU attempts guest shutdown before terminating the
-VMM if necessary; Firecracker stop terminates the microVM. Save work before stopping.
-Failed operations expose errors in `env show`; incomplete deletion stays `deleting`
-and is retried. `running` means the VM/container process is running; guest SSH
-or application startup may still be in progress. A creation interrupted by a controller crash may become `failed`;
-inspect it and delete/recreate it. Resources are never forgotten just because an
-agent is unreachable. State snapshots refresh periodically (normally every 15s).
+## Access and authentication
 
-An environment groups lifecycle operations; it does not create a cross-host private
-network. VM access uses each host's TCP port mappings. Docker uses its own network,
-does not enforce a disk quota, and rejects `--disk`, `--deny-outgoing` and SSH key
-injection. Use images with a long-running default command; a plain OS image that
-exits immediately will fail creation. Firecracker uses the existing rootfs size
-and also rejects disk resizing and SSH key injection.
+Deployment configures one shared administrator API key on the controller and
+agents. Manual starts require `--api-key` or `TT_API_KEY`; without one, that
+service's API is unauthenticated. Owner names are labels, not access controls.
 
-Image creation runs **on the local machine**. Run it on each intended agent host;
-TTstack does not distribute images. Docker registry references can be supplied
-directly to environment creation without a recipe.
+The dashboard HTML at `http://CONTROLLER:9200/` is public, but its API requests
+require the key when authentication is enabled. The browser keeps the entered key
+in session storage. Services use HTTP without built-in TLS; keep their listeners
+on a trusted network or access them through a protected tunnel/proxy.
 
-## Platform Support
-
-| Platform | Engines | Networking |
-|----------|---------|------------|
-| **Linux** | QEMU/KVM, Firecracker, Docker/Podman | nftables NAT |
-| **FreeBSD (experimental)** | Bhyve, Jail | PF NAT; not part of the primary validation scope |
+Guest access is separate from API authentication: QEMU uses the SSH public keys
+supplied at creation; Docker publishes the requested application ports. TCP host
+ports are allocated dynamically, so always read the actual mappings from `env show`.
 
 ## Documentation
 
-| Document | Contents |
-|----------|----------|
-| [docs/deployment.md](docs/deployment.md) | Full deployment guide, config reference, directory layout |
-| [docs/guest-images.md](docs/guest-images.md) | Image formats, custom image creation, VM access details |
-| [docs/rest-api.md](docs/rest-api.md) | REST API endpoints with curl examples |
-| [docs/compatibility.md](docs/compatibility.md) | Platform test results and known issues |
+| Document | Scope |
+|---|---|
+| [Deployment](docs/deployment.md) | Dependencies, installation, fleet configuration, upgrades |
+| [Guest images](docs/guest-images.md) | Recipes, image formats, guest access, storage and networking |
+| [REST API](docs/rest-api.md) | Endpoints, request defaults, response/state semantics and recovery |
+| [Compatibility](docs/compatibility.md) | Supported scope, CI and limits of live verification |
+| [Linux validation, 2026-09-24](docs/live-validation-2026-09-24.md) | Results for a specific tested code revision |
+| [Fleet configuration template](tools/deploy.toml.example) | Commented distributed deployment configuration |
 
-## Project Structure
-
-```
-TTstack/
-├── Cargo.toml              Workspace
-├── Makefile                Build + deploy targets
-├── tools/
-│   └── deploy.toml.example Fleet configuration template
-└── crates/
-    ├── core/               Shared library (engines, storage, networking, models)
-    ├── agent/              Host agent (tt-agent)
-    ├── ctl/                Controller (tt-ctl)
-    └── cli/                CLI client (tt)
-```
+`make help` lists development commands. `make doc` generates Rust source API
+documentation; the HTTP API is documented in the REST reference above.
 
 ## License
 
-MIT
+[MIT](LICENSE)

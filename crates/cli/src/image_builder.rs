@@ -1,7 +1,7 @@
-//! Automatic guest image creation for all supported engines.
+//! Local guest image recipes.
 //!
-//! Generates ready-to-use images so users can start creating VMs
-//! immediately after deploying TTstack.
+//! Downloads/prepares base images on the target host. Recipes do not provision
+//! applications; container defaults and custom guest startup must suit the workload.
 
 use ruc::*;
 use std::path::{Path, PathBuf};
@@ -22,65 +22,65 @@ pub const RECIPES: &[ImageRecipe] = &[
     ImageRecipe {
         name: "alpine",
         engine: "docker",
-        description: "Alpine Linux 3.21 (minimal, ~8MB)",
+        description: "Alpine Linux 3.21 container base (needs a long-running workload)",
     },
     ImageRecipe {
         name: "debian",
         engine: "docker",
-        description: "Debian 13 Trixie (slim, ~75MB)",
+        description: "Debian 13 Trixie slim container base (needs a long-running workload)",
     },
     ImageRecipe {
         name: "ubuntu",
         engine: "docker",
-        description: "Ubuntu 24.04 LTS (minimal, ~30MB)",
+        description: "Ubuntu 24.04 container base (needs a long-running workload)",
     },
     ImageRecipe {
         name: "rockylinux",
         engine: "docker",
-        description: "Rocky Linux 9 (minimal, ~70MB)",
+        description: "Rocky Linux 9 minimal container base (needs a long-running workload)",
     },
     ImageRecipe {
         name: "nginx",
         engine: "docker",
-        description: "Nginx web server (Alpine-based, ~45MB)",
+        description: "Nginx web server (Alpine-based)",
     },
     ImageRecipe {
         name: "redis",
         engine: "docker",
-        description: "Redis 7 (Alpine-based, ~35MB)",
+        description: "Redis 7 (Alpine-based)",
     },
     ImageRecipe {
         name: "postgres",
         engine: "docker",
-        description: "PostgreSQL 17 (Alpine-based, ~85MB)",
+        description: "PostgreSQL 17 (requires workload-specific initialization settings)",
     },
     // Firecracker — microVMs
     ImageRecipe {
         name: "fc-alpine",
         engine: "firecracker",
-        description: "Alpine Linux microVM (kernel + rootfs, ~50MB)",
+        description: "Alpine boot/network check (kernel + 128 MiB rootfs; no SSH)",
     },
     // QEMU/KVM — full VMs (cloud images)
     ImageRecipe {
         name: "alpine-cloud",
         engine: "qemu",
-        description: "Alpine Linux 3.21 cloud image (qcow2, ~150MB)",
+        description: "Alpine Linux 3.21.7 NoCloud image (qcow2)",
     },
     ImageRecipe {
         name: "debian-cloud",
         engine: "qemu",
-        description: "Debian 13 generic cloud image (qcow2, ~350MB)",
+        description: "Debian 13 generic cloud image (qcow2, daily/latest)",
     },
     ImageRecipe {
         name: "ubuntu-cloud",
         engine: "qemu",
-        description: "Ubuntu 24.04 cloud image (qcow2, ~600MB)",
+        description: "Ubuntu 24.04 cloud image (qcow2, current)",
     },
     // Jail — FreeBSD containers
     ImageRecipe {
         name: "freebsd-base",
         engine: "jail",
-        description: "Experimental FreeBSD 14.3 base (fetched from releases, ~180MB)",
+        description: "Experimental FreeBSD base archive (derived from host release)",
     },
 ];
 

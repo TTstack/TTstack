@@ -1,7 +1,10 @@
 # Linux live validation — 2026-09-24
 
-This records the working-tree changes tested on three authorized Linux hosts,
-not a performance benchmark or a claim that every platform/backend is verified.
+This records the code tested on three authorized Linux hosts and committed as
+[`8998db7`](https://github.com/TTstack/TTstack/commit/8998db7d4f6cae14feb4996a4bf14cdbd06c4b0b).
+It is historical evidence for that revision, not a performance benchmark or a claim
+that every platform/backend or later revision is verified. See
+[compatibility](compatibility.md) for the overall support boundary.
 
 ## Setup and load limits
 

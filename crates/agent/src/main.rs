@@ -4,9 +4,9 @@
 //! and exposing an HTTP API for the central controller.
 //!
 //! Supported platforms:
-//! - **Linux**: all engines (Qemu, Firecracker, Docker)
+//! - **Linux**: Qemu, Firecracker, Docker/Podman
 //! - **FreeBSD (experimental)**: Bhyve, Jail
-//! - **Other Unix** (macOS, etc.): Docker/Podman only
+//! - **Other Unix**: Docker code exists; no validated agent deployment path
 
 mod auth;
 mod config;

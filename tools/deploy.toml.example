@@ -1,92 +1,58 @@
-# TTstack distributed deployment configuration
-#
-# Copy to deploy.toml, edit to match your fleet, then run:
-#   tt deploy dist deploy.toml
-#
-# All fields have sensible defaults — only [controller].host and
-# [[agents]].host are required. Everything else can be omitted.
-#
-# Units:
-#   mem_total   — MiB  (e.g. 16384 = 16 GiB)
-#   disk_total  — MiB  (e.g. 204800 = 200 GiB), or use "200G" shorthand
+# TTstack distributed deployment. See docs/deployment.md.
+# Copy to deploy.toml, edit, then run from the repository:
+#   ./target/release/tt deploy dist deploy.toml
+# Requires SSH access and noninteractive sudo on targets (including root logins).
+# Deployment installs services; images and host registration are separate steps.
+# Sections are optional. Each included controller/agent requires host.
 
 [general]
-prefix      = "/opt/ttstack"     # Install path on all hosts
-user        = "ttstack"          # Runtime user (created if absent)
-release_dir = "./target/release" # Local path to compiled binaries
-# api_key   = "my-secret-key"   # API key for auth (persisted in deploy.toml.api-key if omitted)
-
-# ── Controller ───────────────────────────────────────────────────────
-# One controller per fleet. Hosts the REST API and web dashboard.
+prefix      = "/opt/ttstack"     # Install path on target hosts
+user        = "ttstack"          # Controller service user; agents run as root
+release_dir = "./target/release" # LOCAL compiled binary directory
+# api_key = "your-secret-key"    # Shared by controller and all agents
+# If omitted: reuse deploy.toml.api-key, or import an existing service key,
+# otherwise generate one. Keep configuration/key files out of version control.
 
 [controller]
-host     = "10.0.0.1"           # REQUIRED — controller IP or hostname
-# ssh_user = "root"             # Default: root
-# ssh_port = 22                 # Default: 22
-# listen   = "0.0.0.0:9200"    # Default: 0.0.0.0:9200
-# data_dir = "/home/ttstack/ctl" # Default: /home/<user>/ctl
-
-# ── Agents ───────────────────────────────────────────────────────────
-# One [[agents]] section per physical host. Repeat as needed.
-#
-# Resource defaults (0 = auto-detect from hardware):
-#   cpu_total  = 0        → all cores
-#   mem_total  = 0        → all RAM    (unit: MiB)
-#   disk_total = "200G"   → 200 GiB   (unit: MiB, or string with G suffix)
-#
-# Storage defaults:
-#   storage     = "file"  → plain qcow2, FS-agnostic (also: "zvol")
-#   image_dir   = "/home/<user>/images"
-#   runtime_dir = "/home/<user>/runtime"
-
-[[agents]]
-host = "10.0.0.2"               # REQUIRED — agent IP or hostname
-
-# SSH connection (optional, defaults shown)
+host = "10.0.0.1"
 # ssh_user = "root"
 # ssh_port = 22
-
-# Agent listen address (optional)
-# listen = "0.0.0.0:9100"
-
-# Unique host identifier (optional, auto-generated UUID if omitted)
-# host_id = "node-02"
-
-# ── Resource allocation ──────────────────────────────────────────────
-# Set to 0 for auto-detect, or specify exact values.
-#
-# cpu_total  = 0               # vCPU cores (0 = all available)
-# mem_total  = 0               # MiB of RAM (0 = all available)
-# disk_total = "200G"          # Disk quota — MiB or "NNNg"/"NNNG" shorthand
-#                              # Examples: 204800, "200G", "500G"
-
-# ── Storage ──────────────────────────────────────────────────────────
-# storage = "file"             # "file" or "zvol"
-#
-# Where base images are stored:
-# image_dir = "/home/ttstack/images"
-#
-# Where runtime VM clones are created:
-# runtime_dir = "/home/ttstack/runtime"
-#
-# For Zvol: use ZFS dataset paths (zvols exposed as /dev/zvol/...):
-#   storage     = "zvol"
-#   image_dir   = "tank/ttstack/images"
-#   runtime_dir = "tank/ttstack/runtime"
-#
-# ── Example: minimal agent (all auto-detected) ──────────────────────
-
-# [[agents]]
-# host = "10.0.0.3"
-
-# ── Example: Zvol-backed high-spec node ──────────────────────────────
+# listen = "0.0.0.0:9200"
+# data_dir = "/home/ttstack/ctl" # Default: /home/<general.user>/ctl
+# A custom data_dir must already be writable by the controller service user.
 
 [[agents]]
-host        = "10.0.0.3"
-host_id     = "zvol-node"
-storage     = "zvol"
-image_dir   = "tank/ttstack/images"
-runtime_dir = "tank/ttstack/runtime"
-cpu_total   = 32               # 32 cores
-mem_total   = 65536            # 64 GiB
-disk_total  = "1000G"          # ~1 TiB
+host = "10.0.0.2"
+# ssh_user = "root"
+# ssh_port = 22
+# listen = "0.0.0.0:9100"
+# host_id = "node-02"            # Omit to generate/persist an ID on first start
+# release_dir = "./target/release-musl" # LOCAL override; build for this host
+
+# Scheduling budgets, not measured usage. Leave capacity for the host OS.
+# Only CPU and memory accept 0 for auto-detection (all host cores/RAM).
+# cpu_total = 0
+# mem_total = 0                  # Integer MiB, e.g. 16384 = 16 GiB
+# disk_total = "200G"            # STRING: "204800" or "200G" = 200 GiB
+# Disk must be positive; it is not auto-detected or a container disk quota.
+
+# File storage: QEMU qcow2 files or Firecracker kernel/rootfs directories.
+# Docker uses its own image store regardless of this selection.
+# storage = "file"
+# image_dir = "/home/ttstack/images"   # Default: /home/<general.user>/images
+# runtime_dir = "/home/ttstack/runtime" # Default: /home/<general.user>/runtime
+# Agent database directory is /home/<general.user>/data.
+# Engine run files always use /home/ttstack/run, regardless of general.user.
+
+# Optional additional agent; uncomment only after preparing its ZFS datasets.
+# Zvol is implemented for QEMU but not covered by current live validation.
+# Deployment does not provision ZFS or import images.
+# [[agents]]
+# host = "10.0.0.3"
+# host_id = "zvol-node"
+# storage = "zvol"
+# image_dir = "tank/ttstack/images"   # Dataset name, not filesystem directory
+# runtime_dir = "tank/ttstack/runtime"
+# cpu_total = 4
+# mem_total = 8192
+# disk_total = "200G"

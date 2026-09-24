@@ -1,362 +1,178 @@
-# Guest Image Guide
+# Guest images and access
 
-TTstack supports multiple VM engines, each requiring its own image format.
-This guide covers how to create, manage, and deploy guest images for each engine.
+Prepare images on the **agent host that will run the guest**. `tt image create`
+is a local operation and does not contact the controller or distribute images.
+Agent-only deployment installs only `tt-agent`; copy a compatible `tt` binary to
+that host if using the built-in recipes there. Examples below use the default
+install paths and a CLI already configured for the controller.
 
-## Quick Start
-
-Use the built-in image recipes:
-
-```bash
-# List available recipes
-tt image recipes
-
-# Create all images for this platform
-sudo tt image create all --image-dir /home/ttstack/images
-
-# Create all Docker images
-sudo tt image create all --engine docker
-
-# Create a specific image
-sudo tt image create fc-alpine --image-dir /home/ttstack/images
-sudo tt image create alpine-cloud --image-dir /home/ttstack/images
-```
-
-## Accessing VMs
-
-QEMU cloud images support **SSH**. Provide SSH public keys when creating the
-environment; TTstack configures root access via cloud-init. Other engines have
-the access methods listed below. Port 22 is auto-included for QEMU / experimental Bhyve and Jail.
-
-| Engine | Access Method |
-|--------|--------------|
-| **QEMU** (cloud images) | SSH via port forwarding (key injected by cloud-init) |
-| **QEMU** (custom images) | SSH via port forwarding (your own key setup) |
-| **Docker** | SSH into container (if sshd installed) or `docker exec` from host |
-| **Firecracker** | Boot log on agent; custom guest workload (no managed SSH/console) |
-| **Bhyve** (experimental FreeBSD) | SSH via port forwarding |
-
-### QEMU Cloud Images (SSH)
-
-For built-in cloud images (`alpine-cloud`, `debian-cloud`, `ubuntu-cloud`),
-TTstack auto-generates a **cloud-init seed ISO** on each VM boot that:
-
-- Injects your SSH public key(s) into `~root/.ssh/authorized_keys`
-- Enables SSH public-key authentication
-- Configures the VM's network (static IP, gateway, DNS)
-
-To SSH into a QEMU VM:
+## Recipes and image discovery
 
 ```bash
-# Create environment with your SSH key
-tt env create myenv --image alpine-cloud --engine qemu \
-  --ssh-key ~/.ssh/id_ed25519.pub
-
-# Show environment to see port mappings
-tt env show myenv
-# Example output:
-#   ID             IMAGE         ENGINE   STATE    IP             PORTS
-#   abc12345-678   alpine-cloud  qemu     running  10.10.0.3      20100->22
-
-# SSH using the mapped port
-ssh root@<host-ip> -p 20100
+/opt/ttstack/bin/tt image recipes
+sudo mkdir -p /home/ttstack/images
+sudo /opt/ttstack/bin/tt image create alpine-cloud --image-dir /home/ttstack/images
 ```
 
-For custom QEMU images that do not use cloud-init, the seed ISO
-is harmlessly ignored — you manage SSH credentials yourself.
+Use one recipe for the selected workflow. `image create all --engine ENGINE`
+filters a bulk build; `--engine` has no effect when a single recipe is named.
+Unfiltered `all` attempts recipes for multiple engines and may fail if their tools
+are not installed. It is not needed for deployment.
 
-### Docker Containers
+| Recipe | Engine | Source / purpose |
+|---|---|---|
+| `alpine-cloud` | QEMU | Alpine 3.21.7 x86_64 BIOS NoCloud qcow2 |
+| `debian-cloud` | QEMU | Debian 13 generic amd64 daily/latest cloud image |
+| `ubuntu-cloud` | QEMU | Ubuntu 24.04 amd64 current cloud image |
+| `fc-alpine` | Firecracker | Prebuilt kernel + Alpine 3.21.3 userspace; 128 MiB ext4 rootfs, idle boot/network check |
+| `alpine`, `debian`, `ubuntu`, `rockylinux` | Docker | Base OS images: `alpine:3.21`, `debian:trixie-slim`, `ubuntu:24.04`, `rockylinux:9-minimal` |
+| `nginx`, `redis`, `postgres` | Docker | `nginx:alpine`, `redis:7-alpine`, `postgres:17-alpine` |
+| `freebsd-base` | Jail | Experimental FreeBSD base archive; not a validated Linux workflow |
 
-Docker containers are managed via the Docker runtime. If the container
-has an SSH daemon, connect via the mapped port. Otherwise, access
-from the host machine:
+Upstream rolling URLs and container tags can change. These recipes are not a
+content-pinned image lockfile. Existing QEMU files are left in place; Firecracker
+creation skips an existing kernel/rootfs. Repeating those recipes does not upgrade
+an existing image. Docker recipes pull their tag and add a local short-name alias.
+
+`tt image list` reports file/zvol names cached from **online** agents. It does not
+list Docker/Podman images, validate image bootability or guarantee all hosts have
+the same image contents. Use distinct names for image revisions and prepare each
+revision on the intended hosts.
+
+## QEMU: full VMs with SSH
+
+File storage expects a **bootable qcow2 disk image**, named directly under
+`image_dir` (for example `/home/ttstack/images/alpine-cloud`). Built-in cloud images
+use cloud-init. A custom image needs a BIOS bootloader, kernel, virtio disk/network
+drivers and a compatible userspace; merely formatting an empty qcow2 disk is not
+a bootable image.
 
 ```bash
-# Find the container ID
-docker ps | grep <vm-id>
-
-# Exec into the container (host-only fallback)
-docker exec -it <container-id> sh
+/opt/ttstack/bin/tt env create demo --image alpine-cloud --engine qemu \
+  --cpu 1 --mem 256 --disk 2048 --ssh-key ~/.ssh/id_ed25519.pub
+/opt/ttstack/bin/tt env show demo
 ```
 
-### Firecracker MicroVMs
+Port 22 is included automatically. Connect to the **agent host** at the mapped
+host port shown by `env show`; do not assume the controller address or a fixed
+port. `running` does not imply SSH has finished starting.
 
-Firecracker's built-in image is a boot/network smoke-test workload. It has no
-managed SSH or interactive console. View boot output on the agent at
-`/home/ttstack/run/fc-<vm-id>.log`; use a custom rootfs for your workload.
+At boot TTstack attaches a NoCloud seed ISO containing root SSH public keys,
+password-login-disabled SSH configuration, and static network settings. Use
+`--ssh-key` repeatedly for multiple public keys. The seed is regenerated on boot,
+but cloud-init modules generally apply initial configuration once per instance;
+this is not a key rotation interface. TTstack does not generate a login password.
 
-## Image Formats by Engine
+Custom images without cloud-init must configure their own credentials **and**
+use TTstack's allocated IP/gateway. A seed ISO alone cannot configure such a guest.
+The QEMU engine still needs `genisoimage` or `mkisofs` to build the seed.
 
-### Docker / Podman
+`--disk` is the cloned disk's virtual size in MiB (default 40960). It may grow but
+cannot shrink below the base image's virtual size. The guest must also grow its
+partition/filesystem; increasing the virtual disk alone does not do that. Disk
+reservations track virtual capacity, not physical bytes used by sparse files.
 
-Docker images are **container images** pulled from registries or built locally.
-They are **not** stored in the TTstack image directory — they live in the
-Docker/Podman image store.
+Stop requests guest shutdown, then terminates QEMU if necessary. Start boots the
+preserved disk in a new process. Memory is not preserved; save guest work first.
+See [lifecycle and recovery](rest-api.md#lifecycle-and-recovery).
 
-**Creating a Docker image:**
-```bash
-# Pull from a registry
-docker pull alpine:latest
+## Docker / Podman: application containers
 
-# Or build locally
-cat > Dockerfile <<'EOF'
-FROM scratch
-COPY myapp /app
-CMD ["/app"]
-EOF
-docker build -t my-image .
-```
+Container images live in the runtime's own image store. The agent uses Docker if
+its binary is installed, otherwise Podman; use that same runtime/store to prepare
+images. Rootless and root-owned image stores are distinct.
 
-**Using with TTstack:**
-```bash
-tt env create myenv --image alpine --engine docker --port 80
-```
-
-**Key points:**
-- The `--image` name must match a locally available Docker/Podman image
-- Docker images do NOT need to exist in `image_dir`
-- Port mappings are handled by Docker's `-p` flag
-- Docker manages its own networking (no TAP devices or bridge needed)
-
-### Firecracker
-
-Firecracker images are **directories** containing two files:
-- `vmlinux` — uncompressed Linux kernel with virtio_mmio built-in
-- `rootfs.ext4` — ext4 filesystem image used as the root device
-
-**Image directory structure:**
-```
-/home/ttstack/images/
-  └── fc-alpine/
-      ├── vmlinux        # ~21MB kernel
-      └── rootfs.ext4    # Root filesystem
-```
-
-**Creating manually:**
-
-1. **Get a Firecracker-compatible kernel:**
-   ```bash
-   # Option A: Download pre-built (recommended)
-   curl -sL https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin \
-     -o /home/ttstack/images/fc-alpine/vmlinux
-
-   # Option B: Build from source with virtio_mmio=y
-   # (The stock Debian kernel won't work — it has virtio_mmio as a module)
-   ```
-
-2. **Create the rootfs:**
-   ```bash
-   dd if=/dev/zero of=rootfs.ext4 bs=1M count=128
-   mkfs.ext4 rootfs.ext4
-   mkdir /tmp/mnt && mount -o loop rootfs.ext4 /tmp/mnt
-
-   # Populate with your desired userspace (Alpine, BusyBox, etc.)
-   # At minimum: /sbin/init (or /init) must exist
-   mkdir -p /tmp/mnt/{bin,sbin,etc,proc,sys,dev}
-   # ... install packages or copy a static init binary ...
-
-   umount /tmp/mnt
-   ```
-
-**Important notes:**
-- The kernel MUST have `virtio_mmio` built-in (not as a module)
-- The stock Debian/Ubuntu kernel will NOT work — use the Firecracker pre-built kernel
-- Boot args: `console=ttyS0 reboot=k panic=1 pci=off`; the rootfs is set via `is_root_device: true`
-- Firecracker VMs use TAP devices on the `tt0` bridge for networking
-- Pause/resume is supported via the Firecracker API
-
-### QEMU / KVM
-
-QEMU images are **qcow2 disk image files** containing a bootable filesystem.
-
-**Image location:**
-```
-/home/ttstack/images/
-  └── qemu-test          # Single qcow2 file (for file storage)
-```
-
-When using zvol storage, the image is written to a ZFS zvol exposed as a
-raw block device at `/dev/zvol/<pool>/<dataset>`:
-```
-/dev/zvol/tank/ttstack/images/qemu-test   # Raw block device
-```
-
-**Creating manually:**
+A minimal web-container workflow on a host with a working Docker runtime is:
 
 ```bash
-# Create qcow2 image
-qemu-img create -f qcow2 /home/ttstack/images/qemu-test 256M
-
-# Mount via NBD and populate
-modprobe nbd max_part=8
-qemu-nbd --connect=/dev/nbd0 /home/ttstack/images/qemu-test
-mkfs.ext4 /dev/nbd0
-mount /dev/nbd0 /tmp/mnt
-
-# Populate rootfs
-mkdir -p /tmp/mnt/{bin,sbin,etc,proc,sys,dev}
-# ... install packages or copy a static init binary ...
-
-umount /tmp/mnt
-qemu-nbd --disconnect /dev/nbd0
+sudo /opt/ttstack/bin/tt image create nginx
+/opt/ttstack/bin/tt env create web --image nginx --engine docker \
+  --cpu 1 --mem 128 --port 80
+/opt/ttstack/bin/tt env show web
 ```
 
-**Important notes:**
-- QEMU uses KVM acceleration (`-enable-kvm`), so `/dev/kvm` must exist
-- The disk is attached as virtio (`if=virtio`), so the guest kernel needs virtio drivers
-- QEMU uses TAP devices on the `tt0` bridge for networking
-- Stop/start uses the QEMU monitor (`stop`/`cont` commands) — the process stays alive
+Open `http://AGENT_HOST:MAPPED_PORT/` using the displayed mapping. Registry image
+references such as `nginx:alpine` can also be passed directly to `--image` without
+a recipe. The runtime may pull a missing image during creation, so registry/network
+failures can still make creation fail; Docker images are not checked by the
+controller's file/zvol catalog.
 
-## Storage Backend Considerations
+Images must have a long-running default command. Plain OS images may exit
+immediately. Service recipes are downloads, not service provisioning: for example,
+PostgreSQL needs initialization settings that TTstack does not expose. TTstack
+has no container environment-variable, command-override or volume-mount interface;
+use a prepared workload image when those defaults are needed.
 
-### File (default)
+TTstack rejects disk sizing, `--deny-outgoing` and SSH key injection for Docker.
+Port 22 is not automatic. To use SSH, the image must provide sshd and credentials,
+and port 22 must be explicitly requested. Otherwise use the host runtime, for
+example `sudo docker exec -it tt-VM_ID sh`, replacing `VM_ID` with the full ID from
+`env show`. Stop/start retains the container filesystem; deletion removes it.
 
-Images are plain qcow2 files, filesystem-agnostic. On Linux, cloning uses
-`cp --reflink=auto` (CoW if the filesystem supports it, full copy
-otherwise). On FreeBSD, plain `cp -a` is used.
+## Firecracker: prepared microVM workloads
+
+Firecracker requires **file storage** and an image directory with both files:
+
+```text
+/home/ttstack/images/fc-alpine/
+├── vmlinux
+└── rootfs.ext4
+```
+
+The kernel must support Firecracker's devices, including built-in virtio-mmio and
+root filesystem support. The ext4 rootfs needs a working `/sbin/init` and its
+userspace dependencies. TTstack passes `root=/dev/vda rw init=/sbin/init` plus a
+static `ip=ADDRESS::10.10.0.1:255.255.0.0::eth0:off` argument. The guest must apply
+that address, either through kernel IP configuration or its init process.
 
 ```bash
-# No special setup needed — just place images in image_dir
-cp my-image.qcow2 /home/ttstack/images/qemu-test
+sudo /opt/ttstack/bin/tt image create fc-alpine
+/opt/ttstack/bin/tt env create micro --image fc-alpine --engine firecracker \
+  --cpu 1 --mem 128
 ```
 
-### Zvol
+The built-in rootfs configures networking and runs an idle loop. It does not start
+an application or sshd. Read boot output on the agent at
+`/home/ttstack/run/fc-VM_ID.log`. There is no managed SSH key injection or
+interactive console. Build a suitable rootfs for application workloads; old images
+with a hard-coded IP need replacement, not just a TTstack binary upgrade.
 
-Images are stored as **ZFS zvols** — raw block devices exposed at
-`/dev/zvol/<pool>/<dataset>`. Cloning uses `zfs snapshot` + `zfs clone`
-— instant and space-efficient.
+The existing rootfs size is reserved and retained; `--disk` resizing is rejected.
+Stop terminates the microVM, and start boots its preserved disk. TTstack's
+stop/start commands do not use Firecracker pause/resume.
 
-```bash
-# Setup
-zpool create ttpool /dev/nvmeXnYpZ
-zfs create ttpool/images
-zfs create ttpool/runtime
+## Storage
 
-# Create image as a zvol
-zfs create -V 10G ttpool/images/qemu-test
-# Write image data to /dev/zvol/ttpool/images/qemu-test
+| Backend | Base image format | Runtime storage |
+|---|---|---|
+| `file` (default) | QEMU qcow2 file; Firecracker kernel/rootfs directory | Per-VM copy, using reflinks on Linux when available, otherwise a full copy |
+| `zvol` (QEMU) | Raw bootable disk in a ZFS volume | Clone of a base snapshot |
+| Docker runtime | Container image | Managed by Docker/Podman, independently of the agent storage setting |
 
-# Agent config
-tt-agent --image-dir ttpool/images --runtime-dir ttpool/runtime --storage zvol
-```
+For zvol, configure dataset names such as `tank/ttstack/images` and
+`tank/ttstack/runtime`, not `/dev/zvol/...` paths. Prepare the existing pool,
+parent datasets and base volume manually; import **raw disk contents**, not a
+qcow2 file's encoded bytes. The corresponding device is exposed at
+`/dev/zvol/tank/ttstack/images/IMAGE_NAME`. `tt image create` does not import zvols.
 
-## Networking
+The zvol backend reuses each base's `@ttsnap` snapshot for clones. Editing the base
+volume does not refresh that snapshot. Use a new base volume name for a new image
+revision. Zvol is implemented but is not covered by the current live validation.
 
-All VM engines (except Docker) use a shared network topology:
+## Networking and platform scope
 
-```
-Guest VM ←→ TAP device ←→ tt0 bridge (10.10.0.1/16) ←→ NAT (nftables) ←→ Host
-```
+Linux QEMU and Firecracker use TAP devices on bridge `tt0` (`10.10.0.1/16`), with
+host-local IPv4 addresses and nftables NAT. Guest IPs are local to a host and may
+repeat across hosts. QEMU cloud-init configures DNS as `8.8.8.8` and `1.1.1.1`;
+the guest/network must be able to reach them for name resolution.
 
-- Each VM gets a unique IP in the 10.10.0.0/16 range
-- Port forwarding: host port → guest port via nftables DNAT (Linux) or PF rdr (FreeBSD)
-- The `tt0` bridge and NAT table are created automatically by the agent
+Port forwarding is **TCP only**, from allocated host ports to requested guest
+ports. `--deny-outgoing` blocks routed outbound initiation while permitting replies
+to inbound traffic. It can also prevent external DNS access; it is not isolation
+from the host or other guests on the bridge. Environments do not create a private
+cross-host network. Docker uses its own networking and port publishing.
 
-Docker containers use Docker's native networking with `-p` port publishing.
-
-Experimental FreeBSD support uses PF instead of nftables:
-
-```
-Guest VM ←→ TAP device ←→ tt0 bridge (10.10.0.1/16) ←→ NAT (PF) ←→ Host
-```
-
-## Experimental FreeBSD development notes
-
-The following is historical development guidance, not a supported deployment
-workflow. FreeBSD/Bhyve/Jail fixes and host validation are outside the primary scope.
-
-Running FreeBSD inside QEMU on a Linux host is useful for testing the
-FreeBSD agent, controller, and CLI. This section documents the
-non-interactive approach, including common pitfalls.
-
-### Recommended: mfsBSD Live ISO
-
-[mfsBSD](https://mfsbsd.vx.sk/) is a FreeBSD live CD that runs entirely
-in RAM with SSH enabled out of the box. This is the fastest way to get
-a working FreeBSD environment for build/test purposes.
-
-```bash
-# Download mfsBSD SE (Special Edition includes base packages)
-curl -sL https://mfsbsd.vx.sk/files/iso/14/amd64/mfsbsd-se-14.2-RELEASE-amd64.iso \
-  -o /tmp/mfsbsd.iso
-
-# Create a work disk for persistent storage
-qemu-img create -f qcow2 /tmp/fbsd-work.qcow2 20G
-
-# Boot the VM (8GB RAM recommended for compiling Rust)
-qemu-system-x86_64 -enable-kvm -m 8192 -smp 4 \
-  -drive file=/tmp/fbsd-work.qcow2,format=qcow2,if=virtio \
-  -cdrom /tmp/mfsbsd.iso -boot d \
-  -netdev user,id=net0,hostfwd=tcp::2222-:22 \
-  -device virtio-net-pci,netdev=net0 \
-  -vnc none -daemonize
-
-# SSH in (default root password: mfsroot)
-sshpass -p 'mfsroot' ssh -p 2222 root@127.0.0.1
-```
-
-### Installing FreeBSD to Disk from mfsBSD
-
-mfsBSD runs in RAM so installed packages are lost on reboot. For
-persistent use, install FreeBSD to the work disk:
-
-```bash
-# Inside the mfsBSD VM:
-gpart create -s gpt vtbd0
-gpart add -t freebsd-boot -s 512k vtbd0
-gpart add -t freebsd-ufs -l rootfs vtbd0
-gpart bootcode -b /boot/pmbr -p /boot/gptboot -i 1 vtbd0
-newfs -U /dev/vtbd0p2
-
-# Mount and extract base + kernel
-mkdir -p /rw/disk && mount /dev/vtbd0p2 /rw/disk
-cd /rw/disk
-fetch -o - https://download.freebsd.org/releases/amd64/14.3-RELEASE/base.txz | tar xf -
-fetch -o - https://download.freebsd.org/releases/amd64/14.3-RELEASE/kernel.txz | tar xf -
-
-# Configure the installed system
-echo '/dev/vtbd0p2  /  ufs  rw  1  1' > etc/fstab
-cat > etc/rc.conf <<'RCEOF'
-hostname="fbsd-test"
-ifconfig_vtnet0="DHCP"
-sshd_enable="YES"
-sendmail_enable="NONE"
-RCEOF
-echo 'mfsroot' | chroot /rw/disk pw usermod root -h 0
-sed -i '' 's/^#PermitRootLogin .*/PermitRootLogin yes/' etc/ssh/sshd_config
-echo 'nameserver 10.0.2.3' > etc/resolv.conf
-
-umount /rw/disk
-```
-
-Then reboot the VM without the `-cdrom` and `-boot d` flags to boot
-from disk.
-
-### Common Pitfalls
-
-| Problem | Cause | Solution |
-|---------|-------|----------|
-| FreeBSD cloud images won't accept SSH | Root login disabled, no password auth, cloud-init issues | Use mfsBSD instead |
-| `virt-customize` fails on FreeBSD images | libguestfs cannot write to UFS filesystems | Use mfsBSD or manual install |
-| mfsBSD `pkg install` fails with "No error" | pkg 2.1.0 on mfsBSD 14.2 cannot handle zstd-packed repos | Install FreeBSD to disk for a newer pkg |
-| `cp --reflink=auto` fails on FreeBSD | GNU option not available | Fixed in TTstack — FreeBSD uses `cp -a` |
-| `ifconfig bridge create` names bridge `bridge0` | FreeBSD auto-assigns names | Fixed in TTstack — uses `ifconfig bridge create name tt0` |
-| `ifconfig <tap> create` fails for custom names | Must specify type first | Fixed in TTstack — uses `ifconfig tap create name <tap>` |
-| Bhyve TAP name mismatch | Old code used `tap-{id}` instead of hashed name | Fixed in TTstack — uses `net::tap_name()` |
-| OOM during Rust compilation on mfsBSD | mfsBSD runs in RAM; 4GB is insufficient | Use 8GB+ RAM or install to disk |
-
-## Current operational limits
-
-- Run `tt image create` locally on the target agent; image distribution is manual.
-- QEMU file storage requires qcow2. `--disk` grows the cloned virtual disk; the
-  guest must grow its partition/filesystem (cloud-init images commonly do this).
-  Requests smaller than the source virtual disk fail explicitly. Zvol uses raw.
-- Firecracker requires file storage and a directory containing `vmlinux` and
-  `rootfs.ext4`. Its root filesystem size is retained. The guest must configure its
-  IP from the kernel `ip=` argument; the built-in recipe does this. Regenerate older
-  `fc-alpine` images to replace their hard-coded address. Boot output is in
-  `/home/ttstack/run/fc-<id>.log`; managed SSH and interactive consoles are not provided.
-- Docker images must have a long-running default command. Base OS images may exit
-  immediately; database images may require configuration that TTstack does not
-  expose. Supply a prepared image with a suitable default command. Disk quotas,
-  outgoing network restrictions and SSH injection are not supported for Docker.
+All FreeBSD/Bhyve/Jail/PF paths are **experimental** and require manual setup.
+QEMU and Firecracker instructions above describe Linux hosts. Bhyve currently
+rejects in-place restart; do not assume the Linux lifecycle guarantees apply to
+FreeBSD. See [compatibility and validation](compatibility.md).

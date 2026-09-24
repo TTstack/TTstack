@@ -1,10 +1,8 @@
-//! Distributed deployment — Rust implementation.
+//! Deployment embedded in the `tt` CLI.
 //!
-//! Replaces `tools/deploy.sh` with a reliable, idempotent deploy
-//! embedded directly in the `tt` CLI binary.
-//!
-//! Supports both systemd (Debian/Ubuntu/Rocky) and OpenRC (Alpine)
-//! init systems, and handles non-root SSH users via sudo.
+//! Local deployment requires Linux/systemd; distributed deployment detects
+//! systemd or OpenRC and uses sudo on targets, including for root SSH users.
+//! Copies binaries and configures services; engine/image setup is separate.
 
 use ruc::*;
 use serde::Deserialize;
@@ -31,7 +29,7 @@ pub struct GeneralConfig {
     pub user: String,
     #[serde(default = "default_release_dir")]
     pub release_dir: String,
-    /// API key for controller authentication. If not set, a random key is generated.
+    /// Shared controller/agent key. If omitted, reuse/import a key before generating one.
     pub api_key: Option<String>,
 }
 

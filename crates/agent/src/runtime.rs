@@ -478,7 +478,8 @@ fn init_db(db: &Connection) -> Result<()> {
         .c(d!("migration v1"))?;
     }
 
-    // Future migrations: if current < 2 { ... }
+    // v2 adds lifecycle fields in serialized records, decoded with serde defaults.
+    // The version guard prevents older binaries from opening this state.
 
     set_schema_version(db, SCHEMA_VERSION)?;
     if current < SCHEMA_VERSION {

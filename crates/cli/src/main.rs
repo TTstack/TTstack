@@ -93,13 +93,13 @@ enum EnvCmd {
         /// Memory per VM in MiB.
         #[arg(long)]
         mem: Option<u32>,
-        /// QEMU virtual disk size in MiB (other engines use the existing image size).
+        /// QEMU virtual disk size in MiB (default 40960); omit for other engines.
         #[arg(long)]
         disk: Option<u32>,
         /// Duplicate each image N times.
         #[arg(long, default_value_t = 1)]
         dup: u32,
-        /// Port to expose (repeatable).
+        /// TCP guest port to expose (repeatable); host ports are allocated automatically.
         #[arg(long, short)]
         port: Vec<u16>,
         /// Environment lifetime in seconds (default 21600; 0 = no expiry).
@@ -108,10 +108,10 @@ enum EnvCmd {
         /// Block routed outgoing traffic (unsupported for Docker; not host/VM isolation).
         #[arg(long)]
         deny_outgoing: bool,
-        /// Owner identifier (defaults to $USER).
+        /// Owner label, not an access control (defaults to $USER).
         #[arg(long)]
         owner: Option<String>,
-        /// SSH public key for VM access (repeatable). Can also be a path to a .pub file.
+        /// Root SSH public key or .pub path (repeatable; QEMU / experimental Jail only).
         #[arg(long)]
         ssh_key: Vec<String>,
     },
@@ -129,18 +129,18 @@ enum EnvCmd {
 
 #[derive(Subcommand)]
 enum ImageCmd {
-    /// List available images across all hosts.
+    /// List file/zvol images reported by online hosts (excludes Docker images).
     List,
     /// List built-in image recipes that can be auto-created.
     Recipes,
-    /// Create an image from a built-in recipe.
+    /// Create an image locally from a built-in recipe; run on the intended agent host.
     Create {
         /// Recipe name (see 'tt image recipes'), or "all".
         name: String,
         /// Image directory (for non-Docker engines).
         #[arg(long, default_value = "/home/ttstack/images")]
         image_dir: String,
-        /// Only create images for this engine (docker, firecracker, qemu, jail).
+        /// Filter only bulk creation with name "all" (docker, firecracker, qemu, jail).
         #[arg(long)]
         engine: Option<String>,
     },
@@ -148,19 +148,19 @@ enum ImageCmd {
 
 #[derive(Subcommand)]
 enum DeployCmd {
-    /// Deploy agent on this host (requires root).
+    /// Deploy agent on this Linux/systemd host (requires root).
     Agent {
         /// Path to release binaries directory.
         #[arg(long, default_value = "./target/release")]
         release_dir: String,
     },
-    /// Deploy controller on this host (requires root).
+    /// Deploy controller on this Linux/systemd host (requires root).
     Ctl {
         /// Path to release binaries directory.
         #[arg(long, default_value = "./target/release")]
         release_dir: String,
     },
-    /// Deploy both agent and controller on this host (requires root).
+    /// Deploy agent and controller on this Linux/systemd host (requires root).
     All {
         /// Path to release binaries directory.
         #[arg(long, default_value = "./target/release")]
