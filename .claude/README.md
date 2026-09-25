@@ -7,8 +7,8 @@ permission to deploy.
 
 ## Skills
 
-`x-` entry points are user-invoked only: they change committed history, the audit
-registry, or a live host, so nothing loads them implicitly.
+`x-` entry points are user-invoked only: they commit history, run requested checks,
+write the audit registry, or touch a live host, so nothing loads them implicitly.
 
 | Skill | Purpose |
 | --- | --- |
