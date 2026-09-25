@@ -68,17 +68,15 @@ pub fn tap_name(vm_id: &str) -> String {
         v[1] ^= v[2];
         v[2] = v[2].rotate_left(32);
     }
-    let mut chunks = bytes.chunks_exact(8);
-    for chunk in &mut chunks {
-        let mut word = [0; 8];
-        word.copy_from_slice(chunk);
-        let m = u64::from_le_bytes(word);
+    let (chunks, remainder) = bytes.as_chunks::<8>();
+    for chunk in chunks {
+        let m = u64::from_le_bytes(*chunk);
         v[3] ^= m;
         round(&mut v);
         v[0] ^= m;
     }
     let mut last = (bytes.len() as u64) << 56;
-    for (i, byte) in chunks.remainder().iter().enumerate() {
+    for (i, byte) in remainder.iter().enumerate() {
         last |= u64::from(*byte) << (8 * i);
     }
     v[3] ^= last;
