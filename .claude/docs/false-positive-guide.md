@@ -9,7 +9,8 @@ Refute every candidate finding against this list before reporting it.
   and 1000 tracked VMs; no HA, migration, distributed storage, image distribution, or
   automatic guest restart after a host reboot; Docker lacks managed SSH keys, disk
   quotas, and outgoing restrictions; Firecracker lacks managed SSH keys, interactive
-  consoles, and resizing of existing VMs. See `docs/compatibility.md`.
+  consoles, and resizing of a running VM. Stopped-VM resource updates and
+  creation-time disk sizing are implemented. See `docs/compatibility.md`.
 - **Deliberate non-isolation.** A guest can reach a wildcard management listener; the
   deployment and guest guides document this as operator responsibility.
 - **Shared administrator credential.** The API key authenticates callers, not servers,

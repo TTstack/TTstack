@@ -32,8 +32,8 @@ the review lens over them.
 - A stale snapshot must not place a VM; recheck between planning and mutation.
 - Host capability strings gate engine features: `isolated_network`,
   `firecracker_jailer`, `guest_config`, `firecracker_disk_resize`,
-  `firecracker_zvol`. A shared API change that needs an agent capability requires the
-  capability check, not an assumption.
+  `firecracker_resources`, `firecracker_zvol`. A shared API change that needs an
+  agent capability requires the capability check, not an assumption.
 
 ## Networking
 
