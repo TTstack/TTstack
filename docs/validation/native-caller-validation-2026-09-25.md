@@ -49,4 +49,4 @@ migration, host reboot or storage backup/restore. The application caller's
 identity and UI acceptance report lives in its own repository; TTstack does not
 acquire application identity, installation or business-policy responsibilities.
 
-Return to the [documentation index](README.md).
+Return to the [documentation index](../README.md).

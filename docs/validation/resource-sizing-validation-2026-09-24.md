@@ -55,4 +55,4 @@ Large resource ceilings, performance, resizing an existing VM, other host platfo
 storage engines were not tested or added by this change. Resource policy remains
 with callers; TTstack checks generic engine support and host capacity.
 
-Return to the [documentation index](README.md).
+Return to the [documentation index](../README.md).

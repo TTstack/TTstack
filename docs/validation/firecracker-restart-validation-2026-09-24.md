@@ -52,7 +52,7 @@ reach its management port on the public host address.
 ## Verification boundaries
 
 The application-level checks use an external caller and do not add application
-identity or installation policy to TTstack. See the [storage contract](guest-images.md#storage)
+identity or installation policy to TTstack. See the [storage contract](../guest-images.md#storage)
 for maintained behavior. Stop/start preserves disk data, not VM RAM. A stopped
 workspace snapshot was used as an offline recovery point; no online consistency,
 disk-failure recovery, cross-host migration or capacity claim is made.

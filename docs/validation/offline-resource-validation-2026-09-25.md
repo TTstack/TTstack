@@ -50,4 +50,4 @@ gate and recovery of an upstream reply lost after a successful update.
 The operation rebuilds the runtime from the retained disk; it does not migrate a
 guest, retain RAM or replace its identity. Large disks, storage exhaustion during
 growth, QEMU/container resizing and online hotplug were not tested or enabled.
-The [API contract](rest-api.md#offline-resource-updates) is the maintained behavior.
+The [API contract](../rest-api.md#offline-resource-updates) is the maintained behavior.

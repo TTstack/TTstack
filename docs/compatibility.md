@@ -10,7 +10,7 @@ requires Linux. QEMU/KVM, Firecracker and Docker/Podman are the available engine
 | Linux QEMU/KVM + file storage | Full VMs, cloud-init, TCP forwarding, disk growth | Alpine 3.21.7 and Debian 13 guests on Ubuntu 24.04.4 hosts |
 | Linux Docker | Container lifecycle and native port publishing | Temporary HTTP workload on two Ubuntu 24.04.4 hosts |
 | Linux Firecracker + file storage | Jailer, config drive, orderly shutdown, opt-in network isolation | Alpine fixture: config/read-only access, retained data, isolation, restart and cleanup on Ubuntu 24.04 |
-| Linux Firecracker + zvol | Snapshot clones, jailed block device, ext4 growth, retained disks | [Dedicated ZFS host validation](firecracker-zvol-validation-2026-09-24.md) |
+| Linux Firecracker + zvol | Snapshot clones, jailed block device, ext4 growth, retained disks | [Dedicated ZFS host validation](validation/firecracker-zvol-validation-2026-09-24.md) |
 | Podman | Alternate runtime selected when `docker --version` fails | Not covered by the 2026-09-24 lifecycle run |
 | QEMU + zvol | Raw ZFS volumes and snapshot clones | Not covered by the 2026-09-24 lifecycle run |
 | Ubuntu cloud guest | Built-in QEMU recipe | Not covered by the 2026-09-24 lifecycle run |
@@ -18,17 +18,17 @@ requires Linux. QEMU/KVM, Firecracker and Docker/Podman are the available engine
 | Linux/OpenRC, musl binaries | Distributed deployment support | Not covered by the 2026-09-24 lifecycle run |
 | Other host platforms | No validated agent deployment path | No support commitment |
 
-The [2026-09-24 validation record](live-validation-2026-09-24.md) identifies the
+The [2026-09-24 validation record](validation/live-validation-2026-09-24.md) identifies the
 tested revision, load limits, corrections and results. Its evidence is limited to
 those combinations. Unit tests, engine detection and an image recipe's presence
 are not substitutes for guest boot and access tests.
 
-The [Firecracker follow-up record](firecracker-validation-2026-09-24.md) covers
+The [Firecracker follow-up record](validation/firecracker-validation-2026-09-24.md) covers
 configuration drives, jailed execution, shutdown fallback and isolation. Its stated
 limits include QEMU isolation and legacy unjailed-VMM upgrades, which remain untested
 in that run.
 
-The [Linux host upgrade record](linux-host-upgrade-validation-2026-09-24.md)
+The [Linux host upgrade record](validation/linux-host-upgrade-validation-2026-09-24.md)
 checks the retained engines across an agent/controller binary upgrade, new
 provisioning, stop/start, access, persistence and cleanup. Refer to that record
 for its exact fixture and validation limits.
@@ -51,8 +51,8 @@ rules. `make doc` generates Rust API documentation, not the HTTP reference.
 For changes affecting live behavior, validate the affected engine's create/access,
 stop/start with retained data, agent/controller restart and final cleanup on a
 suitable host. Host reboot on ZFS file datasets has a separate
-[restart record](firecracker-restart-validation-2026-09-24.md); zvol coverage and
-its limits are recorded in the [zvol validation](firecracker-zvol-validation-2026-09-24.md). No performance or maximum-capacity test
+[restart record](validation/firecracker-restart-validation-2026-09-24.md); zvol coverage and
+its limits are recorded in the [zvol validation](validation/firecracker-zvol-validation-2026-09-24.md). No performance or maximum-capacity test
 has been performed by that run.
 
 ## SQLite engine assessment — 2026-09-24

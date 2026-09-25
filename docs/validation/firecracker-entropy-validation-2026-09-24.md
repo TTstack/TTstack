@@ -14,7 +14,7 @@ was therefore close to expiring despite successful VM creation.
 TTstack now attaches Firecracker's rate-limited virtio entropy device. No fixed
 seed, insecure randomness, or application-specific identity logic was added.
 Custom guests need a maintained kernel with built-in virtio RNG support, as
-specified in the [guest image guide](guest-images.md#firecracker-prepared-microvm-workloads).
+specified in the [guest image guide](../guest-images.md#firecracker-prepared-microvm-workloads).
 
 The test used Linux 6.1.186 from the official Firecracker CI artifact
 `firecracker-ci/20260923-6f82ac4cf331-0/x86_64/vmlinux-6.1.186` in the
@@ -49,4 +49,4 @@ then reported zero VMs and zero CPU, memory and disk reservations. Task-owned
 services, namespace, firewall rules, guest disks and private state were removed.
 The pre-existing Docker service remained active; no shared build cache was pruned.
 
-Return to the [documentation index](README.md).
+Return to the [documentation index](../README.md).

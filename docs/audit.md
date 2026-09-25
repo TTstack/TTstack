@@ -21,7 +21,7 @@ The original review covered `83b7e95`. Findings were rechecked against `6866295`
 and the working-tree changes described below. This document records dispositions,
 not a new behavioral specification. Maintained contracts are indexed in
 [README.md](README.md); test scope and live observations are in the
-[audit validation report](audit-validation-2026-09-25.md).
+[audit validation report](validation/audit-validation-2026-09-25.md).
 
 The original 24 entries combined defects, design boundaries, unverified hypotheses,
 and incorrect conclusions. Unsupported claims have been removed. Original numbers
@@ -84,5 +84,5 @@ These are not claimed as fixed or promoted to proven incidents:
   deployment result is inferred from the Firecracker/file run. Older reports keep
   their original tested revisions and scopes.
 
-See the [validation report](audit-validation-2026-09-25.md) for actual checks,
+See the [validation report](validation/audit-validation-2026-09-25.md) for actual checks,
 resource bounds, cleanup, and the distinction between host tests and local tests.

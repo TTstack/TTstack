@@ -49,7 +49,7 @@ evidence before changing the implementation.
 - Clean up task-owned guests, services, namespaces, tunnels, rules, and files, including
   after failures; verify that pre-existing services still hold their expected state;
   report cleanup that could not be completed.
-- When retaining evidence, write a dated report under `docs/`, link it from
+- When retaining evidence, write a dated report under `docs/validation/`, link it from
   `docs/README.md`, and state the tested revision, resource bounds, cases, observations,
   cleanup, and untested scope. Omit keys and private configuration.
 - Feed reproducible defects back into a focused change, then rerun only the affected checks.

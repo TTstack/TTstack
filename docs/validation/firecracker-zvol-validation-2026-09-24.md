@@ -3,7 +3,7 @@
 Implementation tested: `9a907726fc3c4faf890d146ee38188f072b35f0a`.
 This extends the earlier [ZFS file-dataset restart check](firecracker-restart-validation-2026-09-24.md)
 with actual block-device roots. The maintained layouts and allocation policy are
-in the [guest storage guide](guest-images.md#storage).
+in the [guest storage guide](../guest-images.md#storage).
 
 ## Environment and isolation
 

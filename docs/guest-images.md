@@ -317,7 +317,7 @@ A missing mount must fail startup rather than create replacement VM state on
 the system disk. Use stable disk identifiers when provisioning a pool; verify
 unused devices separately from TTstack deployment.
 
-See [Firecracker zvol validation](firecracker-zvol-validation-2026-09-24.md) for
+See [Firecracker zvol validation](validation/firecracker-zvol-validation-2026-09-24.md) for
 the tested versions, lifecycle evidence and limits.
 
 ## Networking and platform scope

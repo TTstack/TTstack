@@ -87,6 +87,6 @@ large resource configurations or performance. ZFS remains a generic Linux QEMU
 storage option; Firecracker's jailer remains part of its isolation boundary.
 Old state with unsupported engine values needs an explicit pre-upgrade cleanup
 using a compatible release; it is not silently migrated to another engine. See
-[upgrade compatibility](deployment.md#upgrade-compatibility).
+[upgrade compatibility](../deployment.md#upgrade-compatibility).
 
-Return to the [documentation index](README.md).
+Return to the [documentation index](../README.md).

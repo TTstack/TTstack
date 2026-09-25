@@ -1,8 +1,8 @@
 # Audit correction validation, 2026-09-25
 
 This report records local regression checks and bounded Linux/Firecracker recovery
-experiments for the [audit corrections](audit.md). Maintained behavior is in the
-[REST API](rest-api.md), [deployment](deployment.md) and [guest guide](guest-images.md).
+experiments for the [audit corrections](../audit.md). Maintained behavior is in the
+[REST API](../rest-api.md), [deployment](../deployment.md) and [guest guide](../guest-images.md).
 
 ## Tested source
 
