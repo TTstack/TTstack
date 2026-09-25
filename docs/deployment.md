@@ -210,3 +210,10 @@ Reconfiguring the same address without a key preserves its saved key. Changing
 addresses does not forward an old controller's credentials: supply `TT_API_KEY`
 for the new controller. A `--server` override reuses saved credentials only when
 its address exactly matches the configured one.
+
+### Resource-update schema gate
+
+Controller and agent schema v3 retain interrupted offline resource updates. Back
+up both databases before upgrade and deploy matching binaries. File rollback to
+a v2 binary cannot open migrated state; do not restore stale metadata over disks
+that have grown. See [offline resource recovery](rest-api.md#offline-resource-updates).

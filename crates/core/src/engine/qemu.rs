@@ -331,6 +331,7 @@ mod tests {
         // Smoke test: ensure disk_format ends up in the -drive arg
         let eng = QemuEngine::new();
         let vm = Vm {
+            pending_resources: None,
             id: "test-vm".into(),
             env_id: "e1".into(),
             host_id: "h1".into(),

@@ -186,6 +186,9 @@ pub struct Host {
 /// A VM or container instance managed by an agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vm {
+    /// Durable intent for an unfinished offline resource update. Retry the same target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_resources: Option<VmResources>,
     pub id: String,
     pub env_id: String,
     pub host_id: String,
@@ -207,6 +210,30 @@ pub struct Vm {
     pub error: Option<String>,
     pub state: VmState,
     pub created_at: u64,
+}
+
+/// Cold-boot resources. Disk is the root disk capacity in MiB, excluding config drives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VmResources {
+    pub cpu: u32,
+    pub mem: u32,
+    pub disk: u32,
+}
+
+impl Vm {
+    pub fn reserved_disk(&self) -> u32 {
+        self.pending_resources.map_or(self.disk, |r| {
+            self.disk.max(
+                r.disk
+                    .saturating_add(if self.options.guest_config_digest.is_some() {
+                        crate::guest_config::CONFIG_DISK_MIB
+                    } else {
+                        0
+                    }),
+            )
+        })
+    }
 }
 
 /// Creation options retained for idempotency, restart and firewall recovery.
@@ -520,7 +547,7 @@ impl Engine {
 impl Resource {
     /// Disk and instance slots remain reserved even when a VM is stopped.
     pub fn account(&mut self, vm: &Vm) {
-        self.disk_used = self.disk_used.saturating_add(vm.disk);
+        self.disk_used = self.disk_used.saturating_add(vm.reserved_disk());
         self.vm_count = self.vm_count.saturating_add(1);
         if vm.state != VmState::Stopped {
             self.cpu_used = self.cpu_used.saturating_add(vm.cpu);

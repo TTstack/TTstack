@@ -42,6 +42,7 @@ for every failure. A transport timeout does not mean an operation was cancelled.
 | POST | `/api/envs/{id}/stop` | No payload |
 | POST | `/api/envs/{id}/start` | No payload |
 | GET | `/api/vms/{id}` | `Vm` |
+| POST | `/api/vms/{id}/resources` | Updated stopped `Vm`; see [offline resources](#offline-resource-updates) |
 | GET | `/api/images` | `ImageInfo[]`: `name`, `host_id`; cached file/zvol images on online hosts |
 | GET | `/api/status` | `FleetStatus`: host/environment/VM counts and resource reservations |
 
@@ -55,6 +56,42 @@ environments and heartbeat refresh can progress concurrently. Conflicting reques
 for the same environment return 409. GET of a missing host, environment or VM
 returns 404. Invalid environment parameters return 400, duplicate names 409, and
 unschedulable requests 422. Agent operation failures may surface as 502.
+
+## Offline resource updates
+
+`POST /api/vms/{id}/resources` takes `{"cpu": 4, "mem": 8192, "disk": 16384}`.
+All three positive values are required; memory/root disk use MiB. This operation
+supports stopped Firecracker VMs on file or ZFS storage. The agent must advertise
+**`firecracker_resources`**, separate from creation-time `firecracker_disk_resize`.
+It does not stop or start guests, resize containers, or offer an atomic multi-VM
+operation. The CLI equivalent is:
+
+```sh
+tt env stop demo
+tt env resize VM_ID --cpu 4 --mem 8192 --disk 16384
+tt env start demo
+```
+
+CPU/RAM take effect on the next cold boot. Disk can only grow; `disk` excludes the
+4 MiB guest configuration drive. The existing disk, VM identity, ports and opaque
+configuration are retained. Both recorded and actual stopped state are checked
+before disk mutation. Host admission includes VMM overhead and the additional disk
+reservation. A stopped VM does not reserve CPU/RAM for a later start; capacity is
+checked again on start. No migration is attempted when its host has no capacity.
+
+Intent is persisted as `Vm.pending_resources` before storage changes. While set,
+the larger disk remains reserved and start is refused. Retry the **same target**
+to complete an interrupted operation: equal device capacity still runs filesystem
+growth, covering interruption between device growth and `resize2fs`. A successful
+response clears intent and updates `cpu`, `mem`, `disk` and `options.requested_disk`.
+The VM remains stopped. Invalid values/shrink/unsupported capability return 400;
+state conflicts or insufficient schedulable capacity return 409. A timeout or 502
+can have an unknown outcome: inspect the VM, including pending resources and error,
+before retrying. Do not delete the environment to recover a resource update.
+
+This is grow-only operational behavior, not a promise of zero storage risk or a
+backup facility. Maintain backups independently. Controller and agent use schema
+v3 so older binaries cannot ignore pending reservations; upgrade both together.
 
 ## Environment requests
 
@@ -225,6 +262,7 @@ normal fleet operations to avoid untracked resources.
 | POST | `/api/vms` | `CreateVmResp` containing `vm`, HTTP 201 |
 | GET | `/api/vms` | `Vm[]` |
 | GET | `/api/vms/{id}` | `Vm` |
+| POST | `/api/vms/{id}/resources` | Updated stopped `Vm`; see [offline resources](#offline-resource-updates) |
 | DELETE | `/api/vms/{id}` | No payload; idempotent |
 | POST | `/api/vms/{id}/stop` | No payload |
 | POST | `/api/vms/{id}/start` | No payload |

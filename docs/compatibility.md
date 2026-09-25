@@ -102,7 +102,8 @@ binary also passed. This check did not boot guests or exercise the remote hosts.
 - No automatic guest restart after host reboot, migration, HA, distributed storage,
   image distribution or application/database provisioning.
 - Docker does not support managed SSH keys, disk quotas or outgoing restrictions.
-  Firecracker supports creation-time ext4 growth, but not managed SSH keys,
+  Firecracker supports creation-time ext4 growth and explicit stopped-VM resource
+  updates (`firecracker_resources`), but not managed SSH keys,
   interactive consoles or resizing existing VMs.
 - Runtime and guest dependencies remain the operator's responsibility. Prefer
   QEMU cloud images for full VMs and prepared long-running Docker images for services.

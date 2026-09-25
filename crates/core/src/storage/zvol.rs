@@ -230,10 +230,7 @@ impl ImageStore for ZvolStore {
         let size = volume_size(&volume)?;
         let requested = u64::from(size_mib) * 1024 * 1024;
         if requested < size {
-            return Err(eg!("requested disk is smaller than the base zvol"));
-        }
-        if requested == size {
-            return Ok(());
+            return Err(eg!("requested disk is smaller than the current zvol"));
         }
         let disk = wait_device(&volume)?;
         super::file::check_ext4(Path::new(&disk))?;

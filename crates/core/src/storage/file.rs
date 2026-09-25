@@ -11,7 +11,7 @@ use std::path::Path;
 
 pub struct FileStore;
 
-/// Grow an offline, unpartitioned ext4 clone before its first boot.
+/// Grow an offline, unpartitioned ext4 disk, including an interrupted growth retry.
 /// The caller keeps a failed clone for diagnosis/explicit deletion.
 pub fn resize_ext4(path: &Path, size_mib: u32) -> Result<()> {
     let metadata = std::fs::symlink_metadata(path).c(d!("inspect ext4 clone"))?;
@@ -20,17 +20,17 @@ pub fn resize_ext4(path: &Path, size_mib: u32) -> Result<()> {
     }
     let requested = u64::from(size_mib) * 1024 * 1024;
     if requested < metadata.len() {
-        return Err(eg!("requested disk is smaller than the base image"));
-    }
-    if requested == metadata.len() {
-        return Ok(());
+        return Err(eg!("requested disk is smaller than the current disk"));
     }
     check_ext4(path)?;
     let disk = std::fs::OpenOptions::new()
         .write(true)
         .open(path)
         .c(d!("open ext4 clone"))?;
-    disk.set_len(requested).c(d!("grow ext4 clone"))?;
+    if requested > metadata.len() {
+        disk.set_len(requested).c(d!("grow ext4 clone"))?;
+    }
+    // A previous attempt may have enlarged the device but not its filesystem.
     grow_ext4(path)?;
     disk.sync_all().c(d!("sync ext4 clone"))?;
     Ok(())
@@ -329,6 +329,33 @@ mod tests {
         resize_ext4(&clone, 96).unwrap();
         assert!(resize_ext4(&clone, 64).is_err());
         assert_eq!(std::fs::metadata(&clone).unwrap().len(), 96 * 1024 * 1024);
+        // Retrying equal device capacity must still finish an interrupted filesystem growth.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&clone)
+            .unwrap()
+            .set_len(128 * 1024 * 1024)
+            .unwrap();
+        resize_ext4(&clone, 128).unwrap();
+        let fs = std::process::Command::new("dumpe2fs")
+            .arg("-h")
+            .arg(&clone)
+            .output()
+            .unwrap();
+        let header = String::from_utf8(fs.stdout).unwrap();
+        let value = |key: &str| -> u64 {
+            header
+                .lines()
+                .find_map(|line| line.strip_prefix(key))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        assert_eq!(
+            value("Block count:") * value("Block size:"),
+            128 * 1024 * 1024
+        );
         let invalid = dir.path().join("invalid.ext4");
         std::fs::write(&invalid, b"not an ext4 filesystem").unwrap();
         assert!(resize_ext4(&invalid, 64).is_err());

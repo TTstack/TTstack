@@ -154,6 +154,32 @@ pub async fn stop_vm(State(state): State<AppState>, Path(id): Path<String>) -> i
 pub async fn start_vm(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     action(mutate(state, move |rt| rt.start_vm(&id)).await)
 }
+pub async fn resize_vm(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(target): Json<ttcore::model::VmResources>,
+) -> impl IntoResponse {
+    match mutate(state, move |rt| rt.resize_vm(&id, target)).await {
+        Ok(vm) => (StatusCode::OK, Json(ApiResp::success(vm))),
+        Err(e) => {
+            let status = if e.contains("insufficient resources")
+                || e.contains("require a confirmed stopped VM")
+                || e.contains("retry the recorded target first")
+            {
+                StatusCode::CONFLICT
+            } else if e.contains("shrinking")
+                || e.contains("must be > 0")
+                || e.contains("require Firecracker")
+                || e.contains("overflow")
+            {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, Json(ApiResp::err(e)))
+        }
+    }
+}
 fn action(result: Result<(), String>) -> Reply<()> {
     match result {
         Ok(()) => (StatusCode::OK, Json(ApiRespEmpty::ok())),

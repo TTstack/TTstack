@@ -186,6 +186,7 @@ impl Runtime {
             std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, p)).is_ok()
         })?;
         let mut vm = Vm {
+            pending_resources: None,
             id: req.vm_id.clone(),
             env_id: req.env_id.clone(),
             host_id: self.host_id.clone(),
@@ -317,6 +318,11 @@ impl Runtime {
 
     pub fn start_vm(&mut self, id: &str) -> Result<()> {
         let mut vm = load_vm(&self.db, id)?.ok_or_else(|| eg!(format!("VM not found: {id}")))?;
+        if vm.pending_resources.is_some() {
+            return Err(eg!(
+                "resource update unfinished; retry the recorded resources before starting"
+            ));
+        }
         if vm.state == VmState::Running {
             return Ok(());
         }
@@ -368,6 +374,88 @@ impl Runtime {
         }
         save_vm(&self.db, &vm)?;
         self.recount()
+    }
+
+    /// Change a stopped Firecracker guest without replacing its disk or identity.
+    pub fn resize_vm(&mut self, id: &str, target: VmResources) -> Result<Vm> {
+        let mut vm = load_vm(&self.db, id)?.ok_or_else(|| eg!(format!("VM not found: {id}")))?;
+        if vm.engine != Engine::Firecracker {
+            return Err(eg!("resource updates currently require Firecracker"));
+        }
+        if target.cpu == 0 || target.mem == 0 || target.disk == 0 {
+            return Err(eg!("cpu, memory and root disk must be > 0"));
+        }
+        if vm.state != VmState::Stopped
+            || (self.engine_factory)(vm.engine)?.state(&vm)? != VmState::Stopped
+        {
+            return Err(eg!("resource updates require a confirmed stopped VM"));
+        }
+        if vm
+            .pending_resources
+            .is_some_and(|pending| pending != target)
+        {
+            return Err(eg!(
+                "resource update unfinished; retry the recorded target first"
+            ));
+        }
+        let path = self.clone_path(&vm);
+        let current = self.store.firecracker_size(&path)?.div_ceil(1024 * 1024);
+        let overhead = if vm.options.guest_config_digest.is_some() {
+            ttcore::guest_config::CONFIG_DISK_MIB
+        } else {
+            0
+        };
+        if u64::from(target.disk) < current
+            || target.disk < vm.disk.saturating_sub(overhead)
+            || target.disk < vm.options.requested_disk
+        {
+            return Err(eg!("disk shrinking is not supported"));
+        }
+        let disk = target
+            .disk
+            .checked_add(overhead)
+            .ok_or_else(|| eg!("disk capacity overflow"))?;
+        self.recount()?;
+        if !self.resource.can_fit(
+            target.cpu,
+            vm.engine.memory_reservation(target.mem),
+            disk.saturating_sub(vm.reserved_disk()),
+        ) {
+            return Err(eg!("insufficient resources for resource update"));
+        }
+        if vm.pending_resources.is_none()
+            && vm.cpu == target.cpu
+            && vm.mem == target.mem
+            && vm.options.requested_disk == target.disk
+            && vm.disk == disk
+        {
+            return Ok(vm);
+        }
+        // Reserve the larger disk and record intent before touching the filesystem.
+        // Old CPU/memory/requested_disk remain observable until the operation succeeds.
+        let grow = u64::from(target.disk) > current || vm.pending_resources.is_some();
+        vm.pending_resources = Some(target);
+        vm.error = Some("resource update unfinished; retry the recorded target".into());
+        save_vm(&self.db, &vm)?;
+        self.recount()?;
+        if let Err(e) = if grow {
+            self.store.resize_firecracker(&path, target.disk)
+        } else {
+            Ok(())
+        } {
+            vm.error = Some(format!("resource update unfinished: {e}"));
+            save_vm(&self.db, &vm)?;
+            return Err(e);
+        }
+        vm.cpu = target.cpu;
+        vm.mem = target.mem;
+        vm.disk = disk;
+        vm.options.requested_disk = target.disk;
+        vm.pending_resources = None;
+        vm.error = None;
+        save_vm(&self.db, &vm)?;
+        self.recount()?;
+        Ok(vm)
     }
 
     pub fn destroy_vm(&mut self, id: &str) -> Result<()> {
@@ -564,7 +652,7 @@ fn allocate_ports(
 // ── SQLite Schema & Operations ──────────────────────────────────────
 
 /// Current agent schema version.
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 fn init_db(db: &Connection) -> Result<()> {
     db.execute_batch(
@@ -597,6 +685,7 @@ fn init_db(db: &Connection) -> Result<()> {
         .c(d!("migration v1"))?;
     }
 
+    // v3 adds durable pending resource updates; older binaries must not ignore them.
     // v2 adds lifecycle fields in serialized records, decoded with serde defaults.
     // The version guard prevents older binaries from opening this state.
 
@@ -806,6 +895,7 @@ fn detect_capabilities(engines: &[Engine], storage: Storage) -> Vec<String> {
             }
             if probe("e2fsck", &["-V"]) && probe("which", &["resize2fs"]) {
                 caps.push("firecracker_disk_resize".into());
+                caps.push("firecracker_resources".into());
             }
             if storage == Storage::Zvol && probe("zfs", &["version"]) {
                 caps.push("firecracker_zvol".into());
@@ -827,6 +917,7 @@ mod tests {
 
     fn make_vm(id: &str, state: VmState) -> Vm {
         Vm {
+            pending_resources: None,
             id: id.into(),
             env_id: "env1".into(),
             host_id: "h1".into(),
@@ -1038,8 +1129,119 @@ mod lifecycle_tests {
             network_ready: false,
         }
     }
+    #[test]
+    fn resource_update_retries_after_reopen_and_keeps_disk_and_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("agent.db");
+        let mut rt = runtime(Connection::open(&database).unwrap());
+        rt.runtime_dir = dir.path().to_str().unwrap().into();
+        let mut guest = vm("resize", "offline", VmState::Stopped);
+        guest.engine = Engine::Firecracker;
+        guest.disk = 64 + ttcore::guest_config::CONFIG_DISK_MIB;
+        guest.options.requested_disk = 64;
+        guest.options.guest_config_digest = Some("immutable-config".into());
+        save_vm(&rt.db, &guest).unwrap();
+        let clone = std::path::PathBuf::from(rt.clone_path(&guest));
+        std::fs::create_dir(&clone).unwrap();
+        let root = clone.join("rootfs.ext4");
+        // Fail before a filesystem exists: intent and larger reservation must survive.
+        std::fs::File::create(&root)
+            .unwrap()
+            .set_len(64 * 1024 * 1024)
+            .unwrap();
+        let target = VmResources {
+            cpu: 4,
+            mem: 2048,
+            disk: 96,
+        };
+        assert!(rt.resize_vm(&guest.id, target).is_err());
+        let pending = load_vm(&rt.db, &guest.id).unwrap().unwrap();
+        assert_eq!(pending.pending_resources, Some(target));
+        assert_eq!(pending.disk, guest.disk);
+        assert_eq!(rt.resource.disk_used, 100);
+        assert!(rt.start_vm(&guest.id).is_err());
+        assert!(
+            rt.resize_vm(&guest.id, VmResources { cpu: 2, ..target })
+                .is_err()
+        );
+        drop(rt);
+
+        let contents = dir.path().join("contents");
+        std::fs::create_dir(&contents).unwrap();
+        std::fs::write(contents.join("marker"), "retained").unwrap();
+        let mkfs = std::process::Command::new("mkfs.ext4")
+            .args(["-q", "-F", "-d"])
+            .arg(contents)
+            .arg(&root)
+            .output()
+            .unwrap();
+        assert!(mkfs.status.success());
+        // Simulate a crash after growing the device but before resize2fs.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&root)
+            .unwrap()
+            .set_len(96 * 1024 * 1024)
+            .unwrap();
+        let mut rt = runtime(Connection::open(&database).unwrap());
+        rt.runtime_dir = dir.path().to_str().unwrap().into();
+        let done = rt.resize_vm(&guest.id, target).unwrap();
+        assert!(done.pending_resources.is_none());
+        assert_eq!((done.cpu, done.mem, done.disk), (4, 2048, 100));
+        assert_eq!(done.options.requested_disk, 96);
+        assert_eq!(done.id, guest.id);
+        assert_eq!(
+            done.options.guest_config_digest,
+            guest.options.guest_config_digest
+        );
+        let marker = std::process::Command::new("debugfs")
+            .args(["-R", "cat /marker"])
+            .arg(&root)
+            .output()
+            .unwrap();
+        assert_eq!(marker.stdout, b"retained");
+        let header = std::process::Command::new("dumpe2fs")
+            .arg("-h")
+            .arg(&root)
+            .output()
+            .unwrap();
+        let text = String::from_utf8(header.stdout).unwrap();
+        let value = |key: &str| -> u64 {
+            text.lines()
+                .find_map(|l| l.strip_prefix(key))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        assert_eq!(
+            value("Block count:") * value("Block size:"),
+            96 * 1024 * 1024
+        );
+        assert!(rt.resize_vm(&guest.id, target).is_ok());
+        assert!(
+            rt.resize_vm(&guest.id, VmResources { disk: 64, ..target })
+                .is_err()
+        );
+        assert!(
+            rt.resize_vm(&guest.id, VmResources { cpu: 9, ..target })
+                .is_err()
+        );
+        let mut running = done.clone();
+        running.image = "live".into();
+        save_vm(&rt.db, &running).unwrap();
+        assert!(
+            rt.resize_vm(&guest.id, VmResources { cpu: 2, ..target })
+                .is_err()
+        );
+        running.image = "offline".into();
+        running.state = VmState::Running;
+        save_vm(&rt.db, &running).unwrap();
+        assert!(rt.resize_vm(&guest.id, target).is_err());
+    }
     fn vm(id: &str, image: &str, state: VmState) -> Vm {
         Vm {
+            pending_resources: None,
             id: id.into(),
             env_id: "env".into(),
             host_id: "h1".into(),

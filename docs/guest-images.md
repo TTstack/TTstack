@@ -174,8 +174,11 @@ blocks reduce the capacity reported by guest tools such as `df`. Upgrade agents 
 host's configured capacity, including VMM overhead. TTstack has no application
 or user-tier sizing policy; callers can impose their own ceilings.
 
-This is creation-time sizing, not a resize API for existing VMs. Stop/start
-preserves the selected size and data. It does not expand or shrink old disks.
+Ordinary stop/start preserves the selected size and data. To change an existing
+stopped Firecracker VM, use the explicit [offline resource API](rest-api.md#offline-resource-updates).
+It grows the same root disk and ext4 filesystem, rejects shrinking, and requires
+the separate `firecracker_resources` capability. CPU/RAM changes take effect at
+the next cold boot; no memory or process state is retained.
 
 Stop requests orderly shutdown on x86_64, waits up to 30 seconds, then forcibly
 terminates if necessary. The kernel needs `CONFIG_SERIO_I8042` and

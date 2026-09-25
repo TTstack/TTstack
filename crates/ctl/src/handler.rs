@@ -463,6 +463,7 @@ async fn create_environment(state: &CtlState, req: CreateEnvReq) -> Result<EnvDe
         let requested_disk = spec.disk.unwrap_or(spec.engine.default_disk());
         let disk = placement.disk;
         planned.push(Vm {
+            pending_resources: None,
             id: vm_id.clone(),
             env_id: req.id.clone(),
             host_id: placement.host_id,
@@ -739,6 +740,168 @@ pub async fn start_env(State(state): State<CtlState>, Path(id): Path<String>) ->
     let result = tokio::spawn(async move { change_environment(&state, &id, "start").await }).await;
     response(result.unwrap_or_else(|e| Err(internal(e))), StatusCode::OK)
 }
+
+/// The operation is per VM: a multi-VM environment has no atomic resize promise.
+pub async fn resize_vm(
+    State(state): State<CtlState>,
+    Path(id): Path<String>,
+    Json(target): Json<VmResources>,
+) -> impl IntoResponse {
+    let result =
+        tokio::spawn(async move { resize_virtual_machine(&state, &id, target).await }).await;
+    response(result.unwrap_or_else(|e| Err(internal(e))), StatusCode::OK)
+}
+
+async fn resize_virtual_machine(
+    state: &CtlState,
+    id: &str,
+    target: VmResources,
+) -> Result<Vm, ApiError> {
+    if target.cpu == 0 || target.mem == 0 || target.disk == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "cpu, memory and root disk must be > 0".into(),
+        ));
+    }
+    let original = state
+        .lock_db()
+        .get_vm(id)
+        .map_err(internal)?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "VM not found".into()))?;
+    let _operation = begin_operation(state, &original.env_id)?;
+    let detail = environment_detail(state, &original.env_id)?;
+    if matches!(detail.env.state, EnvState::Creating | EnvState::Deleting) {
+        return Err((
+            StatusCode::CONFLICT,
+            "environment has an operation in progress".into(),
+        ));
+    }
+    let client = agent_client(state.api_key.as_deref(), 360).map_err(internal)?;
+    refresh_hosts(
+        state,
+        &agent_client(state.api_key.as_deref(), 5).map_err(internal)?,
+        Some(&original.env_id),
+    )
+    .await;
+    let mut vm = state
+        .lock_db()
+        .get_vm(id)
+        .map_err(internal)?
+        .ok_or_else(|| internal("VM disappeared"))?;
+    let host = state
+        .lock_db()
+        .get_host(&vm.host_id)
+        .map_err(internal)?
+        .ok_or_else(|| internal("VM host missing"))?;
+    if host.state != HostState::Online {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "VM host is offline".into()));
+    }
+    if vm.engine != Engine::Firecracker
+        || !host
+            .capabilities
+            .iter()
+            .any(|c| c == "firecracker_resources")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "agent lacks firecracker_resources; upgrade agent and controller".into(),
+        ));
+    }
+    if vm.state != VmState::Stopped || vm.pending_resources.is_some_and(|r| r != target) {
+        return Err((
+            StatusCode::CONFLICT,
+            "stop the VM first; an unfinished update must use its recorded target".into(),
+        ));
+    }
+    let overhead = if vm.options.guest_config_digest.is_some() {
+        ttcore::guest_config::CONFIG_DISK_MIB
+    } else {
+        0
+    };
+    let disk = target
+        .disk
+        .checked_add(overhead)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "disk overflow".into()))?;
+    if target.disk < vm.options.requested_disk || disk < vm.disk {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "disk shrinking is not supported".into(),
+        ));
+    }
+    if !host.resource.can_fit(
+        target.cpu,
+        vm.engine.memory_reservation(target.mem),
+        disk.saturating_sub(vm.reserved_disk()),
+    ) {
+        return Err((
+            StatusCode::CONFLICT,
+            "insufficient resources on the workspace host".into(),
+        ));
+    }
+    vm.pending_resources = Some(target);
+    {
+        let db = state.lock_db();
+        db.put_vm(&vm).map_err(internal)?;
+        state.revision.fetch_add(1, Ordering::SeqCst);
+    }
+    let result = async {
+        let resp = client
+            .post(format!("http://{}/api/vms/{id}/resources", host.addr))
+            .json(&target)
+            .send()
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("resource update outcome unknown; inspect VM before retrying: {e}"),
+                )
+            })?;
+        let status = resp.status();
+        let body: ApiResp<Vm> = resp.json().await.map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("invalid agent response: {e}"),
+            )
+        })?;
+        if !status.is_success() || !body.ok {
+            return Err((
+                if status.is_client_error() {
+                    status
+                } else {
+                    StatusCode::BAD_GATEWAY
+                },
+                body.error
+                    .unwrap_or_else(|| "resource update failed".into()),
+            ));
+        }
+        let confirmed = body.data.ok_or_else(|| internal("agent returned no VM"))?;
+        if confirmed.id != vm.id
+            || confirmed.env_id != vm.env_id
+            || confirmed.host_id != vm.host_id
+            || confirmed.state != VmState::Stopped
+            || confirmed.pending_resources.is_some()
+            || confirmed.cpu != target.cpu
+            || confirmed.mem != target.mem
+            || confirmed.options.requested_disk != target.disk
+            || confirmed.disk != disk
+        {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                "agent returned inconsistent resource update".into(),
+            ));
+        }
+        state.lock_db().put_vm(&confirmed).map_err(internal)?;
+        Ok(confirmed)
+    }
+    .await;
+    refresh_hosts(
+        state,
+        &agent_client(state.api_key.as_deref(), 5).map_err(internal)?,
+        Some(&original.env_id),
+    )
+    .await;
+    result
+}
 async fn change_environment(state: &CtlState, id: &str, action: &str) -> Result<(), ApiError> {
     let _operation = begin_operation(state, id)?;
     let detail = environment_detail(state, id)?;
@@ -751,6 +914,12 @@ async fn change_environment(state: &CtlState, id: &str, action: &str) -> Result<
     let hosts = state.lock_db().recovery_hosts().map_err(internal)?;
     let client = agent_client(state.api_key.as_deref(), 360).map_err(internal)?;
     if action == "start" {
+        if detail.vms.iter().any(|vm| vm.pending_resources.is_some()) {
+            return Err((
+                StatusCode::CONFLICT,
+                "resource update unfinished; retry the recorded resources before starting".into(),
+            ));
+        }
         let mut starting = detail.vms.clone();
         for vm in &mut starting {
             if vm.state == VmState::Stopped {
@@ -1098,6 +1267,7 @@ mod tests {
     };
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     struct MockAgent {
+        resources_supported: AtomicBool,
         vms: Mutex<Vec<Vm>>,
         stall_info: AtomicBool,
         info_entered: AtomicBool,
@@ -1112,6 +1282,7 @@ mod tests {
     }
     fn record(id: &str, env: &str) -> Vm {
         Vm {
+            pending_resources: None,
             id: id.into(),
             env_id: env.into(),
             host_id: "host".into(),
@@ -1148,7 +1319,11 @@ mod tests {
             vms: None,
             warnings: vec![],
             image_sizes: Default::default(),
-            capabilities: vec![],
+            capabilities: if mock.resources_supported.load(Ordering::SeqCst) {
+                vec!["firecracker_resources".into()]
+            } else {
+                vec![]
+            },
             host_id: "host".into(),
             resource,
             engines: vec![Engine::Docker],
@@ -1223,8 +1398,92 @@ mod tests {
         }
         Json(ApiRespEmpty::ok())
     }
+    async fn resize(
+        State(mock): State<Arc<MockAgent>>,
+        Path(id): Path<String>,
+        Json(target): Json<VmResources>,
+    ) -> impl IntoResponse {
+        let mut rows = mock.vms.lock().unwrap();
+        let vm = rows.iter_mut().find(|v| v.id == id).unwrap();
+        vm.cpu = target.cpu;
+        vm.mem = target.mem;
+        vm.disk = target.disk;
+        vm.options.requested_disk = target.disk;
+        if mock.fail_action.load(Ordering::SeqCst) {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(ApiResp::<Vm>::err("response lost after resource update")),
+            );
+        }
+        (StatusCode::OK, Json(ApiResp::success(vm.clone())))
+    }
+    #[tokio::test]
+    async fn resize_requires_capability_and_stopped_vm_and_recovers_lost_reply() {
+        let (state, mock, server) = fixture().await;
+        seed(&state, &mock);
+        let target = VmResources {
+            cpu: 2,
+            mem: 512,
+            disk: 1024,
+        };
+        assert_eq!(
+            resize_virtual_machine(&state, "good", target)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        mock.resources_supported.store(true, Ordering::SeqCst);
+        for vm in mock.vms.lock().unwrap().iter_mut() {
+            vm.engine = Engine::Firecracker;
+        }
+        assert_eq!(
+            resize_virtual_machine(&state, "good", target)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::CONFLICT
+        );
+        for vm in mock.vms.lock().unwrap().iter_mut() {
+            vm.state = VmState::Stopped;
+        }
+        assert_eq!(
+            resize_virtual_machine(&state, "good", VmResources { cpu: 17, ..target })
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::CONFLICT
+        );
+        mock.fail_action.store(true, Ordering::SeqCst);
+        assert!(
+            resize_virtual_machine(&state, "good", target)
+                .await
+                .is_err()
+        );
+        let saved = state.lock_db().get_vm("good").unwrap().unwrap();
+        assert_eq!((saved.cpu, saved.mem, saved.disk), (2, 512, 1024));
+        assert!(saved.pending_resources.is_none());
+        mock.fail_action.store(false, Ordering::SeqCst);
+        assert!(resize_virtual_machine(&state, "good", target).await.is_ok());
+        assert_eq!(
+            resize_virtual_machine(
+                &state,
+                "good",
+                VmResources {
+                    disk: 512,
+                    ..target
+                }
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        server.abort();
+    }
     async fn fixture() -> (CtlState, Arc<MockAgent>, tokio::task::JoinHandle<()>) {
         let mock = Arc::new(MockAgent {
+            resources_supported: AtomicBool::new(false),
             vms: Mutex::new(vec![]),
             stall_info: AtomicBool::new(false),
             info_entered: AtomicBool::new(false),
@@ -1243,6 +1502,7 @@ mod tests {
             .route("/api/vms/{id}", axum::routing::delete(delete))
             .route("/api/vms/{id}/stop", post(stop))
             .route("/api/vms/{id}/start", post(start))
+            .route("/api/vms/{id}/resources", post(resize))
             .with_state(mock.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();

@@ -133,6 +133,17 @@ enum EnvCmd {
     Stop { name: String },
     /// Start all VMs in an environment.
     Start { name: String },
+    /// Change one stopped Firecracker VM; disk can only grow. Inspect env show for VM IDs.
+    Resize {
+        vm_id: String,
+        #[arg(long)]
+        cpu: u32,
+        #[arg(long)]
+        mem: u32,
+        /// Root disk MiB, excluding the configuration drive.
+        #[arg(long)]
+        disk: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -577,6 +588,24 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
         EnvCmd::Start { name } => {
             c.post_action(&format!("/api/envs/{name}/start")).await?;
             println!("Environment started: {name}");
+        }
+        EnvCmd::Resize {
+            vm_id,
+            cpu,
+            mem,
+            disk,
+        } => {
+            validate_name(&vm_id, "vm_id").map_err(|e| eg!(e))?;
+            let vm: Vm = c
+                .post(
+                    &format!("/api/vms/{vm_id}/resources"),
+                    &VmResources { cpu, mem, disk },
+                )
+                .await?;
+            println!(
+                "VM {} updated and stopped: {} vCPU, {} MiB memory, {} MiB root disk",
+                vm.id, vm.cpu, vm.mem, vm.options.requested_disk
+            );
         }
     }
     Ok(())

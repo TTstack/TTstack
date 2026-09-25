@@ -9,7 +9,7 @@ use ttcore::api::FleetStatus;
 use ttcore::model::*;
 
 /// Current schema version. Bump this when schema changes.
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 /// Fleet database — the single source of truth for the controller.
 pub struct Db {
@@ -82,6 +82,7 @@ impl Db {
             .c(d!("migration v1"))?;
         }
 
+        // v3 adds pending resource updates and conservative disk reservations.
         // v2 adds lifecycle fields in serialized records, decoded with serde defaults.
         // The version guard prevents older binaries from opening this state.
 
@@ -422,6 +423,7 @@ mod tests {
 
     fn make_vm(id: &str, env_id: &str, host_id: &str) -> Vm {
         Vm {
+            pending_resources: None,
             id: id.into(),
             env_id: env_id.into(),
             host_id: host_id.into(),

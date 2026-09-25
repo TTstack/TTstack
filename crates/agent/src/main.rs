@@ -106,6 +106,7 @@ async fn main() {
         )
         .route("/api/vms/{id}/stop", post(handler::stop_vm))
         .route("/api/vms/{id}/start", post(handler::start_vm))
+        .route("/api/vms/{id}/resources", post(handler::resize_vm))
         .with_state(state);
 
     let app = if let Some(key) = cfg.api_key {

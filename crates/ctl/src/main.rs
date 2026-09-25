@@ -100,6 +100,7 @@ async fn main() {
         .route("/api/envs/{id}/stop", post(handler::stop_env))
         .route("/api/envs/{id}/start", post(handler::start_env))
         .route("/api/vms/{id}", get(handler::get_vm))
+        .route("/api/vms/{id}/resources", post(handler::resize_vm))
         .route("/api/images", get(handler::list_images))
         .route("/api/status", get(handler::fleet_status))
         .with_state(state);
