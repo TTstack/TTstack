@@ -99,9 +99,12 @@ For multiple hosts, use [distributed deployment](docs/deployment.md#distributed-
   distribution, cross-host private network, guest migration or high availability.
 
 Resource and lifecycle details, including failure recovery, are in the
-[API reference](docs/rest-api.md#lifecycle-and-recovery). Use `tt --help` and
-`tt env create --help` for CLI options; request defaults are listed in the
-[API request reference](docs/rest-api.md#environment-requests).
+[API reference](docs/rest-api.md#lifecycle-and-recovery). The CLI is
+`tt status`, `tt config`, `tt host {add,list,show,remove,detach}`,
+`tt env {create,list,show,start,stop,resize,delete}`,
+`tt image {list,recipes,create}` and `tt deploy {agent,ctl,all,dist}`; use
+`tt --help` and `tt env create --help` for options. Request defaults are listed
+in the [API request reference](docs/rest-api.md#environment-requests).
 
 ## Access and authentication
 
