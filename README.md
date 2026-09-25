@@ -135,6 +135,7 @@ ports are allocated dynamically, so always read the actual mappings from `env sh
 | [Validation evidence](docs/README.md#validation-evidence) | Dated reports for specific tested revisions, with their limits |
 | [Fleet configuration template](tools/deploy.toml.example) | Commented distributed deployment configuration |
 | [Claude workflows](.claude/README.md) | `/x-review`, `/x-check`, `/x-commit`, and `/x-live` entry points with their shared guides |
+| [Project website](https://ttstack.github.io/TTstack/) | Published landing page, built from [`site/`](site/) |
 
 `make help` lists development commands. `make doc` generates Rust source API
 documentation; the HTTP API is documented in the REST reference above.

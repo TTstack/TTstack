@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TTstack — Lightweight Private Cloud</title>
+<meta name="description" content="TTstack is a small VM and container manager: create temporary environments on Linux hosts you own, then stop, restart or delete them reliably.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="TTstack — Lightweight Private Cloud">
+<meta property="og:description" content="A tiny private cloud for developers and small teams, with QEMU/KVM, Firecracker and Docker/Podman behind one controller.">
+<meta property="og:url" content="https://ttstack.github.io/TTstack/">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body id="top">
+
+<header class="bar">
+  <div class="wrap bar-inner">
+    <a class="brand" href="#top"><span class="tt">TT</span>stack</a>
+    <nav class="nav" aria-label="Page sections">
+      <a href="#usage">Usage</a>
+      <a href="#engines">Engines</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#docs">Docs</a>
+      <a href="https://github.com/TTstack/TTstack">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="hero">
+    <h1>TTstack &mdash; Lightweight Private Cloud</h1>
+    <p class="lede">
+      A tiny private cloud for developers and small teams. Create temporary VMs and
+      containers on hosts you own, reach them over SSH or published ports, and stop,
+      restart or delete them reliably.
+    </p>
+    <p class="cta">
+      <a class="btn primary" href="https://github.com/TTstack/TTstack#quick-start-one-linuxsystemd-host">Get started</a>
+      <a class="btn" href="https://github.com/TTstack/TTstack">View on GitHub</a>
+    </p>
+    <p class="badges">
+      <a href="https://github.com/TTstack/TTstack/actions/workflows/ci.yml"><img src="https://github.com/TTstack/TTstack/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+      <a href="https://github.com/TTstack/TTstack/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
+      <a href="https://github.com/TTstack/TTstack/blob/master/Cargo.toml"><img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="Rust 1.88 or newer"></a>
+    </p>
+  </section>
+
+  <section id="usage">
+    <h2>Create, use, tear down</h2>
+    <p class="muted">
+      One CLI drives the whole fleet. Example session with illustrative values:
+    </p>
+    <div class="terms">
+      <div class="term">
+<pre><code>$ tt env create demo --image alpine-cloud --engine qemu \
+    --cpu 1 --mem 256 --disk 2048 --ssh-key ~/.ssh/id_ed25519.pub
+$ tt env show demo
+Environment: demo
+  Owner:   dev
+  State:   Running
+  VMs:     1
+
+  ID        IMAGE         ENGINE   STATE    IP           PORTS
+  vm-4f1a2c alpine-cloud  qemu     running  10.42.0.17   22-&gt;20000
+
+  Access vm-4f1a2c: 127.0.0.1:20000 -&gt; guest TCP 22</code></pre>
+      </div>
+      <div class="term">
+<pre><code>$ tt status
+Fleet Status
+  Hosts:   2/2 online
+  VMs:     3
+  Envs:    2
+  CPU:     8/64 cores
+  Memory:  6144/131072 MB
+  Disk:    122880/4000000 MB</code></pre>
+      </div>
+    </div>
+    <p class="muted">
+      The full walkthrough, including host registration and image creation, is in the
+      <a href="https://github.com/TTstack/TTstack#quick-start-one-linuxsystemd-host">README quick start</a>.
+    </p>
+  </section>
+
+  <section id="engines">
+    <h2>Three engines, one interface</h2>
+    <div class="grid">
+      <article class="card">
+        <h3>QEMU/KVM</h3>
+        <p>
+          Full VMs from cloud images, with root SSH key injection and virtual-disk
+          growth at creation.
+        </p>
+        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md">Guest images and access &rarr;</a></p>
+      </article>
+      <article class="card">
+        <h3>Firecracker</h3>
+        <p>
+          MicroVMs under jailer with per-VM resource limits, a prepared kernel and
+          rootfs, and orderly shutdown before forced termination.
+        </p>
+        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md#firecracker-guest-configuration">Firecracker setup &rarr;</a></p>
+      </article>
+      <article class="card">
+        <h3>Docker/Podman</h3>
+        <p>
+          Containers from images that provide a long-running default command,
+          publishing the application ports you ask for.
+        </p>
+        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md">Container images &rarr;</a></p>
+      </article>
+    </div>
+  </section>
+
+  <section id="design">
+    <h2>Small by design</h2>
+    <ul class="points">
+      <li>
+        <strong>One controller, no extra infrastructure.</strong>
+        No message queue and no database server are required; the controller and each
+        agent keep their state in SQLite.
+      </li>
+      <li>
+        <strong>A single Rust workspace.</strong>
+        <code>tt</code> for the command line, <code>tt-ctl</code> as the controller,
+        <code>tt-agent</code> per host, and shared models, engines, storage and
+        networking behind them.
+      </li>
+      <li>
+        <strong>Linux x86_64 hosts.</strong>
+        QEMU/KVM, Firecracker and Docker/Podman are the supported engines; the host
+        agent requires Linux.
+      </li>
+      <li>
+        <strong>Lifecycle before convenience.</strong>
+        Creation is persisted before it executes, so an interrupted request can be
+        inspected instead of blindly retried, and deletion that did not finish stays
+        visible.
+      </li>
+    </ul>
+    <p class="muted">
+      Supported scope, defaults and recovery semantics live in
+      <a href="https://github.com/TTstack/TTstack/blob/master/docs/compatibility.md">compatibility</a>
+      and the
+      <a href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md#lifecycle-and-recovery">API reference</a>,
+      not on this page.
+    </p>
+  </section>
+
+  <section id="architecture">
+    <h2>Architecture</h2>
+    <div class="term">
+<pre><code>tt CLI / Browser → HTTP → tt-ctl → HTTP → tt-agent (one per host)
+                          │                 │
+                     SQLite state      SQLite state
+                                       engines, disks, networking</code></pre>
+    </div>
+    <table>
+      <caption class="visually-hidden">TTstack components and their responsibilities</caption>
+      <thead>
+        <tr>
+          <th scope="col">Component</th>
+          <th scope="col">Responsibility</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>tt</code></td>
+          <td>CLI client, local image recipes, deployment over SSH</td>
+        </tr>
+        <tr>
+          <td><code>tt-ctl</code></td>
+          <td>Scheduling, environment lifecycle, fleet state and web dashboard</td>
+        </tr>
+        <tr>
+          <td><code>tt-agent</code></td>
+          <td>Host-local VM/container lifecycle, storage and networking</td>
+        </tr>
+        <tr>
+          <td><code>crates/core</code></td>
+          <td>Shared API models, engine, storage and networking implementations</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="docs">
+    <h2>Documentation</h2>
+    <div class="grid">
+      <a class="card link-card" href="https://github.com/TTstack/TTstack/blob/master/docs/deployment.md">
+        <h3>Deployment</h3>
+        <p>Dependencies, installation, fleet configuration and upgrades.</p>
+      </a>
+      <a class="card link-card" href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md">
+        <h3>Guest images</h3>
+        <p>Recipes, image formats, guest access, storage and networking.</p>
+      </a>
+      <a class="card link-card" href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md">
+        <h3>REST API</h3>
+        <p>Endpoints, request defaults, response and state semantics.</p>
+      </a>
+      <a class="card link-card" href="https://github.com/TTstack/TTstack/blob/master/docs/compatibility.md">
+        <h3>Compatibility</h3>
+        <p>Supported scope, CI coverage and the limits of live verification.</p>
+      </a>
+    </div>
+    <p class="muted">
+      Full index in
+      <a href="https://github.com/TTstack/TTstack/blob/master/docs/README.md">docs/README.md</a>.
+    </p>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <p>MIT licensed &middot; &copy; 2020 fh</p>
+    <p>
+      <a href="https://github.com/TTstack/TTstack/blob/master/LICENSE">License</a> &middot;
+      <a href="https://github.com/TTstack/TTstack/blob/master/README.md">README</a> &middot;
+      <a href="https://github.com/TTstack/TTstack">GitHub</a>
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>
