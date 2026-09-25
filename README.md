@@ -130,7 +130,7 @@ ports are allocated dynamically, so always read the actual mappings from `env sh
 | [Compatibility](docs/compatibility.md) | Supported scope, CI and limits of live verification |
 | [Linux validation, 2026-09-24](docs/live-validation-2026-09-24.md) | Results for a specific tested code revision |
 | [Fleet configuration template](tools/deploy.toml.example) | Commented distributed deployment configuration |
-| [Claude workflows](.claude/README.md) | Focused review, checks, commits and lightweight live validation |
+| [Claude workflows](.claude/README.md) | `/x-review`, `/x-check`, `/x-commit`, and `/x-live` entry points with their shared guides |
 
 `make help` lists development commands. `make doc` generates Rust source API
 documentation; the HTTP API is documented in the REST reference above.

@@ -39,8 +39,8 @@ files do not independently authorize deployment or changes to other repositories
 
 ## Live systems
 
-Use the [live-validation skill](.claude/skills/ttstack-live-validation/SKILL.md)
-when functional VM testing is needed on an authorized host. Prefer local unit
+Use the [live-validation skill](.claude/skills/x-live/SKILL.md) when functional VM
+testing is needed on an authorized host. Prefer local unit
 checks first. Keep remote tests bounded and isolated from existing services.
 For the authorized test machines, an approximate ceiling of 50% of host CPU and
 memory is a practical functional-test budget, accounting for existing load.
