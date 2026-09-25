@@ -212,6 +212,7 @@ h3 { margin: 0 0 8px; font-size: 1.05rem; }
 .card p:last-child { margin-bottom: 0; }
 
 .icon { display: block; width: 26px; height: 26px; margin-bottom: 12px; }
+.icon--neutral { color: var(--ink-2); }
 
 .link-card:hover { border-color: var(--accent); text-decoration: none; }
 .link-card:hover h3 { color: var(--accent-strong); }

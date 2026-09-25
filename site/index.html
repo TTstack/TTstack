@@ -22,6 +22,7 @@
       <a href="#usage">Usage</a>
       <a href="#lifecycle">Lifecycle</a>
       <a href="#engines">Engines</a>
+      <a href="#highlights">Highlights</a>
       <a href="#docs">Docs</a>
       <a href="https://github.com/TTstack/TTstack">GitHub</a>
     </nav>
@@ -321,32 +322,128 @@ Fleet Status
     </div>
   </section>
 
-  <section id="design">
-    <h2>Small by design</h2>
-    <ul class="points">
-      <li>
-        <strong>One controller, no extra infrastructure.</strong>
-        No message queue and no database server are required; the controller and each
-        agent keep their state in SQLite.
-      </li>
-      <li>
-        <strong>A single Rust workspace.</strong>
-        <code>tt</code> for the command line, <code>tt-ctl</code> as the controller,
-        <code>tt-agent</code> per host, and shared models, engines, storage and
-        networking behind them.
-      </li>
-      <li>
-        <strong>Linux x86_64 hosts.</strong>
-        QEMU/KVM, Firecracker and Docker/Podman are the supported engines; the host
-        agent requires Linux.
-      </li>
-      <li>
-        <strong>Lifecycle before convenience.</strong>
-        Creation is persisted before it executes, so an interrupted request can be
-        inspected instead of blindly retried, and deletion that did not finish stays
-        visible.
-      </li>
-    </ul>
+  <section id="highlights">
+    <h2>Highlights</h2>
+    <p class="muted">
+      What the lifecycle machinery does on its own, and the choices that keep the
+      stack small.
+    </p>
+    <div class="grid">
+      <article class="card">
+        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Automatic lifecycle management" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="13" cy="13" r="9"></circle>
+          <path d="M13 7.5V13l3.5 3"></path>
+        </svg>
+        <h3>Automatic lifecycle management</h3>
+        <p>
+          Environments expire on their own lifetime, and the controller then runs
+          cleanup on a loop &mdash; retrying what failed instead of forgetting it.
+        </p>
+        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md#lifecycle-and-recovery">Recovery semantics &rarr;</a></p>
+      </article>
+      <article class="card">
+        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Requests are persisted before they run" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M13 3l7.5 3v6c0 4.6-3.1 8.4-7.5 10-4.4-1.6-7.5-5.4-7.5-10V6z"></path>
+          <path d="M9.8 12.8l2.4 2.4 4.2-4.6"></path>
+        </svg>
+        <h3>Persisted before it runs</h3>
+        <p>
+          A create request is saved before any work starts, so a timeout or an
+          interrupted client never loses it. Inspect the name before you retry.
+        </p>
+      </article>
+      <article class="card">
+        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Self-healing reconciliation" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 13a9 9 0 0 1 15.4-6.4"></path>
+          <path d="M4 4.5V9h4.5"></path>
+          <path d="M22 13a9 9 0 0 1-15.4 6.4"></path>
+          <path d="M22 21.5V17h-4.5"></path>
+        </svg>
+        <h3>Self-healing reconciliation</h3>
+        <p>
+          Agent and controller reconcile on a loop: failed network restoration is
+          retried, late readiness clears stale errors, and process recovery uses its
+          own markers rather than deleting disks.
+        </p>
+      </article>
+      <article class="card">
+        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Placement by reservation" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="13" cy="13" r="8.5"></circle>
+          <circle cx="13" cy="13" r="3.5"></circle>
+          <path d="M13 2v4M13 20v4M2 13h4M20 13h4"></path>
+        </svg>
+        <h3>Placement by reservation</h3>
+        <p>
+          VM disks prefer eligible ZFS hosts and fall back to file storage. Scheduling
+          uses the CPU, memory and disk you reserved, not measured load, so placement
+          stays predictable.
+        </p>
+      </article>
+      <article class="card">
+        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Isolated and resource limited" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="5.5" y="11.5" width="15" height="10.5" rx="2.5"></rect>
+          <path d="M9 11.5V8.5a4 4 0 0 1 8 0v3"></path>
+        </svg>
+        <h3>Jailed, limited, isolatable</h3>
+        <p>
+          Firecracker runs under jailer with per-VM resource limits, and guests can be
+          denied outgoing traffic or isolated from the host network.
+        </p>
+        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md#firecracker-guest-configuration">Isolation setup &rarr;</a></p>
+      </article>
+      <article class="card">
+        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Disks retained across stop" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="13" cy="6.5" rx="8" ry="3.5"></ellipse>
+          <path d="M5 6.5v13c0 1.9 3.6 3.5 8 3.5s8-1.6 8-3.5v-13"></path>
+          <path d="M5 13c0 1.9 3.6 3.5 8 3.5s8-1.6 8-3.5"></path>
+        </svg>
+        <h3>Disks that survive a stop</h3>
+        <p>
+          Stopping releases execution resources but preserves disks and containers;
+          VM memory does not survive. ZFS zvols with snapshot clones, and file-backed
+          disks, sit behind the same interface.
+        </p>
+      </article>
+      <article class="card">
+        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Resize a stopped VM" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 10V4h6"></path>
+          <path d="M4 4l6.5 6.5"></path>
+          <path d="M22 16v6h-6"></path>
+          <path d="M22 22l-6.5-6.5"></path>
+        </svg>
+        <h3>Resize a stopped VM</h3>
+        <p>
+          CPU, memory and root disk can be changed on a stopped Firecracker VM
+          &mdash; grow-only, applied when it boots again.
+        </p>
+        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md#offline-resource-updates">Offline resource updates &rarr;</a></p>
+      </article>
+      <article class="card">
+        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="One controller with three interfaces" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M13 2.5l9 5v11l-9 5-9-5v-11z"></path>
+          <path d="M4 7.5l9 5 9-5"></path>
+          <path d="M13 12.5V23.5"></path>
+        </svg>
+        <h3>One controller, three interfaces</h3>
+        <p>
+          No message queue and no database server: the controller and each agent keep
+          their state in SQLite, and you drive the fleet from the CLI, the REST API or
+          the web dashboard.
+        </p>
+      </article>
+      <article class="card">
+        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="One Rust workspace on Linux hosts" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2.5" y="4.5" width="21" height="17" rx="2.5"></rect>
+          <path d="M7 10l3 3-3 3"></path>
+          <path d="M13 16h6"></path>
+        </svg>
+        <h3>One workspace, your hosts</h3>
+        <p>
+          <code>tt</code>, <code>tt-ctl</code>, <code>tt-agent</code> and the shared
+          core are a single Rust workspace, running on Linux x86_64 hosts.
+        </p>
+      </article>
+    </div>
     <p class="muted">
       Supported scope, defaults and recovery semantics live in
       <a href="https://github.com/TTstack/TTstack/blob/master/docs/compatibility.md">compatibility</a>
