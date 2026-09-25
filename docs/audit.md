@@ -1,17 +1,34 @@
-# TTstack audit disposition, 2026-09-25
+# TTstack audit
+
+> Auto-managed by `/x-review` and `/x-commit`; registry edits are not code writes.
+> Confirmed findings are appended under **Open**; a disproven finding is removed
+> rather than kept as backlog; resolved history belongs in Git and the dated
+> validation reports. Entry shape and severity: `.claude/docs/review-core.md` §5.
+>
+> The disposition below is this registry's initial record.
+
+## Open
+
+None.
+
+## Won't Fix
+
+None.
+
+## Disposition, 2026-09-25
 
 The original review covered `83b7e95`. Findings were rechecked against `6866295`
 and the working-tree changes described below. This document records dispositions,
 not a new behavioral specification. Maintained contracts are indexed in
-[docs/README.md](docs/README.md); test scope and live observations are in the
-[audit validation report](docs/audit-validation-2026-09-25.md).
+[README.md](README.md); test scope and live observations are in the
+[audit validation report](audit-validation-2026-09-25.md).
 
 The original 24 entries combined defects, design boundaries, unverified hypotheses,
 and incorrect conclusions. Unsupported claims have been removed. Original numbers
 below identify the substantiated portions; a resolved portion does not imply that
 all assertions in the original compound entry were correct.
 
-## Implemented corrections
+### Implemented corrections
 
 | Original finding | Confirmed problem and correction | Evidence |
 | --- | --- | --- |
@@ -39,7 +56,7 @@ all assertions in the original compound entry were correct.
 | 23 | QEMU images were checked too late, and equivalent key/port orderings broke idempotency. Non-container images and QEMU virtual sizes are checked before allocation; retained option sets are normalized. | Agent idempotency/input regressions and storage preflight source review. |
 | 24 | Database errors returned success status, offline hosts inflated schedulable totals, host failures lacked a persisted cause, and several diagnostics/UI details were inaccurate. Responses preserve status, totals use online hosts, host errors are exposed, capability diagnostics require the matching engine, and the dashboard escapes quotes and refuses framing. Guides identify relevant validation runs and required ext4 tools. | Controller/API/authentication tests and documentation/link review. |
 
-## Remaining limits and unverified hypotheses
+### Remaining limits and unverified hypotheses
 
 These are not claimed as fixed or promoted to proven incidents:
 
@@ -67,5 +84,5 @@ These are not claimed as fixed or promoted to proven incidents:
   deployment result is inferred from the Firecracker/file run. Older reports keep
   their original tested revisions and scopes.
 
-See the [validation report](docs/audit-validation-2026-09-25.md) for actual checks,
+See the [validation report](audit-validation-2026-09-25.md) for actual checks,
 resource bounds, cleanup, and the distinction between host tests and local tests.
