@@ -21,11 +21,24 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() {
     let cfg = Config::parse();
+    if let Some(key) = &cfg.api_key
+        && let Err(e) = ttcore::auth::parse_api_key(key)
+    {
+        eprintln!("Invalid API key: {e}");
+        std::process::exit(1);
+    }
 
     std::fs::create_dir_all(&cfg.data_dir).unwrap_or_else(|e| {
         eprintln!("Failed to create data dir {}: {e}", cfg.data_dir);
         std::process::exit(1);
     });
+
+    #[cfg(target_os = "linux")]
+    let _state_lock = ttcore::lock_state(&std::path::Path::new(&cfg.data_dir).join("service.lock"))
+        .unwrap_or_else(|e| {
+            eprintln!("Cannot lock state: {e}");
+            std::process::exit(1);
+        });
 
     let db_path = format!("{}/ctl.db", cfg.data_dir);
     let db = Db::open(&db_path).unwrap_or_else(|e| {
@@ -47,12 +60,15 @@ async fn main() {
     // Background task: periodic host health check
     let heartbeat_state = state.clone();
     tokio::spawn(async move {
-        let client = handler::agent_client(heartbeat_state.api_key.as_deref(), 5);
-        loop {
-            // Avoid racing a creation plan with an old host snapshot.
-            if let Ok(_operation) = heartbeat_state.operations.try_lock() {
-                handler::refresh_all_hosts(&heartbeat_state, &client).await;
+        let client = match handler::agent_client(heartbeat_state.api_key.as_deref(), 5) {
+            Ok(client) => client,
+            Err(e) => {
+                eprintln!("cannot initialize agent client: {e}");
+                std::process::exit(1);
             }
+        };
+        loop {
+            handler::refresh_all_hosts(&heartbeat_state, &client).await;
             tokio::time::sleep(std::time::Duration::from_secs(15)).await;
         }
     });
@@ -80,6 +96,7 @@ async fn main() {
             "/api/envs/{id}",
             get(handler::get_env).delete(handler::delete_env),
         )
+        .route("/api/hosts/{id}/detach", post(handler::detach_host))
         .route("/api/envs/{id}/stop", post(handler::stop_env))
         .route("/api/envs/{id}/start", post(handler::start_env))
         .route("/api/vms/{id}", get(handler::get_vm))
@@ -133,7 +150,7 @@ async fn expire_envs(state: &CtlState) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let ids = match state.lock_db().list_envs() {
+    let ids = match state.lock_db().recovery_envs() {
         Ok(envs) => envs
             .into_iter()
             .filter(|e| {
@@ -147,9 +164,19 @@ async fn expire_envs(state: &CtlState) {
             return;
         }
     };
+    let mut tasks = tokio::task::JoinSet::new();
+    let slots = Arc::new(tokio::sync::Semaphore::new(8));
     for id in ids {
-        if let Err((_, error)) = handler::expire_environment(state, &id).await {
-            eprintln!("[ctl] cleanup {id}: {error}");
-        }
+        let slots = slots.clone();
+        let state = state.clone();
+        tasks.spawn(async move {
+            let Ok(_slot) = slots.acquire_owned().await else {
+                return;
+            };
+            if let Err((_, error)) = handler::expire_environment(&state, &id).await {
+                eprintln!("[ctl] cleanup {id}: {error}");
+            }
+        });
     }
+    while tasks.join_next().await.is_some() {}
 }

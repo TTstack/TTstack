@@ -23,6 +23,8 @@ impl Db {
     /// has an older version.
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path).c(d!("open DB"))?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .c(d!("DB busy timeout"))?;
 
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -251,6 +253,38 @@ impl Db {
         )
     }
 
+    pub fn recovery_hosts(&self) -> Result<Vec<Host>> {
+        recovery_rows(&self.conn, "hosts")
+    }
+    pub fn recovery_envs(&self) -> Result<Vec<Env>> {
+        recovery_rows(&self.conn, "envs")
+    }
+
+    /// Explicitly forget an unreachable host, retaining an orphan report in the response.
+    pub fn detach_host(&self, id: &str) -> Result<Vec<Vm>> {
+        let vms = self.vms_by_host(id)?;
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .c(d!("detach transaction"))?;
+        for vm in &vms {
+            if let Some(mut env) = self.get_env(&vm.env_id)? {
+                env.vm_ids.retain(|id| !vms.iter().any(|v| &v.id == id));
+                env.state = EnvState::Failed;
+                env.error = Some(format!(
+                    "host {id} detached; guests may still exist on that host"
+                ));
+                self.put_env(&env)?;
+            }
+        }
+        self.conn
+            .execute("DELETE FROM vms WHERE host_id=?1", [id])
+            .c(d!("detach VM tracking"))?;
+        self.remove_host(id)?;
+        tx.commit().c(d!("commit detach"))?;
+        Ok(vms)
+    }
+
     // ── Aggregate Status ────────────────────────────────────────────
 
     pub fn fleet_status(&self) -> Result<FleetStatus> {
@@ -263,7 +297,7 @@ impl Db {
         let (mut cpu_t, mut cpu_u) = (0u32, 0u32);
         let (mut mem_t, mut mem_u) = (0u32, 0u32);
         let (mut disk_t, mut disk_u) = (0u32, 0u32);
-        for h in &hosts {
+        for h in hosts.iter().filter(|h| h.state == HostState::Online) {
             cpu_t += h.resource.cpu_total;
             cpu_u += h.resource.cpu_used;
             mem_t += h.resource.mem_total;
@@ -288,6 +322,26 @@ impl Db {
 }
 
 // ── Generic Query Helpers ───────────────────────────────────────────
+
+fn recovery_rows<T: serde::de::DeserializeOwned>(conn: &Connection, table: &str) -> Result<Vec<T>> {
+    let mut stmt = conn
+        .prepare(&format!("SELECT id,data FROM {table}"))
+        .c(d!("prepare recovery"))?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .c(d!("read recovery"))?;
+    let mut good = Vec::new();
+    for row in rows {
+        let (id, data) = row.c(d!("recovery row"))?;
+        match serde_json::from_str(&data) {
+            Ok(record) => good.push(record),
+            Err(_) => {
+                eprintln!("[ctl] unreadable {table} record {id}; retained for operator recovery")
+            }
+        }
+    }
+    Ok(good)
+}
 
 fn query_one<T: serde::de::DeserializeOwned, P: rusqlite::Params>(
     conn: &Connection,
@@ -335,6 +389,8 @@ mod tests {
 
     fn make_host(id: &str) -> Host {
         Host {
+            error: None,
+            image_sizes: Default::default(),
             capabilities: vec![],
             id: id.into(),
             addr: format!("{id}:9100"),
@@ -545,7 +601,7 @@ mod tests {
         assert_eq!(status.hosts_online, 1);
         assert_eq!(status.total_envs, 1);
         assert_eq!(status.total_vms, 1);
-        assert_eq!(status.cpu_total, 16); // 8+8
+        assert_eq!(status.cpu_total, 8); // Only online capacity is usable.
         assert_eq!(status.cpu_used, 2);
     }
 }

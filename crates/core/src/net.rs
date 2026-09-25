@@ -39,15 +39,56 @@ pub fn vm_ip(index: u32) -> String {
 
 /// TAP device name for a VM.
 ///
-/// Uses a hash of the VM ID to guarantee uniqueness even for long IDs.
+/// Uses a stable 48-bit hash of the VM ID, including long IDs.
 /// Result is always <= 15 chars (IFNAMSIZ).
 pub fn tap_name(vm_id: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    vm_id.hash(&mut h);
-    let hash = h.finish();
-    // "tt-" + 12 hex chars = 15 chars exactly
+    // Freeze the original SipHash-1-3 (zero keys, UTF-8 plus str's 0xff sentinel).
+    // Changing the algorithm would orphan existing taps, jails and firewall tables.
+    let mut bytes = vm_id.as_bytes().to_vec();
+    bytes.push(0xff);
+    let mut v = [
+        0x736f6d6570736575u64,
+        0x646f72616e646f6du64,
+        0x6c7967656e657261u64,
+        0x7465646279746573u64,
+    ];
+    fn round(v: &mut [u64; 4]) {
+        v[0] = v[0].wrapping_add(v[1]);
+        v[1] = v[1].rotate_left(13);
+        v[1] ^= v[0];
+        v[0] = v[0].rotate_left(32);
+        v[2] = v[2].wrapping_add(v[3]);
+        v[3] = v[3].rotate_left(16);
+        v[3] ^= v[2];
+        v[0] = v[0].wrapping_add(v[3]);
+        v[3] = v[3].rotate_left(21);
+        v[3] ^= v[0];
+        v[2] = v[2].wrapping_add(v[1]);
+        v[1] = v[1].rotate_left(17);
+        v[1] ^= v[2];
+        v[2] = v[2].rotate_left(32);
+    }
+    let mut chunks = bytes.chunks_exact(8);
+    for chunk in &mut chunks {
+        let mut word = [0; 8];
+        word.copy_from_slice(chunk);
+        let m = u64::from_le_bytes(word);
+        v[3] ^= m;
+        round(&mut v);
+        v[0] ^= m;
+    }
+    let mut last = (bytes.len() as u64) << 56;
+    for (i, byte) in chunks.remainder().iter().enumerate() {
+        last |= u64::from(*byte) << (8 * i);
+    }
+    v[3] ^= last;
+    round(&mut v);
+    v[0] ^= last;
+    v[2] ^= 0xff;
+    for _ in 0..3 {
+        round(&mut v);
+    }
+    let hash = v[0] ^ v[1] ^ v[2] ^ v[3];
     format!("tt-{:012x}", hash & 0xFFFF_FFFF_FFFF)
 }
 
@@ -60,13 +101,20 @@ mod platform {
     use super::*;
 
     pub fn setup_bridge() -> Result<()> {
-        if bridge_exists()? {
-            std::fs::write("/proc/sys/net/ipv4/ip_forward", "1").c(d!("enable ip_forward"))?;
-            return Ok(());
+        if !bridge_exists()? {
+            run(&["ip", "link", "add", BRIDGE_NAME, "type", "bridge"])?;
         }
-
-        run(&["ip", "link", "add", BRIDGE_NAME, "type", "bridge"])?;
-        run(&["ip", "addr", "add", BRIDGE_CIDR, "dev", BRIDGE_NAME])?;
+        let output = Command::new("ip")
+            .args(["-j", "-d", "link", "show", "dev", BRIDGE_NAME])
+            .bounded_output()
+            .c(d!("inspect bridge"))?;
+        let links: Vec<serde_json::Value> =
+            serde_json::from_slice(&output.stdout).c(d!("bridge metadata"))?;
+        if !output.status.success() || !links.iter().any(|v| v["linkinfo"]["info_kind"] == "bridge")
+        {
+            return Err(eg!("tt0 exists but is not a bridge"));
+        }
+        run(&["ip", "addr", "replace", BRIDGE_CIDR, "dev", BRIDGE_NAME])?;
         run(&["ip", "link", "set", BRIDGE_NAME, "up"])?;
 
         // Enable IP forwarding
@@ -102,6 +150,37 @@ mod platform {
         Ok(())
     }
 
+    pub fn set_tap_owner(vm_id: &str, uid: u32) -> Result<()> {
+        use nix::libc;
+        use std::os::fd::AsRawFd;
+        let tap = tap_name(vm_id);
+        if !link_exists(&tap)? {
+            return create_tap_owned(vm_id, Some(uid));
+        }
+        let tun = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/net/tun")
+            .c(d!("open stopped TAP"))?;
+        // SAFETY: zero is valid for ifreq; the bounded name is NUL-terminated.
+        let mut request: libc::ifreq = unsafe { std::mem::zeroed() };
+        for (out, byte) in request.ifr_name.iter_mut().zip(tap.bytes()) {
+            *out = byte as libc::c_char;
+        }
+        request.ifr_ifru.ifru_flags = (libc::IFF_TAP | libc::IFF_NO_PI) as libc::c_short;
+        // ip tuntap add uses IFF_TUN_EXCL, so it cannot reopen a persistent TAP.
+        // Only stopped VMs use this path; the kernel rejects a queue still in use.
+        // SAFETY: fd and ifreq pointer remain valid for the ioctl, with Linux TAP flags.
+        if unsafe { libc::ioctl(tun.as_raw_fd(), libc::TUNSETIFF, &mut request) } < 0 {
+            return Err(std::io::Error::last_os_error()).c(d!("open persistent TAP queue"));
+        }
+        // SAFETY: TUNSETOWNER takes an integer uid; this does not delete the device.
+        if unsafe { libc::ioctl(tun.as_raw_fd(), libc::TUNSETOWNER, uid) } < 0 {
+            return Err(std::io::Error::last_os_error()).c(d!("set TAP owner"));
+        }
+        Ok(())
+    }
+
     pub fn destroy_tap(vm_id: &str) -> Result<()> {
         let tap = tap_name(vm_id);
         if link_exists(&tap)? {
@@ -111,40 +190,21 @@ mod platform {
     }
 
     pub fn setup_nat() -> Result<()> {
-        nft(&format!("add table ip {NFT_TABLE}"))?;
-
+        // One transaction; preserve per-VM DNAT and denylist elements across restarts.
         nft(&format!(
-            "add chain ip {NFT_TABLE} prerouting {{ type nat hook prerouting priority -100; policy accept; }}"
-        ))?;
-
-        nft(&format!(
-            "add chain ip {NFT_TABLE} postrouting {{ type nat hook postrouting priority 100; policy accept; }}"
-        ))?;
-
-        // Flush both chains on startup to avoid duplicate/stale rules.
-        // Per-VM port forwards in prerouting will be restored from the
-        // database by the agent's recovery loop.
-        nft(&format!("flush chain ip {NFT_TABLE} postrouting"))?;
-        nft(&format!("flush chain ip {NFT_TABLE} prerouting"))?;
-        nft(&format!(
-            "add set ip {NFT_TABLE} denylist {{ type ipv4_addr; }}"
-        ))?;
-        nft(&format!(
-            "add chain ip {NFT_TABLE} forward {{ type filter hook forward priority 0; policy accept; }}"
-        ))?;
-        nft(&format!("flush chain ip {NFT_TABLE} forward"))?;
-        nft(&format!(
-            "add rule ip {NFT_TABLE} forward ct direction reply accept"
-        ))?;
-        nft(&format!(
-            "add rule ip {NFT_TABLE} forward ip saddr @denylist drop"
-        ))?;
-
-        nft(&format!(
-            "add rule ip {NFT_TABLE} postrouting ip saddr 10.10.0.0/16 masquerade"
-        ))?;
-
-        Ok(())
+            r#"
+add table ip {NFT_TABLE}
+add chain ip {NFT_TABLE} prerouting {{ type nat hook prerouting priority -100; policy accept; }}
+add chain ip {NFT_TABLE} postrouting {{ type nat hook postrouting priority 100; policy accept; }}
+add set ip {NFT_TABLE} denylist {{ type ipv4_addr; }}
+add chain ip {NFT_TABLE} forward {{ type filter hook forward priority 0; policy accept; }}
+flush chain ip {NFT_TABLE} postrouting
+flush chain ip {NFT_TABLE} forward
+add rule ip {NFT_TABLE} forward ct direction reply accept
+add rule ip {NFT_TABLE} forward ip saddr @denylist drop
+add rule ip {NFT_TABLE} postrouting ip saddr 10.10.0.0/16 masquerade
+"#
+        ))
     }
 
     pub fn add_port_forward(host_port: u16, vm_ip_addr: &str, guest_port: u16) -> Result<()> {
@@ -153,7 +213,29 @@ mod platform {
         ))
     }
 
+    fn object_exists(kind: &str, name: &str) -> Result<bool> {
+        let output = Command::new("nft")
+            .args(["-j", "list", "ruleset"])
+            .output_timeout(std::time::Duration::from_secs(10))
+            .c(d!("list firewall objects"))?;
+        if !output.status.success() {
+            return Err(eg!("cannot inspect firewall objects"));
+        }
+        let json: serde_json::Value =
+            serde_json::from_slice(&output.stdout).c(d!("firewall objects"))?;
+        Ok(json["nftables"].as_array().is_some_and(|entries| {
+            entries.iter().any(|e| {
+                e[kind]["family"] == "ip"
+                    && e[kind]["table"] == NFT_TABLE
+                    && e[kind]["name"] == name
+            })
+        }))
+    }
+
     pub fn remove_port_forwards(vm_ip_addr: &str) -> Result<()> {
+        if !object_exists("chain", "prerouting")? {
+            return Ok(());
+        }
         let output = Command::new("nft")
             .args(["-a", "list", "chain", "ip", NFT_TABLE, "prerouting"])
             .bounded_output()
@@ -206,6 +288,9 @@ mod platform {
         Ok(())
     }
     pub fn allow_outgoing(vm_ip_addr: &str) -> Result<()> {
+        if !object_exists("set", "denylist")? {
+            return Ok(());
+        }
         if is_denied(vm_ip_addr)? {
             nft(&format!(
                 "delete element ip {NFT_TABLE} denylist {{ {vm_ip_addr} }}"
@@ -214,7 +299,7 @@ mod platform {
         Ok(())
     }
 
-    fn link_exists(name: &str) -> Result<bool> {
+    pub(super) fn link_exists(name: &str) -> Result<bool> {
         let output = Command::new("ip")
             .args(["-j", "link", "show"])
             .output_timeout(std::time::Duration::from_secs(10))
@@ -288,11 +373,16 @@ pub fn destroy_tap(vm_id: &str) -> Result<()> {
     platform::destroy_tap(vm_id)
 }
 
+#[cfg(target_os = "linux")]
+pub fn tap_exists(vm_id: &str) -> Result<bool> {
+    platform::link_exists(&tap_name(vm_id))
+}
+
 /// Called only before launching a stopped Firecracker, never during live recovery.
 #[cfg(target_os = "linux")]
 pub fn prepare_jailed_tap(vm_id: &str, uid: u32) -> Result<()> {
-    platform::destroy_tap(vm_id)?;
-    platform::create_tap_owned(vm_id, Some(uid))
+    // Reattach the unused persistent tap to change its owner without deleting it.
+    platform::set_tap_owner(vm_id, uid)
 }
 
 #[cfg(target_os = "linux")]
@@ -351,6 +441,19 @@ mod tests {
                 (1..=254).contains(&lo),
                 "invalid lo octet {lo} at index {i}"
             );
+        }
+    }
+
+    #[test]
+    fn tap_names_preserve_pre_upgrade_host_objects() {
+        for (id, expected) in [
+            ("", "tt-6ea523c53def"),
+            ("vm1", "tt-e9e453b4d5a5"),
+            ("vm2", "tt-fc7c4d3fbec3"),
+            ("83b7e95-test-vm", "tt-ab2cb9caf2f1"),
+            ("long-id-abcdefghijklmnopqrstuvwxyz", "tt-75e5d7552606"),
+        ] {
+            assert_eq!(tap_name(id), expected);
         }
     }
 

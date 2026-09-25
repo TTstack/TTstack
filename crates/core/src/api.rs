@@ -37,6 +37,14 @@ pub struct CreateVmResp {
 /// Information reported by an agent about itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
+    /// VM rows from the same resource snapshot; old agents omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vms: Option<Vec<Vm>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// Base logical disk capacity in MiB; absent entries are unverified.
+    #[serde(default)]
+    pub image_sizes: std::collections::BTreeMap<String, u32>,
     #[serde(default)]
     pub capabilities: Vec<String>,
     pub host_id: String,

@@ -69,11 +69,43 @@ pub(super) fn grow_ext4(path: &Path) -> Result<()> {
 
 impl ImageStore for FileStore {
     fn clone_image(&self, base: &str, target: &str) -> Result<()> {
+        // Restrict the destination before copying; cp -a would preserve public modes.
+        let metadata = std::fs::symlink_metadata(base).c(d!("inspect base image"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+            if metadata.is_dir() {
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(target)
+                    .c(d!("private clone directory"))?;
+            } else if metadata.is_file() {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(target)
+                    .c(d!("private clone disk"))?;
+            } else {
+                return Err(eg!("base image must be a regular file or directory"));
+            }
+        }
+        let source = if metadata.is_dir() {
+            format!("{base}/.")
+        } else {
+            base.to_owned()
+        };
         let mut cmd = std::process::Command::new("cp");
         #[cfg(target_os = "linux")]
-        cmd.args(["--reflink=auto", "-a", base, target]);
+        cmd.args([
+            "--reflink=auto",
+            "-R",
+            "--no-preserve=mode,ownership",
+            &source,
+            target,
+        ]);
         #[cfg(not(target_os = "linux"))]
-        cmd.args(["-a", base, target]);
+        cmd.args(["-R", &source, target]);
         let output = cmd.bounded_output().c(d!("cp image"))?;
 
         if !output.status.success() {
@@ -120,10 +152,12 @@ impl ImageStore for FileStore {
         let p = Path::new(clone_path);
         if p.is_dir() {
             if let Ok(entries) = std::fs::read_dir(p) {
-                let files: Vec<_> = entries
+                let mut files: Vec<_> = entries
                     .filter_map(|e| e.ok())
                     .filter(|e| e.path().is_file())
                     .collect();
+                files.sort_by_key(|f| f.file_name());
+                // Deterministic selection is preserved across cold starts.
                 // Prefer .qcow2 file
                 if let Some(qcow2) = files
                     .iter()
@@ -198,6 +232,43 @@ impl ImageStore for FileStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn public_base_images_produce_private_clones() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        for directory in [false, true] {
+            let base = dir
+                .path()
+                .join(if directory { "base-dir" } else { "base-file" });
+            let target = dir
+                .path()
+                .join(if directory { "clone-dir" } else { "clone-file" });
+            if directory {
+                std::fs::create_dir(&base).unwrap();
+                std::fs::write(base.join("disk.qcow2"), b"guest").unwrap();
+            } else {
+                std::fs::write(&base, b"guest").unwrap();
+            }
+            std::fs::set_permissions(
+                &base,
+                std::fs::Permissions::from_mode(if directory { 0o755 } else { 0o644 }),
+            )
+            .unwrap();
+            FileStore
+                .clone_image(base.to_str().unwrap(), target.to_str().unwrap())
+                .unwrap();
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().permissions().mode() & 0o077,
+                0
+            );
+            assert_ne!(
+                std::fs::metadata(&base).unwrap().permissions().mode() & 0o077,
+                0
+            );
+        }
+    }
 
     #[test]
     fn ext4_growth_preserves_files_and_rejects_shrinking() {

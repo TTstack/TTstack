@@ -21,14 +21,14 @@ Linux agents run as root. Install only the dependencies needed for your engine:
 | QEMU/KVM | Working `/dev/kvm`, `qemu-system-x86_64`, `qemu-img`, `genisoimage` or `mkisofs` |
 | QEMU and Firecracker networking | Full `iproute2`, `nftables`, kernel TUN/TAP support; QEMU also uses `vhost_net` |
 | Firecracker | Working `/dev/kvm`, matching `firecracker` and `jailer`, cgroup v2 with CPU/memory/PID controllers, `curl`, compatible kernel/rootfs; `mkfs.ext4` for config drives; `e2fsck` and `resize2fs` for rootfs growth (all from `e2fsprogs`) |
-| Docker | Working Docker daemon or Podman runtime; the agent selects Docker when its binary is installed |
+| Docker | Working Docker daemon or Podman runtime; the agent selects Docker when `docker --version` succeeds |
 | QEMU/Firecracker image recipes | `curl`; Firecracker additionally uses `dd`, `mkfs.ext4`, loop mount/unmount and `tar` |
 | Zvol storage | Existing ZFS pool/datasets and `zfs`; provision these manually |
 
 Docker uses its own networking and does not need TTstack's TAP/nftables setup.
 Engine detection is not a complete health check: permissions, daemon availability
-and guest compatibility still matter. Avoid installing a broken Docker binary next
-to a working Podman installation; the agent will select Docker.
+and guest compatibility still matter. A successful `docker --version` selects
+Docker even if its daemon is unavailable; it does not then fall back to Podman.
 
 New Firecracker processes always run through jailer; there is no silent unjailed
 fallback. Existing unjailed processes remain queryable/stoppable during upgrade;
@@ -76,10 +76,12 @@ path if `/opt/ttstack/bin` is not in sudo's PATH.
 The key is reused from `/opt/ttstack/etc/api-key` (mode 0600). On first deployment,
 an existing service key is imported before a new key is generated. Conflicting
 legacy service keys cause an error instead of an automatic rotation. Controller
-deployment prints the key; an agent-only deployment stores it but does not print it.
+deployment reports the protected key path. Neither role prints key material.
 
 ```bash
-/opt/ttstack/bin/tt config 127.0.0.1:9200 --api-key 'PASTE_DEPLOYMENT_KEY_HERE'
+export TT_API_KEY="$(sudo cat /opt/ttstack/etc/api-key)"
+/opt/ttstack/bin/tt config 127.0.0.1:9200
+unset TT_API_KEY
 /opt/ttstack/bin/tt host add 127.0.0.1:9100
 ```
 
@@ -101,7 +103,11 @@ cp tools/deploy.toml.example deploy.toml
 ```
 
 The [configuration template](../tools/deploy.toml.example) documents every supported
-field. `[general]`, `[controller]` and `[[agents]]` are optional sections; provide
+field. Remote filesystem paths must be absolute and use letters, digits, `/`,
+`.`, `_` or `-`, without `..` components; whitespace, shell metacharacters and
+systemd specifiers are rejected before contacting hosts. Dataset names use the
+same character set but are relative ZFS names. Listen values must be IP:port.
+`[general]`, `[controller]` and `[[agents]]` are optional sections; provide
 at least one role to deploy. Each included controller/agent needs `host`.
 
 - `[general].release_dir` and per-agent `release_dir` refer to **local** binary
@@ -131,11 +137,13 @@ with neither init system is an unmanaged background process, not a persistent
 service setup. Deployment targets must be Linux hosts.
 
 Deployment does **not** register agents or distribute images. Configure the CLI
-with the printed controller address/key, prepare images on the relevant hosts,
+with the controller address and the protected sidecar key, prepare images on the relevant hosts,
 then register each agent, for example:
 
 ```bash
-./target/release/tt config 10.0.0.1:9200 --api-key 'PASTE_DEPLOYMENT_KEY_HERE'
+export TT_API_KEY="$(cat deploy.toml.api-key)"
+./target/release/tt config 10.0.0.1:9200
+unset TT_API_KEY
 ./target/release/tt host add 10.0.0.2:9100
 ./target/release/tt host list
 ```
@@ -154,7 +162,9 @@ then register each agent, for example:
 | `~/.ttconfig` | CLI controller address and optional API key |
 
 Direct `tt-agent`/`tt-ctl` starts do not load the deployment environment files
-automatically. Set `TT_API_KEY` or pass `--api-key` to both services. Run each
+automatically. Set a nonempty printable ASCII `TT_API_KEY` on both services.
+An unset key still permits unauthenticated manual operation; a listener on all
+interfaces is reachable from non-isolated guests as well as the management network. Run each
 binary with `--help` for the full options. Agent defaults are file storage,
 `0.0.0.0:9100`, auto-detected CPU/memory, and a 204800 MiB disk budget. The controller
 listens on `0.0.0.0:9200`. Unlike TOML, the agent's `--disk-total` takes an integer
@@ -165,6 +175,12 @@ in MiB, without a `G` suffix. Distributed configuration does not expose an agent
 
 Rebuild and repeat the same deployment command to replace binaries and restart
 services while keeping data and keys. Upgrade the controller and agents together.
+Deployment replaces generated service units; put operator customizations in
+`systemctl edit tt-agent` drop-ins, which deployment leaves in place. Existing
+`RequiresMountsFor=` and `ExecStartPre=...mountpoint...` guards in a generated unit
+are migrated into `90-ttstack-mounts.conf`. Guest disks and jail ownership are not
+recursively changed. Remote scripts travel through SSH stdin and binaries use
+private random staging directories with SHA-256 transfer verification.
 Schema changes are applied on startup; older binaries reject a newer schema.
 For rollback, retain matching binaries and consistent backups of controller/agent
 databases and guest storage, taken while services/workloads are stopped.
@@ -188,3 +204,9 @@ to pretend that an existing workload uses a different engine.
 
 The retained engine names and state schema are unchanged. Ordinary Linux
 workspaces keep their identities, disks and lifecycle state through an upgrade.
+
+CLI credentials are written atomically with mode 0600 and require `HOME`.
+Reconfiguring the same address without a key preserves its saved key. Changing
+addresses does not forward an old controller's credentials: supply `TT_API_KEY`
+for the new controller. A `--server` override reuses saved credentials only when
+its address exactly matches the configured one.

@@ -18,11 +18,12 @@ directory for every document category.
 | Inspect Firecracker application cold-start entropy | [Cold-start validation, 2026-09-24](firecracker-entropy-validation-2026-09-24.md) |
 | Inspect dedicated ZFS host and Firecracker restart evidence | [Restart validation, 2026-09-24](firecracker-restart-validation-2026-09-24.md) |
 | Inspect Firecracker zvol lifecycle and file fallback | [Zvol validation, 2026-09-24](firecracker-zvol-validation-2026-09-24.md) |
-| Review design and implementation gaps at one revision | [Audit, 2026-09-25](../audit.md) |
+| Review audit dispositions and remaining limits | [Audit, 2026-09-25](../audit.md) |
+| Inspect audit regression and recovery evidence | [Audit validation, 2026-09-25](audit-validation-2026-09-25.md) |
 | Configure distributed deployment | [Fleet template](../tools/deploy.toml.example) |
 | Contribute or choose an AI workflow | [Repository instructions](../AGENTS.md) and [Claude workflows](../.claude/README.md) |
 
 Guides describe maintained behavior. Reports describe only their recorded code,
-hosts, tests, and limits. The audit is a point-in-time review of one revision,
+hosts, tests, and limits. The audit records a point-in-time review and its dispositions,
 not a behavior guide. Keep those roles distinct and link to the canonical
 guide instead of copying its defaults into workflow instructions.

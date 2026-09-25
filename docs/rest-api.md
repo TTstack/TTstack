@@ -30,10 +30,11 @@ for every failure. A transport timeout does not mean an operation was cancelled.
 | Method | Path | Success payload / behavior |
 |---|---|---|
 | GET | `/` | Dashboard HTML |
-| POST | `/api/hosts` | `Host`, HTTP 201; body `{"addr":"10.0.0.2:9100"}` |
+| POST | `/api/hosts` | `Host`, HTTP 201 (200 for repeat registration); body `{"addr":"10.0.0.2:9100"}` |
 | GET | `/api/hosts` | `Host[]` |
 | GET | `/api/hosts/{id}` | `Host` |
 | DELETE | `/api/hosts/{id}` | No payload; refuses removal while any VM is tracked on it |
+| POST | `/api/hosts/{id}/detach` | `Vm[]` orphan report; forgets an offline host without stopping or deleting its guests |
 | POST | `/api/envs` | `EnvDetail`, HTTP 202 after persisting the creation plan |
 | GET | `/api/envs` | `Env[]` |
 | GET | `/api/envs/{id}` | `EnvDetail` |
@@ -45,8 +46,13 @@ for every failure. A transport timeout does not mean an operation was cancelled.
 | GET | `/api/status` | `FleetStatus`: host/environment/VM counts and resource reservations |
 
 Host addresses must be `host:port`, without a URL scheme or path. Registration
-contacts the agent; there is no automatic host discovery. Mutations are serialized;
-conflicting requests can return 409. GET of a missing host, environment or VM
+contacts the agent with the shared bearer key; register only an address whose
+ownership you have verified through your trusted management network or tunnel.
+An ID check cannot authenticate an untrusted HTTP server. There is no automatic
+host discovery. Re-registering the same ID/address is idempotent; conflicting ID
+or address bindings are rejected. Mutations serialize per environment; unrelated
+environments and heartbeat refresh can progress concurrently. Conflicting requests
+for the same environment return 409. GET of a missing host, environment or VM
 returns 404. Invalid environment parameters return 400, duplicate names 409, and
 unschedulable requests 422. Agent operation failures may surface as 502.
 
@@ -71,7 +77,7 @@ Each `VmSpec` accepts:
 | `cpu` | integer | Positive vCPU count; default 2 |
 | `mem` | integer | Positive memory in MiB; default 1024 |
 | `disk` | integer | Disk size in MiB. QEMU defaults to 40960; Firecracker defaults to the base rootfs size and allows creation-time ext4 growth. Omit for other engines |
-| `ports` | integer[] | TCP guest ports to expose; default empty; port 22 is added for QEMU |
+| `ports` | integer[] | Up to 256 TCP guest-port entries; default empty; port 22 is added for QEMU |
 | `deny_outgoing` | boolean | Default false; block routed outgoing initiation, not host/guest isolation; rejected for Docker |
 | `isolated_network` | boolean | Default false; Linux QEMU/Firecracker only; block peers, guest-initiated host access, private/link-local destinations and IPv6; allow public IPv4 egress and replies to inbound connections |
 | `guest_config` | object | Default `{}`; Firecracker only; up to 32 simple file names mapped to UTF-8 strings, 64 KiB total names/content; attached as a read-only config drive |
@@ -121,14 +127,29 @@ includes stopped/failed/deleting records. Docker disk usage is not accounted or
 quota-enforced; Firecracker reserves its requested rootfs size (or the image size when omitted) plus 4 MiB when a
 configuration drive is present. Firecracker memory reservations include 128 MiB
 of VMM headroom in addition to the guest's `mem`; stopped guests release both.
+The scheduler uses reported base-image sizes and includes configuration disks in
+creation plans. An omitted Firecracker disk requires an agent that reports that
+image's size; otherwise specify a size or upgrade the agent. Explicit sizes below
+a known base size are rejected before placement. Agents recheck before allocation.
+Docker memory-plus-swap is capped at the requested RAM. Host budgets still need
+headroom for the OS, QEMU overhead and other services. Fleet capacity totals
+include only online hosts; tracked VM counts also include offline allocations.
 
-Agent `/api/info` returns `host_id`, `resource`, `engines`, `storage`, `images` and
-`capabilities`. Linux agents advertise `guest_config`, `isolated_network`,
-`firecracker_jailer`, `firecracker_disk_resize` and `firecracker_zvol`; hosts retain
-these fields. The controller rejects placement
-on older agents that do not advertise the required capabilities. Upgrade agents
-before requesting these features. Reported capabilities describe implementation
-support, not a substitute for host prerequisites or application readiness checks.
+Agent `/api/info` returns `host_id`, `resource`, `engines`, `storage`, `images`,
+`image_sizes`, `capabilities`, `vms` and optional `warnings`. VM rows and resources
+come from the same snapshot; older agents without `vms` use the legacy list read.
+Known allocations missing from a snapshot retain conservative reservations;
+untracked agent VMs are counted and logged, never silently adopted. Hosts retain
+image sizes and a nullable `error` describing the latest probe failure/warnings.
+
+Capabilities are gated on startup prerequisite probes: KVM/tool availability,
+nft/ip tooling, cgroup v2 controllers and relevant disk tools. Runtime permissions,
+daemon health and guest compatibility can still change or fail. Upgrade agents
+before requesting capabilities they do not advertise. A transient catalog failure
+returns an empty catalog instead of declaring every existing guest offline.
+Unreadable VM rows retain their raw data and close new admission; healthy rows
+remain available for background recovery and targeted deletion. Strict inventory
+reads report malformed state rather than silently discarding it.
 VM placement prefers eligible ZFS hosts, then file hosts; see the
 [storage policy](guest-images.md#storage). This does not migrate existing VMs.
 
@@ -163,18 +184,31 @@ immediate engine probes, and end-to-end freshness is not guaranteed within 15 se
   and recreate failed environments after correcting the cause. A controller crash
   can leave creation failed; there is no automatic re-creation of failed workloads.
 - **Stop/start:** on Linux, stop releases execution resources while preserving
-  disks/containers; start boots/restarts them. VM memory is not retained. QEMU tries
-  guest shutdown before termination. Firecracker on x86_64 sends `SendCtrlAltDel`,
+  disks/containers; start boots/restarts them and reserves capacity before
+  concurrent placement. VM memory is not retained. QEMU tries
+  guest shutdown for about ten seconds before termination. Firecracker on x86_64 sends `SendCtrlAltDel`,
   waits up to 30 seconds, then terminates on failure/timeout and logs the fallback.
   The image must support orderly shutdown; a successful stop alone does not prove
   that the guest flushed its data. Stopping a paused Firecracker first resumes it.
-  Save work before stopping. Partial failures are reported instead of hidden.
+  Resume failure also falls back to forced termination. Save work before stopping. Partial failures are reported instead of hidden.
 - **Delete:** failed cleanup returns an error and retains remaining records as
   `deleting`. The controller retries, or the client can repeat DELETE. A missing
-  agent does not make its resources disappear from tracking.
+  agent does not make its resources disappear from tracking. Offline hosts are
+  retained without repeatedly waiting on mutation timeouts. Confirmed process
+  termination gates disk removal; later cleanup steps are attempted independently,
+  with any remaining errors retained for retry.
 - **Expiry:** the controller checks every 60 seconds and retries cleanup failures.
   Expiry is a cleanup trigger, not an exact termination deadline. Cleanup needs a
   running controller, reachable agents and time for queued operations.
+- **Detach:** `tt host detach ID` is an explicit escape hatch for an offline host.
+  It returns the tracked VM records as an orphan report, releases controller
+  reservations and removes the host. It does not stop guests or delete disks.
+  Save the report and reclaim resources on that host separately before reuse.
+- **Recovery:** failed network restoration is retried; late VMM readiness can clear
+  stale errors without restarting the guest. A missing live TAP cannot be attached
+  to a running VMM by recreating its name; stop/start is required. Missing jailed
+  Firecracker metadata fails safely until restored. Missing/corrupt PID files use
+  VM-specific process markers for recovery, never unconditional disk deletion.
 - **Restart:** state persists across service restarts. Host reboot does not trigger
   automatic guest restart. See [upgrade guidance](deployment.md#upgrades-and-recovery).
 
@@ -204,5 +238,6 @@ mutation errors currently return HTTP 500, including validation failures.
 
 Repeated creation with the same VM ID and parameters reuses the record rather
 than allocating a second VM. A stopped VM stays stopped; use start explicitly.
-Different parameters or a failed/deleting record are rejected. Clean up failed
+Port and SSH-key order does not change request identity. Different parameters or
+a failed/deleting record are rejected. Clean up failed
 records before attempting fresh creation with that ID.

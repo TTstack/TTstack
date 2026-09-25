@@ -37,6 +37,27 @@ pub trait ImageStore: Send + Sync {
     /// Disk format string for the engine (e.g. `"qcow2"` or `"raw"`).
     fn disk_format(&self) -> &'static str;
 
+    /// Inspect the base before reserving identity or cloning it.
+    fn qemu_size(&self, path: &str) -> Result<u64> {
+        use crate::command::CommandExt;
+        let output = std::process::Command::new("qemu-img")
+            .args(["info", "--output=json", &self.resolve_disk(path)])
+            .bounded_output()
+            .c(d!("inspect QEMU base"))?;
+        if !output.status.success() {
+            return Err(eg!("cannot inspect QEMU base image"));
+        }
+        let info: serde_json::Value =
+            serde_json::from_slice(&output.stdout).c(d!("QEMU base metadata"))?;
+        if info["format"] != self.disk_format() {
+            return Err(eg!("unexpected QEMU base image format"));
+        }
+        info["virtual-size"]
+            .as_u64()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| eg!("invalid QEMU base size"))
+    }
+
     /// Grow a QEMU disk, rejecting shrink requests.
     fn resize_disk(&self, clone_path: &str, size_mib: u32) -> Result<()>;
 
@@ -62,6 +83,26 @@ pub trait ImageStore: Send + Sync {
 
     /// Backend name for logging.
     fn name(&self) -> &'static str;
+}
+
+/// Catalog capacity is optional for old agents; invalid images are not sized.
+pub fn image_sizes(
+    store: &dyn ImageStore,
+    root: &str,
+    images: &[String],
+) -> std::collections::BTreeMap<String, u32> {
+    images
+        .iter()
+        .filter_map(|name| {
+            let path = format!("{root}/{name}");
+            let bytes = store
+                .firecracker_size(&path)
+                .or_else(|_| store.qemu_size(&path))
+                .ok()?;
+            let size = u32::try_from(bytes.div_ceil(1024 * 1024)).ok()?;
+            (size > 0).then(|| (name.clone(), size))
+        })
+        .collect()
 }
 
 /// Create an [`ImageStore`] for the given backend.

@@ -13,19 +13,29 @@ use ttcore::model::*;
 pub struct Placement {
     pub host_id: String,
     pub host_addr: String,
+    pub disk: u32,
 }
 
-// Unspecified Firecracker rootfs size is checked by the agent, which owns the image.
-fn disk_reservation(spec: &VmSpec) -> u32 {
-    spec.disk
-        .unwrap_or(spec.engine.default_disk())
-        .saturating_add(
-            if spec.engine == Engine::Firecracker && !spec.guest_config.is_empty() {
-                ttcore::guest_config::CONFIG_DISK_MIB
-            } else {
-                0
-            },
-        )
+fn disk_reservation(spec: &VmSpec, host: &Host) -> Option<u32> {
+    if spec.engine == Engine::Docker {
+        return Some(0);
+    }
+    let base = host.image_sizes.get(&spec.image).copied();
+    let disk = match (spec.disk, spec.engine) {
+        (Some(disk), _) => disk,
+        (None, Engine::Firecracker) => base?,
+        _ => spec.engine.default_disk(),
+    };
+    if base.is_some_and(|base| disk < base) {
+        return None;
+    }
+    disk.checked_add(
+        if spec.engine == Engine::Firecracker && !spec.guest_config.is_empty() {
+            ttcore::guest_config::CONFIG_DISK_MIB
+        } else {
+            0
+        },
+    )
 }
 
 /// Choose the best host for a VM spec using a best-fit strategy.
@@ -45,7 +55,7 @@ pub fn place_vm(
     let mem = spec
         .engine
         .memory_reservation(spec.mem.unwrap_or(VM_MEM_DEFAULT));
-    let disk = disk_reservation(spec);
+    let disk = spec.disk.unwrap_or(spec.engine.default_disk());
 
     // Docker images are managed by Docker, not by the image directory
     let check_images = !host_images.is_empty() && spec.engine != Engine::Docker;
@@ -68,7 +78,7 @@ pub fn place_vm(
             h.state == HostState::Online
                 && supports(h)
                 && h.engines.contains(&spec.engine)
-                && h.resource.can_fit(cpu, mem, disk)
+                && disk_reservation(spec, h).is_some_and(|disk| h.resource.can_fit(cpu, mem, disk))
                 && (!check_images
                     || host_images
                         .get(&h.id)
@@ -77,13 +87,25 @@ pub fn place_vm(
         .collect();
 
     if candidates.is_empty() {
-        if hosts.iter().any(|h| h.state == HostState::Online)
-            && !hosts
-                .iter()
-                .any(|h| h.state == HostState::Online && supports(h))
+        if hosts
+            .iter()
+            .any(|h| h.state == HostState::Online && h.engines.contains(&spec.engine))
+            && !hosts.iter().any(|h| {
+                h.state == HostState::Online && h.engines.contains(&spec.engine) && supports(h)
+            })
         {
             return Err(eg!(
                 "no online agent supports the requested capabilities; upgrade agents before using guest_config, isolated_network, jailed Firecracker, disk sizing or Firecracker zvol storage"
+            ));
+        }
+        if hosts.iter().any(|h| {
+            h.state == HostState::Online
+                && h.engines.contains(&spec.engine)
+                && supports(h)
+                && disk_reservation(spec, h).is_none()
+        }) {
+            return Err(eg!(
+                "base image size is unavailable or exceeds requested disk; upgrade the agent or choose a sufficient explicit disk size"
             ));
         }
         // Provide a more helpful error message
@@ -101,7 +123,8 @@ pub fn place_vm(
                 h.state == HostState::Online
                     && h.engines.contains(&spec.engine)
                     && supports(h)
-                    && h.resource.can_fit(cpu, mem, disk)
+                    && disk_reservation(spec, h)
+                        .is_some_and(|disk| h.resource.can_fit(cpu, mem, disk))
             })
             .count();
 
@@ -138,6 +161,7 @@ pub fn place_vm(
     Ok(Placement {
         host_id: host.id.clone(),
         host_addr: host.addr.clone(),
+        disk: disk_reservation(spec, host).ok_or_else(|| eg!("invalid disk reservation"))?,
     })
 }
 
@@ -163,7 +187,7 @@ pub fn schedule_env(
             let mem = spec
                 .engine
                 .memory_reservation(spec.mem.unwrap_or(VM_MEM_DEFAULT));
-            let disk = disk_reservation(spec);
+            let disk = placement.disk;
             h.resource.cpu_used += cpu;
             h.resource.mem_used += mem;
             h.resource.disk_used += disk;
@@ -182,6 +206,8 @@ mod tests {
 
     fn make_host(id: &str, cpu: u32, mem: u32, engines: Vec<Engine>) -> Host {
         Host {
+            error: None,
+            image_sizes: [("ubuntu".into(), 128)].into(),
             capabilities: vec![
                 "guest_config".into(),
                 "isolated_network".into(),
@@ -221,6 +247,32 @@ mod tests {
             deny_outgoing: false,
             ssh_keys: vec![],
         }
+    }
+
+    #[test]
+    fn image_sized_disks_and_config_drives_are_reserved_during_placement() {
+        let mut host = make_host("host", 8, 8192, vec![Engine::Firecracker]);
+        host.image_sizes.insert("ubuntu".into(), 1024);
+        host.resource.disk_total = 2052;
+        let mut spec = make_spec();
+        spec.engine = Engine::Firecracker;
+        spec.disk = None;
+        spec.guest_config.insert("app.json".into(), "{}".into());
+        let placement = place_vm(std::slice::from_ref(&host), &spec, &HashMap::new()).unwrap();
+        assert_eq!(placement.disk, 1028);
+        assert!(
+            schedule_env(
+                std::slice::from_ref(&host),
+                &[spec.clone(), spec.clone()],
+                &HashMap::new()
+            )
+            .is_err()
+        );
+        spec.disk = Some(512);
+        assert!(place_vm(std::slice::from_ref(&host), &spec, &HashMap::new()).is_err());
+        host.image_sizes.clear();
+        spec.disk = None;
+        assert!(place_vm(&[host], &spec, &HashMap::new()).is_err());
     }
 
     #[test]

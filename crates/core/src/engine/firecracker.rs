@@ -53,18 +53,28 @@ impl FirecrackerEngine {
         if let Some(sandbox) = Sandbox::load(vm)? {
             return Ok((sandbox.socket(), sandbox.marker));
         }
+        let jailed_marker = format!("/fc-{}.sock", crate::net::tap_name(&vm.id));
+        if let Some(pid) = Self::read_pid(vm)?
+            && super::process_matches(pid, &jailed_marker)?
+        {
+            return Err(eg!(
+                "Firecracker sandbox metadata is missing; restore it before lifecycle operations"
+            ));
+        }
         let path = format!("{RUN_DIR}/fc-{}.sock", vm.id);
         Ok((path.clone(), path))
     }
     fn read_pid(vm: &Vm) -> Result<Option<u32>> {
-        match std::fs::read_to_string(Self::pid_path(vm)) {
-            Ok(s) => Ok(Some(
-                s.trim().parse::<u32>().c(d!("invalid Firecracker pid"))?,
-            )),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e).c(d!("read Firecracker pid")),
+        let mut markers = vec![
+            format!("/fc-{}.sock", crate::net::tap_name(&vm.id)),
+            format!("{RUN_DIR}/fc-{}.sock", vm.id),
+        ];
+        if let Some(sandbox) = Sandbox::load(vm)? {
+            markers.push(sandbox.marker);
         }
+        super::recover_pid(&Self::pid_path(vm), &markers)
     }
+
     fn request(socket: &str, method: &str, path: &str, body: Option<&str>) -> Result<Vec<u8>> {
         let mut cmd = Command::new("curl");
         cmd.args([
@@ -169,8 +179,11 @@ impl VmEngine for FirecrackerEngine {
         if !super::process_matches(pid, &marker)? {
             return Ok(());
         }
-        if matches!(self.state(vm), Ok(VmState::Paused)) {
-            self.start(vm)?;
+        if matches!(self.state(vm), Ok(VmState::Paused))
+            && let Err(e) = self.start(vm)
+        {
+            eprintln!("[firecracker] {}: resume failed ({e}); forcing stop", vm.id);
+            return super::terminate(pid, &marker);
         }
         #[cfg(target_arch = "x86_64")]
         if Self::request(
@@ -246,7 +259,7 @@ fn wait_for_boot(
             .is_some()
         {
             return Err(eg!(
-                "Firecracker jailer exited during boot; inspect the VM console log"
+                "Firecracker jailer exited during boot; inspect the jailer/VMM log"
             ));
         }
         if ready() {
@@ -266,7 +279,7 @@ mod tests {
     #[test]
     fn startup_waits_for_readiness_without_treating_missing_marker_as_exit() {
         let mut child = Command::new("sleep").arg("5").spawn().unwrap();
-        assert!(!super::super::process_matches(child.id(), "/not-yet-visible.sock").unwrap());
+        let identity = super::super::process_matches(child.id(), "/not-yet-visible.sock");
         let mut probes = 0;
         let result = wait_for_boot(&mut child, Duration::from_secs(2), || {
             probes += 1;
@@ -275,6 +288,8 @@ mod tests {
         let alive = child.try_wait().unwrap().is_none();
         child.kill().unwrap();
         child.wait().unwrap();
+        // During exec the identity may be unavailable rather than a known mismatch.
+        assert!(!matches!(identity, Ok(true)));
         assert!(result.is_ok());
         assert!(alive);
         assert_eq!(probes, 2);

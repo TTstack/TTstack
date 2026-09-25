@@ -93,7 +93,8 @@ impl VmEngine for DockerEngine {
         let mut cmd = Command::new(rt);
         cmd.args(["run", "-d", "--name", &name])
             .args(["--cpus", &vm.cpu.to_string()])
-            .args(["--memory", &format!("{}m", vm.mem)]);
+            .args(["--memory", &format!("{}m", vm.mem)])
+            .args(["--memory-swap", &format!("{}m", vm.mem)]);
 
         // Publish port mappings
         for (&guest, &host) in &vm.port_map {

@@ -49,9 +49,9 @@ fn property(dataset: &str, name: &str) -> Result<String> {
 fn mountpoint(dataset: &str) -> Result<String> {
     let path = property(dataset, "mountpoint")?;
     if !Path::new(&path).is_absolute() || property(dataset, "mounted")? != "yes" {
-        return Err(eg!(
+        return Err(eg!(format!(
             "ZFS dataset {dataset} must have an active absolute mountpoint"
-        ));
+        )));
     }
     Ok(path)
 }
@@ -69,7 +69,7 @@ fn wait_device(dataset: &str) -> Result<String> {
             return Ok(path);
         }
         if started.elapsed() >= Duration::from_secs(5) {
-            return Err(eg!("ZFS block device did not appear: {path}"));
+            return Err(eg!(format!("ZFS block device did not appear: {path}")));
         }
         std::thread::sleep(Duration::from_millis(50));
     }

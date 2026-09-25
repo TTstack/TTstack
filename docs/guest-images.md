@@ -75,10 +75,17 @@ Stop requests guest shutdown, then terminates QEMU if necessary. Start boots the
 preserved disk in a new process. Memory is not preserved; save guest work first.
 See [lifecycle and recovery](rest-api.md#lifecycle-and-recovery).
 
+Image downloads are published only after checksum verification. The Alpine cloud
+image, Alpine minirootfs and Firecracker quickstart kernel have digests pinned in
+the recipe implementation. Debian and Ubuntu rolling images are checked against
+their upstream HTTPS checksum manifests; the verified digest is printed. Those
+manifests share the download origin, so this is not independent signature
+verification or a reproducible version lock for rolling images.
+
 ## Docker / Podman: application containers
 
 Container images live in the runtime's own image store. The agent uses Docker if
-its binary is installed, otherwise Podman; use that same runtime/store to prepare
+`docker --version` succeeds, otherwise Podman; use that same runtime/store to prepare
 images. Rootless and root-owned image stores are distinct.
 
 A minimal web-container workflow on a host with a working Docker runtime is:
@@ -291,15 +298,18 @@ not zvols or per-VM snapshots. Keep a file rootfs and its jail on the same files
 for persistent hard links. Zvol kernel/config files may cross dataset boundaries;
 TTstack copies those read-only files into the jail when necessary.
 
-Firecracker stores PID, console and sandbox metadata in `/home/ttstack/run`.
+Firecracker stores PID, jailer/VMM logs (including the configured guest console)
+and sandbox metadata in `/home/ttstack/run`.
 Place that directory and the agent database on persistent storage too. Dataset
 quotas and agent disk reservations are separate limits; leave pool headroom and
 configure both deliberately. Sparse volumes reserve logical capacity in TTstack,
 not all their physical pool space. Snapshot stopped guests for an offline recovery
 point; a running-disk snapshot is not an application consistency guarantee.
 
-For systemd services, add `RequiresMountsFor=` and explicit
-`ExecStartPre=/usr/bin/mountpoint -q PATH` checks for required dataset mountpoints.
+For systemd services, use `systemctl edit tt-agent` to add `RequiresMountsFor=`
+in a `[Unit]` section and explicit
+`ExecStartPre=/usr/bin/mountpoint -q PATH` checks in `[Service]` for required
+dataset mountpoints. Keep these in a drop-in so upgrades preserve them.
 A missing mount must fail startup rather than create replacement VM state on
 the system disk. Use stable disk identifiers when provisioning a pool; verify
 unused devices separately from TTstack deployment.
@@ -336,3 +346,12 @@ Keep controller/agent endpoints on a protected management network; remote manage
 addresses on public networks are not covered by a private-address egress block.
 
 See [compatibility and validation](compatibility.md) for tested Linux workflows.
+
+Reserve host TCP ports 20000–65535 for TTstack; other host processes must not bind
+that pool. At most 256 port entries may be requested per VM. Existing conntrack
+sessions can outlive a guest; TTstack does not claim independent per-guest
+conntrack zones. The shared bridge/NAT infrastructure persists after the last VM.
+Host firewall policy is operator-owned: Docker/firewalld forward drops can still
+block VM traffic. Permit `tt0` traffic in the applicable host firewall, or run the
+agent in a dedicated network namespace; TTstack does not rewrite another runtime's
+firewall rules. Non-isolated guests can reach host listeners via `10.10.0.1`.

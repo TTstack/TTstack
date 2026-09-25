@@ -28,9 +28,10 @@ pub fn make_auth_layer(
 
             match auth_header {
                 Some(value)
-                    if value
-                        .strip_prefix("Bearer ")
-                        .is_some_and(|t| ttcore::auth::constant_time_eq(t, &expected)) =>
+                    if value.split_once(' ').is_some_and(|(scheme, t)| {
+                        scheme.eq_ignore_ascii_case("bearer")
+                            && ttcore::auth::constant_time_eq(t, &expected)
+                    }) =>
                 {
                     next.run(req).await
                 }

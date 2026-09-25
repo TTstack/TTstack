@@ -14,7 +14,7 @@ use ttcore::model::*;
 #[derive(Parser)]
 #[command(name = "tt", version, about)]
 struct Cli {
-    /// Controller address (overrides ~/.ttconfig).
+    /// Controller address; saved credentials are reused only for the same address.
     #[arg(long, short, global = true)]
     server: Option<String>,
 
@@ -33,7 +33,7 @@ enum Cmd {
         /// Controller address, e.g. "10.0.0.1:9200".
         addr: String,
         /// API key for authentication (optional).
-        #[arg(long, short = 'k')]
+        #[arg(long, short = 'k', env = "TT_API_KEY")]
         api_key: Option<String>,
     },
     /// Show fleet-wide status.
@@ -73,6 +73,8 @@ enum HostCmd {
     Show { id: String },
     /// Remove a host from the fleet.
     Remove { id: String },
+    /// Forget an offline host and print orphaned VMs; does not stop or delete them.
+    Detach { id: String },
 }
 
 #[derive(Subcommand)]
@@ -245,16 +247,21 @@ async fn main() {
         return;
     }
 
+    let saved = client::load_config();
     let (addr, api_key) = if let Some(server) = cli.server {
-        (server, cli.api_key)
-    } else if let Some(cfg) = client::load_config() {
+        let key = saved.filter(|c| c.addr == server).and_then(|c| c.api_key);
+        (server, cli.api_key.or(key))
+    } else if let Some(cfg) = saved {
         (cfg.addr, cli.api_key.or(cfg.api_key))
     } else {
         eprintln!("No controller address. Run: tt config <addr>");
         std::process::exit(1);
     };
 
-    let c = Client::new(&addr, api_key.as_deref());
+    let c = Client::new(&addr, api_key.as_deref()).unwrap_or_else(|e| {
+        eprintln!("Cannot initialize client: {e}");
+        std::process::exit(1);
+    });
 
     let result = match cli.cmd {
         Cmd::Config { .. } | Cmd::Deploy { .. } => unreachable!(),
@@ -341,6 +348,16 @@ async fn cmd_host(c: &Client, action: HostCmd) -> Result<()> {
             );
             println!("  VMs:      {}", h.resource.vm_count);
         }
+        HostCmd::Detach { id } => {
+            let orphans: Vec<Vm> = c.post(&format!("/api/hosts/{id}/detach"), &()).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&orphans).c(d!("orphan report"))?
+            );
+            eprintln!(
+                "Host {id} detached. Listed guests may still be running; reclaim them on that host separately."
+            );
+        }
         HostCmd::Remove { id } => {
             c.delete(&format!("/api/hosts/{id}")).await?;
             println!("Host removed: {id}");
@@ -412,6 +429,9 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
                 })
                 .collect::<Result<Vec<_>>>()?;
 
+            validate_vm_options(engine, disk, deny_outgoing, &ssh_keys, &port)
+                .map_err(|e| eg!(e))?;
+
             if dup == 0 || (image.len() as u64) * u64::from(dup) > MAX_VMS as u64 {
                 return Err(eg!(
                     "replicas must be positive and total VM count must not exceed {}",
@@ -444,9 +464,9 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
                 ssh_keys,
             };
 
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
             let mut detail: EnvDetail = c.post("/api/envs", &req).await?;
             eprintln!("Creating environment {name}; you can inspect it with 'tt env show {name}'.");
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
             while detail.env.state == EnvState::Creating {
                 if tokio::time::Instant::now() >= deadline {
                     return Err(eg!(

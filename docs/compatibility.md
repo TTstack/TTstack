@@ -11,11 +11,11 @@ requires Linux. QEMU/KVM, Firecracker and Docker/Podman are the available engine
 | Linux Docker | Container lifecycle and native port publishing | Temporary HTTP workload on two Ubuntu 24.04.4 hosts |
 | Linux Firecracker + file storage | Jailer, config drive, orderly shutdown, opt-in network isolation | Alpine fixture: config/read-only access, retained data, isolation, restart and cleanup on Ubuntu 24.04 |
 | Linux Firecracker + zvol | Snapshot clones, jailed block device, ext4 growth, retained disks | [Dedicated ZFS host validation](firecracker-zvol-validation-2026-09-24.md) |
-| Podman | Alternate runtime selected when Docker binary is absent | Not covered by this run |
-| QEMU + zvol | Raw ZFS volumes and snapshot clones | Not covered by this run |
-| Ubuntu cloud guest | Built-in QEMU recipe | Not covered by this run |
+| Podman | Alternate runtime selected when `docker --version` fails | Not covered by the 2026-09-24 lifecycle run |
+| QEMU + zvol | Raw ZFS volumes and snapshot clones | Not covered by the 2026-09-24 lifecycle run |
+| Ubuntu cloud guest | Built-in QEMU recipe | Not covered by the 2026-09-24 lifecycle run |
 | Linux/systemd deployment | Local and distributed service generation | Temporary systemd services exercised; not every deploy configuration |
-| Linux/OpenRC, musl binaries | Distributed deployment support | Not covered by this run |
+| Linux/OpenRC, musl binaries | Distributed deployment support | Not covered by the 2026-09-24 lifecycle run |
 | Other host platforms | No validated agent deployment path | No support commitment |
 
 The [2026-09-24 validation record](live-validation-2026-09-24.md) identifies the
@@ -41,7 +41,7 @@ formatting, Clippy, tests and a release build. SQLite is bundled; HTTP client TL
 uses rustls/AWS-LC rather than OpenSSL. Native dependencies still need a C/C++
 compiler. See [deployment prerequisites](deployment.md#prerequisites).
 
-Linux tests also need `mkfs.ext4` and `debugfs` from `e2fsprogs` to inspect a real
+Linux tests also need `mkfs.ext4`, `debugfs`, `dumpe2fs`, `e2fsck` and `resize2fs` from `e2fsprogs` to inspect a real
 configuration disk without mounting it or requiring root. CI installs these tools.
 Tests cover local logic and mock-agent HTTP workflows: interrupted creation,
 partial deletion, expiry retry, failed stop, duplicate creation, input validation,
@@ -92,7 +92,7 @@ binary also passed. This check did not boot guests or exercise the remote hosts.
 ## Product boundaries
 
 - One controller, with configured limits of 50 hosts and 1000 tracked VMs. These
-  are guardrails, not benchmarked capacity. Mutations are serialized and reads
+  are guardrails, not benchmarked capacity. Mutations serialize per environment and reads
   generally serve cached/persisted state.
 - Environments group lifecycle operations; they do not provide cross-host private
   networking or tenant authorization. Linux QEMU/Firecracker offer opt-in guest

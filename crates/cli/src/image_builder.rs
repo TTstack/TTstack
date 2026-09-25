@@ -4,7 +4,7 @@
 //! applications; container defaults and custom guest startup must suit the workload.
 
 use ruc::*;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tokio::process::Command;
 
 // ── Image catalog ───────────────────────────────────────────────────
@@ -167,7 +167,12 @@ async fn create_firecracker(name: &str, image_dir: &Path) -> Result<()> {
     // Download kernel
     if !kernel.exists() {
         println!("[image] downloading Firecracker kernel...");
-        download_file(FC_KERNEL_URL, &kernel).await?;
+        download_verified(
+            FC_KERNEL_URL,
+            &kernel,
+            Some("ea5e7d5cf494a8c4ba043259812fc018b44880d70bcbbfc4d57d2760631b1cd6"),
+        )
+        .await?;
         println!("[image] kernel: {}", human_size(&kernel).await);
     } else {
         println!("[image] kernel already exists");
@@ -198,7 +203,11 @@ async fn create_firecracker(name: &str, image_dir: &Path) -> Result<()> {
     run_cmd("mkfs.ext4", &["-q", &rootfs.display().to_string()]).await?;
 
     // Mount and populate
-    let mnt = tempdir()?;
+    let mount_dir = tempfile::Builder::new()
+        .prefix("tt-image-")
+        .tempdir()
+        .c(d!("private mount directory"))?;
+    let mnt = mount_dir.path().to_path_buf();
     run_cmd(
         "mount",
         &[
@@ -213,7 +222,7 @@ async fn create_firecracker(name: &str, image_dir: &Path) -> Result<()> {
     let populate: Result<()> = async {
         // Download and extract Alpine minirootfs
         let tarball = format!("{}/alpine.tar.gz", mnt.display());
-        download_file(ALPINE_MINIROOTFS_URL, Path::new(&tarball)).await?;
+        download_verified(ALPINE_MINIROOTFS_URL, Path::new(&tarball), Some("1a694899e406ce55d32334c47ac0b2efb6c06d7e878102d1840892ad44cd5239")).await?;
         run_cmd("tar", &["xzf", &tarball, "-C", &mnt.display().to_string()]).await?;
         tokio::fs::remove_file(&tarball).await.ok();
 
@@ -275,6 +284,7 @@ fi
     }
     .await;
     if let Err(e) = run_cmd("umount", &[&mnt.display().to_string()]).await {
+        let mnt = mount_dir.keep();
         let (_, saved) = staging.keep().map_err(|e| eg!(e.to_string()))?;
         return Err(eg!(
             "{}; staging rootfs retained at {}; unmount {} before removing it",
@@ -318,6 +328,24 @@ async fn create_qemu(name: &str, image_dir: &Path) -> Result<()> {
     let target = image_dir.join(name);
 
     if target.exists() {
+        let info = Command::new("qemu-img")
+            .args(["info", "--output=json"])
+            .arg(&target)
+            .kill_on_drop(true)
+            .output()
+            .await
+            .c(d!("inspect existing image"))?;
+        let valid = info.status.success()
+            && serde_json::from_slice::<serde_json::Value>(&info.stdout)
+                .ok()
+                .is_some_and(|v| {
+                    v["format"] == "qcow2" && v["virtual-size"].as_u64().is_some_and(|s| s > 0)
+                });
+        if !valid {
+            return Err(eg!(
+                "existing image is not a valid qcow2 disk; inspect or remove it before retrying"
+            ));
+        }
         println!("[image] {name} already exists");
         return Ok(());
     }
@@ -330,7 +358,8 @@ async fn create_qemu(name: &str, image_dir: &Path) -> Result<()> {
         .tempdir_in(image_dir)
         .c(d!("image staging directory"))?;
     let downloaded = staging.path().join("download");
-    download_file(url, &downloaded).await?;
+    let pin = (name == "alpine-cloud").then_some("5b22a46e9aa6bbacf585c055e87362c8be1993e53c121bdaf74203ac3490c70bdbbf714df4276eef36184ea8c11fd7cd3b28c9ccc74f6a9a82c430d441fa2f95");
+    download_verified(url, &downloaded, pin).await?;
     // Cloud providers use .img for both qcow2 and raw: inspect content, never guess by suffix.
     let info = Command::new("qemu-img")
         .args(["info", "--output=json"])
@@ -434,6 +463,91 @@ pub async fn create_all(image_dir: &Path) -> Result<()> {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
+pub(crate) fn file_digest(path: &Path, sha512: bool) -> Result<String> {
+    use sha2::{Digest, Sha256, Sha512};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).c(d!("open digest input"))?;
+    let mut small = Sha256::new();
+    let mut large = Sha512::new();
+    let mut buffer = [0; 65536];
+    loop {
+        let size = file.read(&mut buffer).c(d!("read digest input"))?;
+        if size == 0 {
+            break;
+        }
+        if sha512 {
+            large.update(&buffer[..size]);
+        } else {
+            small.update(&buffer[..size]);
+        }
+    }
+    Ok(if sha512 {
+        large
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    } else {
+        small
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    })
+}
+
+fn expected_digest(manifest: &str, name: &str) -> Result<String> {
+    manifest
+        .lines()
+        .find_map(|line| {
+            let mut parts = line.split_whitespace();
+            let digest = parts.next()?;
+            let file = parts.next()?.trim_start_matches('*');
+            (file == name
+                && matches!(digest.len(), 64 | 128)
+                && digest.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| digest.to_ascii_lowercase())
+        })
+        .ok_or_else(|| eg!("image is missing from upstream checksum manifest"))
+}
+
+async fn download_verified(url: &str, dest: &Path, pin: Option<&str>) -> Result<()> {
+    let parent = dest.parent().unwrap_or(Path::new("."));
+    let staging = tempfile::tempdir_in(parent).c(d!("verified download staging"))?;
+    let image = staging.path().join("image");
+    download_file(url, &image).await?;
+    let expected = if let Some(pin) = pin {
+        pin.to_owned()
+    } else {
+        let (base, name) = url
+            .rsplit_once('/')
+            .ok_or_else(|| eg!("invalid recipe URL"))?;
+        let sums = if url.contains("cloud.debian.org/") {
+            "SHA512SUMS"
+        } else {
+            "SHA256SUMS"
+        };
+        let manifest = staging.path().join("checksums");
+        download_file(&format!("{base}/{sums}"), &manifest).await?;
+        expected_digest(
+            &std::fs::read_to_string(&manifest).c(d!("read image checksums"))?,
+            name,
+        )?
+    };
+    let actual = file_digest(&image, expected.len() == 128)?;
+    if actual != expected {
+        return Err(eg!("download checksum mismatch; image was not published"));
+    }
+    println!(
+        "[image] verified SHA-{}: {actual}",
+        if expected.len() == 128 { 512 } else { 256 }
+    );
+    tokio::fs::rename(&image, dest)
+        .await
+        .c(d!("publish verified download"))?;
+    Ok(())
+}
+
 async fn download_file(url: &str, dest: &Path) -> Result<()> {
     let parent = dest.parent().unwrap_or(Path::new("."));
     let staging = tempfile::NamedTempFile::new_in(parent).c(d!("download staging file"))?;
@@ -444,6 +558,8 @@ async fn download_file(url: &str, dest: &Path) -> Result<()> {
             "15",
             "--max-time",
             "900",
+            "--max-filesize",
+            "8589934592",
             "-o",
         ])
         .arg(staging.path())
@@ -494,12 +610,6 @@ async fn human_size(path: &Path) -> String {
             }
         })
         .unwrap_or_else(|_| "?".into())
-}
-
-fn tempdir() -> Result<PathBuf> {
-    let path = PathBuf::from(format!("/tmp/tt-image-{}", std::process::id()));
-    std::fs::create_dir_all(&path).c(d!("create temp dir"))?;
-    Ok(path)
 }
 
 #[cfg(test)]
@@ -579,5 +689,50 @@ mod download_tests {
             );
             assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod integrity_tests {
+    use super::*;
+    #[test]
+    fn checksum_manifests_select_the_exact_filename() {
+        let expected = "a".repeat(64);
+        let manifest = format!("{}  other.img\n{expected} *wanted.img\n", "b".repeat(64));
+        assert_eq!(expected_digest(&manifest, "wanted.img").unwrap(), expected);
+        assert!(expected_digest(&manifest, "missing.img").is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("image");
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            file_digest(&path, false).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+    #[tokio::test]
+    async fn checksum_mismatch_never_replaces_an_existing_image() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("image");
+        std::fs::write(&dest, b"previous").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/image", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc")
+                .await
+                .unwrap();
+        });
+        assert!(
+            download_verified(&url, &dest, Some(&"0".repeat(64)))
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"previous");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }

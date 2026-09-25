@@ -26,12 +26,25 @@ use ttcore::model::Resource;
 #[tokio::main]
 async fn main() {
     let cfg = Config::parse();
+    if let Some(key) = &cfg.api_key
+        && let Err(e) = ttcore::auth::parse_api_key(key)
+    {
+        eprintln!("Invalid API key: {e}");
+        std::process::exit(1);
+    }
 
     let db_path = format!("{}/agent.db", cfg.data_dir);
     std::fs::create_dir_all(&cfg.data_dir).unwrap_or_else(|e| {
         eprintln!("Failed to create data dir {}: {e}", cfg.data_dir);
         std::process::exit(1);
     });
+
+    #[cfg(target_os = "linux")]
+    let _state_lock = ttcore::lock_state(&std::path::Path::new(&cfg.data_dir).join("service.lock"))
+        .unwrap_or_else(|e| {
+            eprintln!("Cannot lock state: {e}");
+            std::process::exit(1);
+        });
 
     let host_id = runtime::resolve_host_id(&db_path, cfg.host_id.clone()).unwrap_or_else(|e| {
         eprintln!("Failed to resolve host_id: {e}");
@@ -71,7 +84,6 @@ async fn main() {
     let recovery = state.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
             if let Ok(mut rt) = recovery.runtime.clone().try_lock_owned() {
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Err(e) = rt.reconcile() {
@@ -80,6 +92,7 @@ async fn main() {
                 })
                 .await;
             }
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
         }
     });
 

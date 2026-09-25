@@ -184,11 +184,7 @@ config:
     }
 
     fn existing_pid(&self, vm: &Vm) -> Result<Option<u32>> {
-        match std::fs::read_to_string(self.pid_path(vm)) {
-            Ok(s) => Ok(Some(s.trim().parse::<u32>().c(d!("invalid QEMU PID"))?)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e).c(d!("read QEMU PID")),
-        }
+        super::recover_pid(&self.pid_path(vm), &[self.pid_path(vm)])
     }
 
     fn monitor(&self, vm: &Vm, command: &str) -> Result<String> {
@@ -232,6 +228,9 @@ impl VmEngine for QemuEngine {
     ) -> Result<()> {
         std::fs::create_dir_all(RUN_DIR).c(d!("create runtime dir"))?;
 
+        if self.existing_pid(vm)?.is_some() {
+            return Err(eg!("QEMU is still running; refusing duplicate launch"));
+        }
         // A broken seed means the guest may be unreachable: fail before booting.
         self.generate_seed_iso(vm, ssh_keys)?;
         let _ = std::fs::remove_file(self.monitor_path(vm));
@@ -260,19 +259,19 @@ impl VmEngine for QemuEngine {
             // Give a cooperative guest a chance to shut down before terminating the VMM.
             let _ = self.monitor(vm, "system_powerdown");
             for _ in 0..100 {
-                if !super::process_matches(pid, &vm.id)? {
+                if !super::process_matches(pid, &self.pid_path(vm))? {
                     return Ok(());
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            super::terminate(pid, &vm.id)?;
+            super::terminate(pid, &self.pid_path(vm))?;
         }
         Ok(())
     }
 
     fn destroy(&self, vm: &Vm) -> Result<()> {
         if let Some(pid) = self.existing_pid(vm)? {
-            super::terminate(pid, &vm.id)?;
+            super::terminate(pid, &self.pid_path(vm))?;
         }
         for path in [self.pid_path(vm), self.monitor_path(vm), self.seed_path(vm)] {
             match std::fs::remove_file(path) {
@@ -288,7 +287,7 @@ impl VmEngine for QemuEngine {
         let Some(pid) = self.existing_pid(vm)? else {
             return Ok(VmState::Stopped);
         };
-        if !super::process_matches(pid, &vm.id)? {
+        if !super::process_matches(pid, &self.pid_path(vm))? {
             return Ok(VmState::Stopped);
         }
         let status = self.monitor(vm, "info status")?;

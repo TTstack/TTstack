@@ -36,32 +36,58 @@ async fn read_snapshot(state: AppState) -> Result<(AgentInfo, Vec<Vm>), String> 
     .map_err(|e| e.to_string())?
 }
 
-async fn read_images(state: AppState) -> Result<Vec<String>, String> {
+async fn read_images(
+    state: AppState,
+) -> Result<(Vec<String>, std::collections::BTreeMap<String, u32>), String> {
     tokio::task::spawn_blocking(move || {
-        ttcore::storage::create_store(state.info.storage)
+        let store = ttcore::storage::create_store(state.info.storage);
+        let images = store
             .list_images(&state.image_dir)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        let sizes = ttcore::storage::image_sizes(store.as_ref(), &state.image_dir, &images);
+        Ok((images, sizes))
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
 pub async fn get_info(State(state): State<AppState>) -> impl IntoResponse {
-    let images = match read_images(state.clone()).await {
+    let (images, sizes) = match read_images(state.clone()).await {
         Ok(images) => images,
-        Err(e) => return failure(e),
-    };
-    match read_snapshot(state).await {
-        Ok((mut info, _)) => {
-            info.images = images;
-            (StatusCode::OK, Json(ApiResp::success(info)))
+        Err(e) => {
+            eprintln!("[agent] image catalog unavailable: {e}");
+            (vec![], Default::default())
         }
+    };
+    let snapshot = tokio::task::spawn_blocking(move || {
+        let (vms, corrupt) =
+            runtime::read_recovery_snapshot(&state.db_path).map_err(|e| e.to_string())?;
+        let mut info = state.info.clone();
+        info.resource = runtime::resources_for(&info.resource, &vms);
+        if corrupt {
+            info.resource.cpu_used = info.resource.cpu_total;
+            info.resource.mem_used = info.resource.mem_total;
+            info.resource.disk_used = info.resource.disk_total;
+            info.warnings.push(
+                "unreadable VM records retained; new admission disabled; inspect agent logs".into(),
+            );
+        }
+        info.images = images;
+        info.image_sizes = sizes;
+        info.vms = Some(vms);
+        Ok::<_, String>(info)
+    })
+    .await;
+    match snapshot {
+        Ok(Ok(info)) => (StatusCode::OK, Json(ApiResp::success(info))),
+        Ok(Err(e)) => failure(e),
         Err(e) => failure(e),
     }
 }
+
 pub async fn list_images(State(state): State<AppState>) -> impl IntoResponse {
     match read_images(state).await {
-        Ok(images) => (StatusCode::OK, Json(ApiResp::success(images))),
+        Ok((images, _)) => (StatusCode::OK, Json(ApiResp::success(images))),
         Err(e) => failure(e),
     }
 }
@@ -72,14 +98,20 @@ pub async fn list_vms(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 pub async fn get_vm(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
-    match read_snapshot(state).await {
-        Ok((_, vms)) => match vms.into_iter().find(|vm| vm.id == id) {
+    let query_id = id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        runtime::read_vm(&state.db_path, &query_id).map_err(|e| e.to_string())
+    })
+    .await;
+    match result {
+        Ok(Ok(vm)) => match vm {
             Some(vm) => (StatusCode::OK, Json(ApiResp::success(vm))),
             None => (
                 StatusCode::NOT_FOUND,
                 Json(ApiResp::err(format!("VM not found: {id}"))),
             ),
         },
+        Ok(Err(e)) => failure(e),
         Err(e) => failure(e),
     }
 }

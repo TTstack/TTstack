@@ -163,6 +163,11 @@ impl Resource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Host {
     #[serde(default)]
+    pub error: Option<String>,
+    /// Base logical disk capacity in MiB; absent entries are unverified.
+    #[serde(default)]
+    pub image_sizes: std::collections::BTreeMap<String, u32>,
+    #[serde(default)]
     pub capabilities: Vec<String>,
     pub id: String,
     /// Agent listen address, e.g. "10.0.0.1:9100".
@@ -477,6 +482,9 @@ pub fn validate_vm_options(
     }
     if !ssh_keys.is_empty() && matches!(engine, Engine::Docker | Engine::Firecracker) {
         return Err(format!("SSH key injection is not supported by {engine}"));
+    }
+    if ports.len() > 256 {
+        return Err("at most 256 published ports are allowed per VM".into());
     }
     if ports.contains(&0) {
         return Err("port must be between 1 and 65535".into());

@@ -67,12 +67,78 @@ pub fn create_engine(kind: Engine) -> Result<Box<dyn VmEngine>> {
 #[cfg(target_os = "linux")]
 pub(crate) fn process_matches(pid: u32, marker: &str) -> Result<bool> {
     match std::fs::read(format!("/proc/{pid}/cmdline")) {
+        Ok(cmdline) if cmdline.is_empty() => {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"));
+            match stat {
+                Ok(stat)
+                    if stat
+                        .rsplit_once(") ")
+                        .is_some_and(|(_, tail)| tail.starts_with("Z ")) =>
+                {
+                    Ok(false)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                _ => Err(eg!(format!(
+                    "process {pid} has no readable identity; resources retained"
+                ))),
+            }
+        }
         Ok(cmdline) => Ok(cmdline
             .split(|c| *c == 0)
             .any(|arg| arg == marker.as_bytes())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e).c(d!("read process identity")),
     }
+}
+
+/// Recover missing or corrupt PID metadata using a VM-specific argv path.
+/// Never interpret an unreadable PID file as proof of process exit.
+#[cfg(target_os = "linux")]
+pub(crate) fn recover_pid(path: &str, markers: &[String]) -> Result<Option<u32>> {
+    let recorded = match std::fs::read_to_string(path) {
+        Ok(s) => s
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|p| *p > 0 && *p <= i32::MAX as u32),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).c(d!("read VM PID")),
+    };
+    if let Some(pid) = recorded {
+        for marker in markers {
+            if process_matches(pid, marker)? {
+                return Ok(Some(pid));
+            }
+        }
+    }
+    let mut found = None;
+    for entry in std::fs::read_dir("/proc").c(d!("recover VM PID"))? {
+        let entry = entry.c(d!("read process entry"))?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let cmdline = match std::fs::read(entry.path().join("cmdline")) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).c(d!("recover process identity")),
+        };
+        if markers
+            .iter()
+            .any(|m| cmdline.split(|c| *c == 0).any(|a| a == m.as_bytes()))
+        {
+            if found.is_some() {
+                return Err(eg!(
+                    "multiple processes match VM identity; resources retained"
+                ));
+            }
+            found = Some(pid);
+        }
+    }
+    Ok(found)
 }
 
 #[cfg(target_os = "linux")]
@@ -97,4 +163,41 @@ pub(crate) fn terminate(pid: u32, marker: &str) -> Result<()> {
     Err(eg!(format!(
         "VM process {pid} did not exit; resources retained"
     )))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod recovery_tests {
+    use super::*;
+    #[test]
+    fn corrupt_and_missing_pid_files_recover_the_exact_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vm.pid");
+        let marker = dir.path().join("specific-vm.sock").display().to_string();
+        let mut child = std::process::Command::new("bash")
+            .args(["-c", "exec -a \"$1\" sleep 20", "test", &marker])
+            .spawn()
+            .unwrap();
+        let result = || {
+            std::fs::write(&path, b"truncated").unwrap();
+            assert_eq!(
+                recover_pid(path.to_str().unwrap(), std::slice::from_ref(&marker)).unwrap(),
+                Some(child.id())
+            );
+            std::fs::remove_file(&path).unwrap();
+            assert_eq!(
+                recover_pid(path.to_str().unwrap(), std::slice::from_ref(&marker)).unwrap(),
+                Some(child.id())
+            );
+            terminate(child.id(), &marker).unwrap();
+        };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(result));
+        let _ = child.kill();
+        let _ = child.wait();
+        outcome.unwrap();
+        assert!(
+            recover_pid(path.to_str().unwrap(), &[marker])
+                .unwrap()
+                .is_none()
+        );
+    }
 }

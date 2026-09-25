@@ -8,14 +8,17 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use ttcore::api::*;
 use ttcore::model::*;
 
 /// Shared controller state.
 pub struct CtlShared {
     pub(crate) db: Mutex<Db>,
-    pub operations: Arc<tokio::sync::Mutex<()>>,
+    operations: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    revision: AtomicU64,
     /// API key used for controller→agent communication.
     pub api_key: Option<String>,
 }
@@ -24,7 +27,8 @@ impl CtlShared {
     pub fn new(db: Db, api_key: Option<String>) -> Self {
         Self {
             db: Mutex::new(db),
-            operations: Arc::new(tokio::sync::Mutex::new(())),
+            operations: Mutex::new(HashMap::new()),
+            revision: AtomicU64::new(0),
             api_key,
         }
     }
@@ -40,21 +44,63 @@ impl CtlShared {
 
 pub type CtlState = Arc<CtlShared>;
 
-/// Build an HTTP client for agent communication, with optional Bearer auth.
-pub fn agent_client(api_key: Option<&str>, timeout_secs: u64) -> reqwest::Client {
+/// Per-environment guards keep retries ordered without blocking the whole fleet.
+struct Operation {
+    state: CtlState,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+impl Drop for Operation {
+    fn drop(&mut self) {
+        let _db = self.state.lock_db();
+        self.state.revision.fetch_add(1, Ordering::SeqCst);
+    }
+}
+impl CtlShared {
+    fn operation_lock(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.operations.lock().unwrap_or_else(|e| e.into_inner());
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(id.to_owned(), Arc::downgrade(&lock));
+        lock
+    }
+    fn busy(&self, id: &str) -> bool {
+        self.operation_lock(id).try_lock().is_err()
+    }
+}
+fn begin_operation(state: &CtlState, id: &str) -> Result<Operation, ApiError> {
+    let guard = state.operation_lock(id).try_lock_owned().map_err(|_| {
+        (
+            StatusCode::CONFLICT,
+            "environment has an operation in progress; inspect it before retrying".into(),
+        )
+    })?;
+    let _db = state.lock_db();
+    state.revision.fetch_add(1, Ordering::SeqCst);
+    Ok(Operation {
+        state: state.clone(),
+        _guard: guard,
+    })
+}
+
+/// Build a client without silently dropping authentication or following redirects.
+pub fn agent_client(api_key: Option<&str>, timeout_secs: u64) -> Result<reqwest::Client, String> {
     let mut builder =
         reqwest::Client::builder().timeout(std::time::Duration::from_secs(timeout_secs));
     if let Some(key) = api_key {
+        ttcore::auth::parse_api_key(key)?;
         let mut headers = reqwest::header::HeaderMap::new();
-        if let Ok(val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")) {
-            headers.insert(reqwest::header::AUTHORIZATION, val);
-        }
+        let value = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))
+            .map_err(|_| "invalid API key header".to_owned())?;
+        headers.insert(reqwest::header::AUTHORIZATION, value);
         builder = builder.default_headers(headers);
     }
     builder
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .unwrap()
+        .map_err(|e| e.to_string())
 }
 
 // ── Host Management ─────────────────────────────────────────────────
@@ -64,14 +110,6 @@ pub async fn register_host(
     State(db): State<CtlState>,
     Json(req): Json<RegisterHostReq>,
 ) -> impl IntoResponse {
-    let Ok(_operation) = db.operations.try_lock() else {
-        return (
-            StatusCode::CONFLICT,
-            Json(ApiResp::<Host>::err(
-                "another fleet operation is in progress; retry shortly",
-            )),
-        );
-    };
     let valid_addr = reqwest::Url::parse(&format!("http://{}", req.addr))
         .ok()
         .is_some_and(|url| {
@@ -89,7 +127,10 @@ pub async fn register_host(
             Json(ApiResp::<Host>::err("agent address must be host:port")),
         );
     }
-    let client = agent_client(db.api_key.as_deref(), 30);
+    let client = match agent_client(db.api_key.as_deref(), 30) {
+        Ok(client) => client,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResp::err(e))),
+    };
     let url = format!("http://{}/api/info", req.addr);
 
     let resp = match client.get(&url).send().await {
@@ -105,6 +146,7 @@ pub async fn register_host(
         }
     };
 
+    let status = resp.status();
     let info: ApiResp<AgentInfo> = match resp.json().await {
         Ok(r) => r,
         Err(e) => {
@@ -115,7 +157,7 @@ pub async fn register_host(
         }
     };
 
-    let info = match info.data {
+    let info = match info.data.filter(|_| status.is_success() && info.ok) {
         Some(i) => i,
         None => {
             return (
@@ -130,16 +172,68 @@ pub async fn register_host(
     }
     let db = db.lock_db();
 
-    if db.host_count().unwrap_or(0) >= MAX_HOSTS {
+    let existing = match db.list_hosts() {
+        Ok(hosts) => hosts,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResp::err(e.to_string())),
+            );
+        }
+    };
+    if existing.iter().any(|h| {
+        (h.id == info.host_id && h.addr != req.addr) || (h.addr == req.addr && h.id != info.host_id)
+    }) {
         return (
             StatusCode::CONFLICT,
-            Json(ApiResp::<Host>::err(format!(
+            Json(ApiResp::err(
+                "host ID or address already belongs to a registered peer; drain and remove it before replacement",
+            )),
+        );
+    }
+    if let Some(host) = existing.iter().find(|h| h.id == info.host_id) {
+        // Refresh a legitimate registration without dropping outstanding reservations.
+        let mut host = host.clone();
+        let previous = host.resource;
+        host.resource = info.resource;
+        host.resource.cpu_used = host.resource.cpu_used.max(previous.cpu_used);
+        host.resource.mem_used = host.resource.mem_used.max(previous.mem_used);
+        host.resource.disk_used = host.resource.disk_used.max(previous.disk_used);
+        host.resource.vm_count = host.resource.vm_count.max(previous.vm_count);
+        host.engines = info.engines;
+        host.capabilities = info.capabilities;
+        host.images = info.images;
+        host.image_sizes = info.image_sizes;
+        host.state = HostState::Online;
+        host.error = (!info.warnings.is_empty()).then(|| info.warnings.join("; "));
+        if let Err(e) = db.put_host(&host) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResp::err(e.to_string())),
+            );
+        }
+        return (StatusCode::OK, Json(ApiResp::success(host)));
+    }
+    let count = match db.host_count() {
+        Ok(count) => count,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResp::err(e.to_string())),
+            );
+        }
+    };
+    if count >= MAX_HOSTS {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiResp::err(format!(
                 "fleet limit reached ({MAX_HOSTS} hosts)"
             ))),
         );
     }
-
     let host = Host {
+        error: None,
+        image_sizes: info.image_sizes,
         capabilities: info.capabilities,
         id: info.host_id,
         addr: req.addr,
@@ -164,10 +258,7 @@ pub async fn register_host(
 /// GET /api/hosts
 pub async fn list_hosts(State(db): State<CtlState>) -> impl IntoResponse {
     let db = db.lock_db();
-    match db.list_hosts() {
-        Ok(hosts) => Json(ApiResp::success(hosts)),
-        Err(e) => Json(ApiResp::<Vec<Host>>::err(e.to_string())),
-    }
+    response(db.list_hosts().map_err(internal), StatusCode::OK)
 }
 
 /// GET /api/hosts/:id
@@ -188,14 +279,6 @@ pub async fn get_host(State(db): State<CtlState>, Path(id): Path<String>) -> imp
 
 /// DELETE /api/hosts/:id
 pub async fn remove_host(State(db): State<CtlState>, Path(id): Path<String>) -> impl IntoResponse {
-    let Ok(_operation) = db.operations.try_lock() else {
-        return (
-            StatusCode::CONFLICT,
-            Json(ApiRespEmpty::err(
-                "another fleet operation is in progress; retry shortly",
-            )),
-        );
-    };
     let db = db.lock_db();
 
     let vms = match db.vms_by_host(&id) {
@@ -225,6 +308,41 @@ pub async fn remove_host(State(db): State<CtlState>, Path(id): Path<String>) -> 
     }
 
     (StatusCode::OK, Json(ApiRespEmpty::ok()))
+}
+
+/// Explicit recovery escape hatch; does not send a destructive command to a host.
+pub async fn detach_host(
+    State(state): State<CtlState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let result = (|| {
+        let db = state.lock_db();
+        let host = db
+            .get_host(&id)
+            .map_err(internal)?
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "host not found".into()))?;
+        if host.state != HostState::Offline {
+            return Err((
+                StatusCode::CONFLICT,
+                "only an offline host can be detached; drain online guests first".into(),
+            ));
+        }
+        if db
+            .vms_by_host(&id)
+            .map_err(internal)?
+            .iter()
+            .any(|v| state.busy(&v.env_id))
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                "host has an environment operation in progress".into(),
+            ));
+        }
+        let orphans = db.detach_host(&id).map_err(internal)?;
+        state.revision.fetch_add(1, Ordering::SeqCst);
+        Ok(orphans)
+    })();
+    response(result, StatusCode::OK)
 }
 
 // ── Environment Management ──────────────────────────────────────────
@@ -286,10 +404,12 @@ async fn create_environment(state: &CtlState, req: CreateEnvReq) -> Result<EnvDe
             .checked_add(seconds)
             .ok_or_else(|| (StatusCode::BAD_REQUEST, "lifetime is too large".into()))?,
     };
-    // Serialize mutations at this scale: fresh snapshots and no competing reservations.
-    let _operation = state.operations.clone().lock_owned().await;
+    let operation = begin_operation(state, &req.id)?;
+    let read_client = agent_client(state.api_key.as_deref(), 5).map_err(internal)?;
+    refresh_all_hosts(state, &read_client).await;
+    // Placement and persistence share one short DB critical section.
+    let db = state.lock_db();
     {
-        let db = state.lock_db();
         if db.get_env(&req.id).map_err(internal)?.is_some() {
             return Err((
                 StatusCode::CONFLICT,
@@ -308,9 +428,22 @@ async fn create_environment(state: &CtlState, req: CreateEnvReq) -> Result<EnvDe
             return Err((StatusCode::CONFLICT, "fleet VM limit reached".into()));
         }
     }
-    let read_client = agent_client(state.api_key.as_deref(), 5);
-    refresh_all_hosts(state, &read_client).await;
-    let hosts = state.lock_db().list_hosts().map_err(internal)?;
+    let mut hosts = db.list_hosts().map_err(internal)?;
+    // Include plans accepted since the last agent snapshot.
+    for host in &mut hosts {
+        let mut tracked = Resource {
+            cpu_total: host.resource.cpu_total,
+            mem_total: host.resource.mem_total,
+            disk_total: host.resource.disk_total,
+            ..Default::default()
+        };
+        for vm in db.vms_by_host(&host.id).map_err(internal)? {
+            tracked.account(&vm);
+        }
+        host.resource.cpu_used = host.resource.cpu_used.max(tracked.cpu_used);
+        host.resource.mem_used = host.resource.mem_used.max(tracked.mem_used);
+        host.resource.disk_used = host.resource.disk_used.max(tracked.disk_used);
+    }
     let host_images = hosts
         .iter()
         .map(|h| (h.id.clone(), h.images.iter().cloned().collect()))
@@ -327,7 +460,8 @@ async fn create_environment(state: &CtlState, req: CreateEnvReq) -> Result<EnvDe
         let vm_id = uuid::Uuid::new_v4().to_string();
         let cpu = spec.cpu.unwrap_or(VM_CPU_DEFAULT);
         let mem = spec.mem.unwrap_or(VM_MEM_DEFAULT);
-        let disk = spec.disk.unwrap_or(spec.engine.default_disk());
+        let requested_disk = spec.disk.unwrap_or(spec.engine.default_disk());
+        let disk = placement.disk;
         planned.push(Vm {
             id: vm_id.clone(),
             env_id: req.id.clone(),
@@ -345,7 +479,7 @@ async fn create_environment(state: &CtlState, req: CreateEnvReq) -> Result<EnvDe
                 ports: spec.ports.clone(),
                 ssh_keys: ssh_keys.clone(),
                 deny_outgoing: spec.deny_outgoing,
-                requested_disk: disk,
+                requested_disk,
                 isolated_network: spec.isolated_network,
                 guest_config_digest: ttcore::guest_config::digest(&spec.guest_config),
             },
@@ -360,7 +494,7 @@ async fn create_environment(state: &CtlState, req: CreateEnvReq) -> Result<EnvDe
                 engine: spec.engine,
                 cpu,
                 mem,
-                disk,
+                disk: requested_disk,
                 ports: spec.ports,
                 deny_outgoing: spec.deny_outgoing,
                 ssh_keys,
@@ -378,15 +512,20 @@ async fn create_environment(state: &CtlState, req: CreateEnvReq) -> Result<EnvDe
         state: EnvState::Creating,
         error: None,
     };
-    state
-        .lock_db()
-        .put_environment(&env, &planned)
-        .map_err(internal)?;
+    db.put_environment(&env, &planned).map_err(internal)?;
+    for host in &mut hosts {
+        for vm in planned.iter().filter(|v| v.host_id == host.id) {
+            host.resource.account(vm);
+        }
+        db.put_host(host).map_err(internal)?;
+    }
+    state.revision.fetch_add(1, Ordering::SeqCst);
+    drop(db);
     let detail = environment_detail(state, &req.id)?;
     let state = state.clone();
     let env_id = req.id;
     tokio::spawn(async move {
-        let _operation = _operation;
+        let _operation = operation;
         if let Err((_, error)) = finish_creation(state, env_id, requests).await {
             eprintln!("[ctl] creation: {error}");
         }
@@ -399,9 +538,17 @@ async fn finish_creation(
     env_id: String,
     requests: Vec<(String, CreateVmReq)>,
 ) -> Result<(), ApiError> {
-    let read_client = agent_client(state.api_key.as_deref(), 5);
-    let client = agent_client(state.api_key.as_deref(), 360);
+    let read_client = agent_client(state.api_key.as_deref(), 5).map_err(internal)?;
+    let client = agent_client(state.api_key.as_deref(), 360).map_err(internal)?;
     for (addr, request) in requests {
+        let expired = state
+            .lock_db()
+            .get_env(&env_id)
+            .map_err(internal)?
+            .is_none_or(|e| e.expires_at != 0 && e.expires_at <= now());
+        if expired {
+            break;
+        }
         match create_on_agent(&client, &addr, &request).await {
             Ok(vm) => state.lock_db().put_vm(&vm).map_err(internal)?,
             Err(error) => {
@@ -417,7 +564,7 @@ async fn finish_creation(
             }
         }
     }
-    refresh_all_hosts(&state, &read_client).await;
+    refresh_hosts(&state, &read_client, Some(&env_id)).await;
     update_env_state(&state, &env_id).map_err(internal)?;
     Ok(())
 }
@@ -434,7 +581,10 @@ async fn create_on_agent(
         .await
         .map_err(|e| e.to_string())?;
     let status = resp.status();
-    let body: ApiResp<CreateVmResp> = resp.json().await.map_err(|e| e.to_string())?;
+    let body: ApiResp<CreateVmResp> = resp
+        .json()
+        .await
+        .map_err(|e| format!("agent HTTP {status}: invalid response: {e}"))?;
     if !status.is_success() || !body.ok {
         return Err(body.error.unwrap_or_else(|| format!("agent HTTP {status}")));
     }
@@ -493,7 +643,7 @@ async fn delete_environment_inner(
     id: &str,
     expiry_only: bool,
 ) -> Result<(), ApiError> {
-    let _operation = state.operations.clone().lock_owned().await;
+    let _operation = begin_operation(state, id)?;
     let (mut env, vms, hosts) = {
         let db = state.lock_db();
         let Some(mut env) = db.get_env(id).map_err(internal)? else {
@@ -511,14 +661,20 @@ async fn delete_environment_inner(
         (
             env,
             db.vms_by_env(id).map_err(internal)?,
-            db.list_hosts().map_err(internal)?,
+            db.recovery_hosts().map_err(internal)?,
         )
     };
-    let client = agent_client(state.api_key.as_deref(), 360);
+    let client = agent_client(state.api_key.as_deref(), 360).map_err(internal)?;
     let mut errors = Vec::new();
     for vm in &vms {
         let result = match hosts.iter().find(|h| h.id == vm.host_id) {
-            Some(host) => agent_action(&client, host, &vm.id, None).await,
+            Some(host) if host.state == HostState::Online => {
+                agent_action(&client, host, &vm.id, None).await
+            }
+            Some(_) => Err(format!(
+                "host {} is offline; cleanup retained for retry",
+                vm.host_id
+            )),
             None => Err(format!("host {} is missing", vm.host_id)),
         };
         match result {
@@ -564,7 +720,10 @@ async fn agent_action(
     .await
     .map_err(|e| e.to_string())?;
     let status = resp.status();
-    let body: ApiRespEmpty = resp.json().await.map_err(|e| e.to_string())?;
+    let body: ApiRespEmpty = resp
+        .json()
+        .await
+        .map_err(|e| format!("agent HTTP {status}: invalid response: {e}"))?;
     if status.is_success() && body.ok {
         Ok(())
     } else {
@@ -581,7 +740,7 @@ pub async fn start_env(State(state): State<CtlState>, Path(id): Path<String>) ->
     response(result.unwrap_or_else(|e| Err(internal(e))), StatusCode::OK)
 }
 async fn change_environment(state: &CtlState, id: &str, action: &str) -> Result<(), ApiError> {
-    let _operation = state.operations.clone().lock_owned().await;
+    let _operation = begin_operation(state, id)?;
     let detail = environment_detail(state, id)?;
     if matches!(detail.env.state, EnvState::Creating | EnvState::Deleting) {
         return Err((
@@ -589,19 +748,50 @@ async fn change_environment(state: &CtlState, id: &str, action: &str) -> Result<
             "environment has an operation in progress".into(),
         ));
     }
-    let hosts = state.lock_db().list_hosts().map_err(internal)?;
-    let client = agent_client(state.api_key.as_deref(), 360);
+    let hosts = state.lock_db().recovery_hosts().map_err(internal)?;
+    let client = agent_client(state.api_key.as_deref(), 360).map_err(internal)?;
+    if action == "start" {
+        let mut starting = detail.vms.clone();
+        for vm in &mut starting {
+            if vm.state == VmState::Stopped {
+                vm.state = VmState::Creating;
+            }
+        }
+        // Reserve stopped guests before concurrent placement can spend their capacity.
+        // A failed/unknown start retains this reservation until an agent snapshot arrives.
+        let db = state.lock_db();
+        db.put_environment(&detail.env, &starting)
+            .map_err(internal)?;
+        state.revision.fetch_add(1, Ordering::SeqCst);
+    }
     let mut errors = Vec::new();
     for vm in &detail.vms {
         let result = match hosts.iter().find(|h| h.id == vm.host_id) {
             Some(host) => agent_action(&client, host, &vm.id, Some(action)).await,
             None => Err(format!("host {} is missing", vm.host_id)),
         };
-        if let Err(error) = result {
-            errors.push(format!("{}: {error}", vm.id));
+        match result {
+            Ok(()) => {
+                // An unrelated environment can invalidate the fleet refresh below.
+                // Keep this agent's confirmed result even when that snapshot is stale.
+                let mut confirmed = vm.clone();
+                confirmed.state = if action == "start" {
+                    VmState::Running
+                } else {
+                    VmState::Stopped
+                };
+                confirmed.error = None;
+                state.lock_db().put_vm(&confirmed).map_err(internal)?;
+            }
+            Err(error) => errors.push(format!("{}: {error}", vm.id)),
         }
     }
-    refresh_all_hosts(state, &agent_client(state.api_key.as_deref(), 5)).await;
+    refresh_hosts(
+        state,
+        &agent_client(state.api_key.as_deref(), 5).map_err(internal)?,
+        Some(id),
+    )
+    .await;
     update_env_state(state, id).map_err(internal)?;
     let mut env = state
         .lock_db()
@@ -631,7 +821,7 @@ fn update_env_state(state: &CtlState, id: &str) -> ruc::Result<()> {
         return Ok(());
     }
     let vms = db.vms_by_env(id)?;
-    let hosts = db.list_hosts()?;
+    let hosts = db.recovery_hosts()?;
     let unavailable = vms.iter().any(|vm| {
         !hosts
             .iter()
@@ -643,12 +833,10 @@ fn update_env_state(state: &CtlState, id: &str) -> ruc::Result<()> {
             Some("one or more agents are offline; VM states are last observed snapshots".into());
         return db.put_env(&env);
     }
-    env.state = if vms.is_empty() {
+    env.state = if vms.is_empty() || vms.iter().any(|v| v.error.is_some()) {
         EnvState::Failed
     } else if vms.iter().any(|v| v.state == VmState::Creating) {
         EnvState::Creating
-    } else if vms.iter().any(|v| v.error.is_some()) {
-        EnvState::Failed
     } else if vms.iter().all(|v| v.state == VmState::Running) {
         EnvState::Active
     } else if vms.iter().all(|v| v.state == VmState::Stopped) {
@@ -657,9 +845,25 @@ fn update_env_state(state: &CtlState, id: &str) -> ruc::Result<()> {
         EnvState::Failed
     };
     env.vm_ids = vms.iter().map(|v| v.id.clone()).collect();
-    if matches!(env.state, EnvState::Active | EnvState::Stopped) {
-        env.error = None;
-    }
+    env.error = if env.state == EnvState::Failed && vms.is_empty() {
+        env.error
+            .or_else(|| Some("environment has no tracked VMs".into()))
+    } else if env.state == EnvState::Failed {
+        Some(
+            vms.iter()
+                .map(|v| {
+                    format!(
+                        "{}: {}",
+                        v.id,
+                        v.error.clone().unwrap_or_else(|| v.state.to_string())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    } else {
+        None
+    };
     db.put_env(&env)
 }
 
@@ -691,10 +895,7 @@ pub async fn list_images(State(state): State<CtlState>) -> impl IntoResponse {
 /// GET /api/status
 pub async fn fleet_status(State(db): State<CtlState>) -> impl IntoResponse {
     let db = db.lock_db();
-    match db.fleet_status() {
-        Ok(s) => Json(ApiResp::success(s)),
-        Err(e) => Json(ApiResp::<FleetStatus>::err(e.to_string())),
-    }
+    response(db.fleet_status().map_err(internal), StatusCode::OK)
 }
 
 // ── VM Lookup ───────────────────────────────────────────────────────
@@ -726,7 +927,11 @@ fn now() -> u64 {
 
 /// Fetch host snapshots concurrently with a small, fixed concurrency limit.
 pub async fn refresh_all_hosts(state: &CtlState, client: &reqwest::Client) {
-    let hosts = match state.lock_db().list_hosts() {
+    refresh_hosts(state, client, None).await;
+}
+async fn refresh_hosts(state: &CtlState, client: &reqwest::Client, owned_env: Option<&str>) {
+    let revision = state.revision.load(Ordering::SeqCst);
+    let hosts = match state.lock_db().recovery_hosts() {
         Ok(h) => h,
         Err(e) => {
             eprintln!("[ctl] list hosts: {e}");
@@ -751,9 +956,12 @@ pub async fn refresh_all_hosts(state: &CtlState, client: &reqwest::Client) {
                         .json::<ApiResp<AgentInfo>>()
                         .await
                         .map_err(|e| e.to_string())?;
-                    let info = info.data.filter(|_| info.ok).ok_or("invalid agent info")?;
+                    let mut info = info.data.filter(|_| info.ok).ok_or("invalid agent info")?;
                     if info.host_id != host.id {
                         return Err("agent identity changed; re-register host".into());
+                    }
+                    if let Some(vms) = info.vms.take() {
+                        return Ok((info, vms));
                     }
                     let vms = client
                         .get(format!("http://{}/api/vms", host.addr))
@@ -776,7 +984,7 @@ pub async fn refresh_all_hosts(state: &CtlState, client: &reqwest::Client) {
         while let Some(result) = tasks.join_next().await {
             match result {
                 Ok((id, result)) => {
-                    if let Err(e) = apply_host_snapshot(state, &id, result) {
+                    if let Err(e) = apply_snapshot(state, &id, result, Some(revision), owned_env) {
                         eprintln!("[ctl] save snapshot: {e}");
                     }
                 }
@@ -784,39 +992,77 @@ pub async fn refresh_all_hosts(state: &CtlState, client: &reqwest::Client) {
             }
         }
     }
-    let ids = match state.lock_db().list_envs() {
+    let ids = match state.lock_db().recovery_envs() {
         Ok(envs) => envs.into_iter().map(|e| e.id).collect::<Vec<_>>(),
         Err(_) => return,
     };
     for id in ids {
+        if owned_env != Some(id.as_str()) && state.busy(&id) {
+            continue;
+        }
         if let Err(e) = update_env_state(state, &id) {
             eprintln!("[ctl] update {id}: {e}");
         }
     }
 }
 
+#[cfg(test)]
 fn apply_host_snapshot(
     state: &CtlState,
     id: &str,
     snapshot: Result<(AgentInfo, Vec<Vm>), String>,
 ) -> ruc::Result<()> {
+    apply_snapshot(state, id, snapshot, None, None)
+}
+fn apply_snapshot(
+    state: &CtlState,
+    id: &str,
+    snapshot: Result<(AgentInfo, Vec<Vm>), String>,
+    revision: Option<u64>,
+    owned_env: Option<&str>,
+) -> ruc::Result<()> {
     let db = state.lock_db();
+    if revision.is_some_and(|r| r != state.revision.load(Ordering::SeqCst)) {
+        return Ok(());
+    }
     let Some(mut host) = db.get_host(id)? else {
         return Ok(());
     };
     match snapshot {
         Ok((info, actual)) => {
-            host.resource = info.resource;
+            host.resource = Resource {
+                cpu_total: info.resource.cpu_total,
+                mem_total: info.resource.mem_total,
+                disk_total: info.resource.disk_total,
+                ..Default::default()
+            };
             host.engines = info.engines;
             host.capabilities = info.capabilities;
             host.storage = info.storage;
             host.images = info.images;
+            host.image_sizes = info.image_sizes;
             host.state = HostState::Online;
-            for mut known in db.vms_by_host(id)? {
+            host.error = (!info.warnings.is_empty()).then(|| info.warnings.join("; "));
+            let known_vms = db.vms_by_host(id)?;
+            for vm in &actual {
+                if !known_vms.iter().any(|v| v.id == vm.id) {
+                    eprintln!(
+                        "[ctl] host {id}: untracked VM {} (environment {}); inspect agent inventory",
+                        vm.id, vm.env_id
+                    );
+                    host.resource.account(vm);
+                }
+            }
+            for mut known in known_vms {
+                if owned_env != Some(known.env_id.as_str()) && state.busy(&known.env_id) {
+                    host.resource.account(&known);
+                    continue;
+                }
                 if let Some(vm) = actual
                     .iter()
                     .find(|vm| vm.id == known.id && vm.env_id == known.env_id && vm.host_id == id)
                 {
+                    host.resource.account(vm);
                     db.put_vm(vm)?;
                 } else {
                     // Never discard a resource merely because one snapshot is missing it.
@@ -826,11 +1072,16 @@ fn apply_host_snapshot(
                             "VM absent from agent snapshot; inspect or delete to reconcile".into(),
                         );
                     }
+                    host.resource.account(&known);
                     db.put_vm(&known)?;
                 }
             }
+            host.resource.cpu_used = host.resource.cpu_used.max(info.resource.cpu_used);
+            host.resource.mem_used = host.resource.mem_used.max(info.resource.mem_used);
+            host.resource.disk_used = host.resource.disk_used.max(info.resource.disk_used);
         }
         Err(error) => {
+            host.error = Some(error.clone());
             host.state = HostState::Offline;
             eprintln!("[ctl] host {id}: {error}");
         }
@@ -848,7 +1099,13 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     struct MockAgent {
         vms: Mutex<Vec<Vm>>,
+        stall_info: AtomicBool,
+        info_entered: AtomicBool,
+        stall_start: AtomicBool,
+        start_entered: AtomicBool,
         fail_delete: AtomicBool,
+        stall_delete: AtomicBool,
+        delete_entered: AtomicBool,
         fail_action: AtomicBool,
         lose_create_response: AtomicBool,
         creates: AtomicUsize,
@@ -872,6 +1129,12 @@ mod tests {
         }
     }
     async fn info(State(mock): State<Arc<MockAgent>>) -> Json<ApiResp<AgentInfo>> {
+        if mock.stall_info.load(Ordering::SeqCst) {
+            mock.info_entered.store(true, Ordering::SeqCst);
+            while mock.stall_info.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        }
         let mut resource = Resource {
             cpu_total: 16,
             mem_total: 16384,
@@ -882,6 +1145,9 @@ mod tests {
             resource.account(vm);
         }
         Json(ApiResp::success(AgentInfo {
+            vms: None,
+            warnings: vec![],
+            image_sizes: Default::default(),
             capabilities: vec![],
             host_id: "host".into(),
             resource,
@@ -924,6 +1190,10 @@ mod tests {
         State(mock): State<Arc<MockAgent>>,
         Path(id): Path<String>,
     ) -> impl IntoResponse {
+        if id == "bad" && mock.stall_delete.load(Ordering::SeqCst) {
+            mock.delete_entered.store(true, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        }
         if id == "bad" && mock.fail_delete.load(Ordering::SeqCst) {
             // Even HTTP 200 is not success when the API envelope reports an error.
             return Json(ApiRespEmpty::err("injected cleanup failure"));
@@ -940,10 +1210,29 @@ mod tests {
         }
         Json(ApiRespEmpty::ok())
     }
+    async fn start(
+        State(mock): State<Arc<MockAgent>>,
+        Path(id): Path<String>,
+    ) -> impl IntoResponse {
+        mock.start_entered.store(true, Ordering::SeqCst);
+        while mock.stall_start.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        if let Some(vm) = mock.vms.lock().unwrap().iter_mut().find(|v| v.id == id) {
+            vm.state = VmState::Running;
+        }
+        Json(ApiRespEmpty::ok())
+    }
     async fn fixture() -> (CtlState, Arc<MockAgent>, tokio::task::JoinHandle<()>) {
         let mock = Arc::new(MockAgent {
             vms: Mutex::new(vec![]),
+            stall_info: AtomicBool::new(false),
+            info_entered: AtomicBool::new(false),
+            stall_start: AtomicBool::new(false),
+            start_entered: AtomicBool::new(false),
             fail_delete: AtomicBool::new(false),
+            stall_delete: AtomicBool::new(false),
+            delete_entered: AtomicBool::new(false),
             fail_action: AtomicBool::new(false),
             lose_create_response: AtomicBool::new(false),
             creates: AtomicUsize::new(0),
@@ -953,6 +1242,7 @@ mod tests {
             .route("/api/vms", get(vms).post(create))
             .route("/api/vms/{id}", axum::routing::delete(delete))
             .route("/api/vms/{id}/stop", post(stop))
+            .route("/api/vms/{id}/start", post(start))
             .with_state(mock.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
@@ -963,6 +1253,8 @@ mod tests {
         state
             .lock_db()
             .put_host(&Host {
+                error: None,
+                image_sizes: Default::default(),
                 capabilities: vec![],
                 id: "host".into(),
                 addr,
@@ -1011,6 +1303,162 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn stalled_delete_does_not_block_another_environment_or_heartbeat() {
+        let (state, mock, server) = fixture().await;
+        seed(&state, &mock);
+        mock.stall_delete.store(true, Ordering::SeqCst);
+        let stalled = {
+            let state = state.clone();
+            tokio::spawn(async move { delete_environment(&state, "env").await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !mock.delete_entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut env = state.lock_db().get_env("env").unwrap().unwrap();
+        env.id = "healthy".into();
+        env.vm_ids = vec!["healthy-vm".into()];
+        env.state = EnvState::Active;
+        let vm = record("healthy-vm", "healthy");
+        state
+            .lock_db()
+            .put_environment(&env, std::slice::from_ref(&vm))
+            .unwrap();
+        mock.vms.lock().unwrap().push(vm);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            delete_environment(&state, "healthy"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            refresh_all_hosts(&state, &agent_client(None, 1).unwrap()),
+        )
+        .await
+        .unwrap();
+        assert!(state.lock_db().get_env("healthy").unwrap().is_none());
+        assert!(state.lock_db().get_env("env").unwrap().is_some());
+        stalled.abort();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn pending_restart_reserves_capacity_against_concurrent_creation() {
+        let (state, mock, server) = fixture().await;
+        seed(&state, &mock);
+        {
+            let db = state.lock_db();
+            let mut env = db.get_env("env").unwrap().unwrap();
+            env.state = EnvState::Stopped;
+            let mut records = mock.vms.lock().unwrap();
+            for vm in records.iter_mut() {
+                vm.state = VmState::Stopped;
+                vm.cpu = 8;
+            }
+            db.put_environment(&env, &records).unwrap();
+        }
+        mock.stall_start.store(true, Ordering::SeqCst);
+        let started = {
+            let state = state.clone();
+            tokio::spawn(async move { change_environment(&state, "env", "start").await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !mock.start_entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            create_environment(&state, request()).await.unwrap_err().0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(mock.creates.load(Ordering::SeqCst), 0);
+        mock.stall_start.store(false, Ordering::SeqCst);
+        started.await.unwrap().unwrap();
+        assert_eq!(
+            state.lock_db().get_env("env").unwrap().unwrap().state,
+            EnvState::Active
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn confirmed_stop_survives_a_concurrently_invalidated_refresh() {
+        let (state, mock, server) = fixture().await;
+        seed(&state, &mock);
+        mock.stall_info.store(true, Ordering::SeqCst);
+        let stopped = {
+            let state = state.clone();
+            tokio::spawn(async move { change_environment(&state, "env", "stop").await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !mock.info_entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(begin_operation(&state, "another-env").unwrap());
+        mock.stall_info.store(false, Ordering::SeqCst);
+        stopped.await.unwrap().unwrap();
+        assert_eq!(
+            state.lock_db().get_env("env").unwrap().unwrap().state,
+            EnvState::Stopped
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn old_snapshots_cannot_overwrite_new_mutation_state() {
+        let (state, mock, server) = fixture().await;
+        seed(&state, &mock);
+        let before = state.revision.load(Ordering::SeqCst);
+        let operation = begin_operation(&state, "env").unwrap();
+        drop(operation);
+        apply_snapshot(
+            &state,
+            "host",
+            Err("stale failure".into()),
+            Some(before),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            state.lock_db().get_host("host").unwrap().unwrap().state,
+            HostState::Online
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn offline_detach_returns_orphans_and_releases_only_tracking() {
+        let (state, mock, server) = fixture().await;
+        seed(&state, &mock);
+        apply_host_snapshot(&state, "host", Err("offline".into())).unwrap();
+        let orphans = state.lock_db().detach_host("host").unwrap();
+        assert_eq!(orphans.len(), 2);
+        assert_eq!(mock.vms.lock().unwrap().len(), 2);
+        assert_eq!(state.lock_db().vm_count().unwrap(), 0);
+        assert!(
+            state
+                .lock_db()
+                .get_env("env")
+                .unwrap()
+                .unwrap()
+                .error
+                .unwrap()
+                .contains("detached")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn partial_delete_preserves_failed_vm_and_expiry_retries_it() {
         let (state, mock, server) = fixture().await;
         seed(&state, &mock);
@@ -1037,7 +1485,7 @@ mod tests {
         assert_eq!(accepted.env.expires_at, 0);
         assert_eq!(accepted.vms.len(), 1);
         {
-            let _finished = state.operations.lock().await;
+            let _finished = state.operation_lock("new-env").lock_owned().await;
         }
         let detail = environment_detail(&state, "new-env").unwrap();
         assert_eq!(detail.env.state, EnvState::Active);
@@ -1062,11 +1510,15 @@ mod tests {
         let (state, mock, server) = fixture().await;
         seed(&state, &mock);
         mock.vms.lock().unwrap().clear();
-        refresh_all_hosts(&state, &agent_client(None, 2)).await;
+        refresh_all_hosts(&state, &agent_client(None, 2).unwrap()).await;
         let detail = environment_detail(&state, "env").unwrap();
         assert_eq!(detail.vms.len(), 2);
         assert_eq!(detail.env.state, EnvState::Failed);
         assert!(detail.vms.iter().all(|vm| vm.error.is_some()));
+        let host = state.lock_db().get_host("host").unwrap().unwrap();
+        assert_eq!(host.resource.cpu_used, 2);
+        assert_eq!(host.resource.mem_used, 256);
+        assert!(detail.env.error.is_some());
         server.abort();
     }
     #[tokio::test]

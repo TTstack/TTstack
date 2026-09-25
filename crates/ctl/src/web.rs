@@ -10,8 +10,14 @@ use axum::response::Html;
 /// The page itself requires no authentication. When API key auth is
 /// enabled, the JS client detects 401 responses and prompts the user
 /// to enter the key (stored in sessionStorage).
-pub async fn index() -> Html<&'static str> {
-    Html(FRONTEND_HTML)
+pub async fn index() -> impl axum::response::IntoResponse {
+    (
+        [
+            ("X-Frame-Options", "DENY"),
+            ("Content-Security-Policy", "frame-ancestors 'none'"),
+        ],
+        Html(FRONTEND_HTML),
+    )
 }
 
 const FRONTEND_HTML: &str = r##"<!DOCTYPE html>
@@ -185,7 +191,7 @@ const FRONTEND_HTML: &str = r##"<!DOCTYPE html>
     <input id="env-name" placeholder="my-test-env">
     <div class="row">
       <div><label>Owner</label><input id="env-owner" placeholder="web" value="web"></div>
-      <div><label>Image</label><input id="env-image" placeholder="ubuntu-22.04"></div>
+      <div><label>Image</label><input id="env-image" placeholder="alpine-cloud"></div>
     </div>
     <div class="row">
       <div><label>Engine</label>
@@ -200,7 +206,7 @@ const FRONTEND_HTML: &str = r##"<!DOCTYPE html>
     <div class="row">
       <div><label>CPU Cores</label><input id="env-cpu" type="number" value="2" min="1"></div>
       <div><label>Memory (MB)</label><input id="env-mem" type="number" value="1024" min="64"></div>
-      <div><label>Disk (MiB; QEMU / Firecracker)</label><input id="env-disk" type="number" value="40960" min="128"></div>
+      <div><label>Disk (MiB; QEMU / Firecracker)</label><input id="env-disk" type="number" placeholder="Engine default" min="1"></div>
     </div>
     <label>Ports (comma-separated)</label>
     <input id="env-ports" placeholder="22, 80, 443" value="22">
@@ -239,7 +245,7 @@ function esc(s) {
   if (s == null) return '';
   const d = document.createElement('div');
   d.appendChild(document.createTextNode(String(s)));
-  return d.innerHTML;
+  return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 async function api(method, path, body) {
@@ -421,10 +427,10 @@ async function createEnv() {
   var engine = document.getElementById('env-engine').value;
   var cpu = parseInt(document.getElementById('env-cpu').value) || 2;
   var mem = parseInt(document.getElementById('env-mem').value) || 1024;
-  var disk = parseInt(document.getElementById('env-disk').value) || 40960;
+  var disk = document.getElementById('env-disk').value === '' ? null : Number(document.getElementById('env-disk').value);
   var dup = parseInt(document.getElementById('env-dup').value) || 1;
   var portsStr = document.getElementById('env-ports').value.trim();
-  var lifetime = parseInt(document.getElementById('env-lifetime').value) || 0;
+  var lifetime = document.getElementById('env-lifetime').value === '' ? null : Number(document.getElementById('env-lifetime').value);
   var denyOutgoing = document.getElementById('env-deny-outgoing').checked;
   var sshKeysRaw = document.getElementById('env-ssh-keys').value.trim();
   var sshKeys = sshKeysRaw ? sshKeysRaw.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; }) : [];
@@ -464,7 +470,7 @@ async function toggleEnv(id, state) {
   catch (e) { toast(e.message, true); }
 }
 
-// Auto-refresh every 30 seconds
+// Auto-refresh every 5 seconds
 function startAutoRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = setInterval(function() { refresh(currentTab); }, 5000);

@@ -43,8 +43,10 @@ make release
 sudo ./target/release/tt deploy all --release-dir ./target/release
 export PATH="/opt/ttstack/bin:$PATH"
 
-# Replace the value with the key printed by the controller deployment.
-tt config 127.0.0.1:9200 --api-key 'PASTE_DEPLOYMENT_KEY_HERE'
+# Read the protected deployment key into the environment.
+export TT_API_KEY="$(sudo cat /opt/ttstack/etc/api-key)"
+tt config 127.0.0.1:9200
+unset TT_API_KEY
 
 sudo mkdir -p /home/ttstack/images
 sudo /opt/ttstack/bin/tt image create alpine-cloud
@@ -104,7 +106,9 @@ Resource and lifecycle details, including failure recovery, are in the
 
 Deployment configures one shared administrator API key on the controller and
 agents. Manual starts require `--api-key` or `TT_API_KEY`; without one, that
-service's API is unauthenticated. Owner names are labels, not access controls.
+service's API is unauthenticated. Empty or malformed keys are rejected.
+Non-isolated guests can reach a listener bound to all host interfaces through
+their bridge gateway. Owner names are labels, not access controls.
 
 The dashboard HTML at `http://CONTROLLER:9200/` is public, but its API requests
 require the key when authentication is enabled. The browser keeps the entered key

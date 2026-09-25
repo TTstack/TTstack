@@ -193,6 +193,71 @@ fn parse_disk(val: &str) -> Result<u32> {
         .ok_or_else(|| eg!("disk_total must be positive and fit in MiB"))
 }
 
+fn validate_path(value: &str, absolute: bool) -> Result<()> {
+    if value.is_empty()
+        || (absolute && !value.starts_with('/'))
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b))
+        || value.split('/').any(|p| p == "..")
+    {
+        return Err(eg!(
+            "deployment paths must use letters, digits, '/', '.', '_' or '-' and no parent traversal; filesystem paths must be absolute"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_config(cfg: &DeployConfig) -> Result<()> {
+    validate_path(&cfg.general.prefix, true)?;
+    let user = |s: &str| -> Result<()> {
+        if s.is_empty()
+            || s.starts_with('-')
+            || !s
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+        {
+            return Err(eg!("invalid deployment user"));
+        }
+        Ok(())
+    };
+    let peer = |host: &str, ssh_user: &str, listen: &str| -> Result<()> {
+        user(ssh_user)?;
+        if host.is_empty()
+            || host.starts_with('-')
+            || !host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b".:-[]".contains(&b))
+        {
+            return Err(eg!("invalid SSH host"));
+        }
+        listen
+            .parse::<std::net::SocketAddr>()
+            .c(d!("listen must be an IP address and port"))?;
+        Ok(())
+    };
+    user(&cfg.general.user)?;
+    if let Some(ctl) = &cfg.controller {
+        peer(&ctl.host, &ctl.ssh_user, &ctl.listen)?;
+        if let Some(path) = &ctl.data_dir {
+            validate_path(path, true)?;
+        }
+    }
+    for agent in &cfg.agents {
+        peer(&agent.host, &agent.ssh_user, &agent.listen)?;
+        for path in [&agent.image_dir, &agent.runtime_dir].into_iter().flatten() {
+            validate_path(path, agent.storage == "file")?;
+            if agent.storage == "zvol" && path.starts_with('/') {
+                return Err(eg!("zvol storage requires dataset names"));
+            }
+        }
+        if let Some(id) = &agent.host_id {
+            ttcore::model::validate_name(id, "host_id").map_err(|e| eg!(e))?;
+        }
+    }
+    Ok(())
+}
+
 // ── SSH helpers ─────────────────────────────────────────────────────
 
 struct SshTarget {
@@ -203,7 +268,13 @@ struct SshTarget {
 
 impl SshTarget {
     async fn exec(&self, cmd: &str) -> Result<String> {
-        let output = Command::new("ssh")
+        // Feed scripts through stdin: neither local nor remote argv contains secrets.
+        use std::io::{Seek, SeekFrom, Write};
+        let mut input = tempfile::tempfile().c(d!("SSH script input"))?;
+        input.write_all(cmd.as_bytes()).c(d!("write SSH script"))?;
+        input.seek(SeekFrom::Start(0)).c(d!("rewind SSH script"))?;
+        let mut command = Command::new("ssh");
+        command
             .args([
                 "-o",
                 "StrictHostKeyChecking=accept-new",
@@ -213,14 +284,24 @@ impl SshTarget {
                 &self.port.to_string(),
             ])
             .arg(format!("{}@{}", self.user, self.host))
-            .arg(cmd)
-            .output()
+            .arg("sh -s")
+            .stdin(input)
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(900), command.output())
             .await
+            .c(d!(
+                "SSH deployment timed out; inspect service state before retrying"
+            ))?
             .c(d!("ssh exec failed"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(eg!("ssh command failed on {}: {}", self.host, stderr));
+            return Err(eg!(
+                "ssh command failed on {}: {} {}",
+                self.host,
+                String::from_utf8_lossy(&output.stdout),
+                stderr
+            ));
         }
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
@@ -245,6 +326,11 @@ impl SshTarget {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(eg!("scp to {} failed: {}", self.host, stderr));
         }
+        let digest = crate::image_builder::file_digest(local, false)?;
+        self.exec(&format!(
+            "printf '%s  %s\\n' '{digest}' '{remote}' | sha256sum -c -"
+        ))
+        .await?;
         Ok(())
     }
 }
@@ -272,6 +358,7 @@ After=network.target
 [Service]
 Type=simple
 {user_lines}
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 {env_file_line}ExecStart={exec_start}
 Restart=on-failure
 RestartSec=5
@@ -296,7 +383,9 @@ name="{name}"
 description="TTstack {name}"
 command="{cmd}"
 command_args="{args}"
-command_background=true
+supervisor="supervise-daemon"
+respawn_delay=5
+respawn_max=0
 pidfile="/run/${{name}}.pid"
 output_log="/var/log/${{name}}.log"
 error_log="/var/log/${{name}}.log"
@@ -328,7 +417,7 @@ fn remote_setup_script(
 ) -> String {
     let bin_copies: String = binaries
         .iter()
-        .map(|b| format!("sudo cp {tmp}/{b} {prefix}/bin/{b}\nsudo chmod 755 {prefix}/bin/{b}",))
+        .map(|b| format!("sudo install -m 755 {tmp}/{b} {prefix}/bin/.{b}.new\nsudo mv -f {prefix}/bin/.{b}.new {prefix}/bin/{b}"))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -402,17 +491,25 @@ else
 fi
 
 # Create directories
-sudo mkdir -p {prefix}/bin {prefix}/etc {dir_list}
+sudo mkdir -p {prefix}/bin {prefix}/etc {home}/ctl {dir_list}
 
 # Install binaries
 {bin_copies}
 
 # Set ownership
-sudo chown -R {user}:{user} {home} 2>/dev/null || true
+sudo chown {user}:{user} {home} {home}/ctl
 {env_file_setup}
 # Detect init system and install service
-if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
     echo "[deploy] using systemd"
+    # Migrate documented mount guards from a previously edited generated unit.
+    if [ -f /etc/systemd/system/{service_name}.service ]; then
+        guards=$(sudo awk '/^RequiresMountsFor=/ {{u=u $0 "\n"}} /^ExecStartPre=.*mountpoint/ {{s=s $0 "\n"}} END {{if (u != "" || s != "") printf "[Unit]\n%s[Service]\n%s",u,s}}' /etc/systemd/system/{service_name}.service)
+        if [ -n "$guards" ]; then
+            sudo mkdir -p /etc/systemd/system/{service_name}.service.d
+            printf '%s\n' "$guards" | sudo tee /etc/systemd/system/{service_name}.service.d/90-ttstack-mounts.conf >/dev/null
+        fi
+    fi
     sudo tee /etc/systemd/system/{service_name}.service > /dev/null <<'UNIT'
 {systemd_unit}
 UNIT
@@ -433,11 +530,11 @@ INITD
     sudo rc-service {service_name} status && echo "[deploy] {service_name} is running"
 else
     echo "[deploy] WARNING: no known init system; starting {service_name} manually"
-    sudo pkill -f '{prefix}/bin/{service_name}' 2>/dev/null || true
+    sudo pkill -x '{service_name}' 2>/dev/null || true
     sleep 1
     sudo nohup sh -c '{env_source}{exec_cmd}' > /var/log/{service_name}.log 2>&1 &
     sleep 2
-    pgrep -f '{prefix}/bin/{service_name}' && echo "[deploy] {service_name} started (manual)"
+    pgrep -x '{service_name}' && echo "[deploy] {service_name} started (manual)"
 fi
 
 # Cleanup
@@ -499,11 +596,12 @@ async fn local_ensure_dirs(home: &str, user: &str) -> Result<()> {
         let path = format!("{home}/{dir}");
         tokio::fs::create_dir_all(&path).await.c(d!("mkdir"))?;
     }
-    Command::new("chown")
-        .args(["-R", &format!("{user}:{user}"), home])
+    let output = Command::new("chown")
+        .args([&format!("{user}:{user}"), home, &format!("{home}/ctl")])
         .output()
         .await
-        .c(d!("chown"))?;
+        .c(d!("chown controller directory"))?;
+    check_output(output, "chown controller directory")?;
     Ok(())
 }
 
@@ -515,7 +613,17 @@ async fn local_install_bin(src: &Path, prefix: &str) -> Result<()> {
 
     let name = src.file_name().unwrap().to_str().unwrap();
     let dst = format!("{bin_dir}/{name}");
-    tokio::fs::copy(src, &dst).await.c(d!("copy binary"))?;
+    let staging = tempfile::NamedTempFile::new_in(&bin_dir).c(d!("binary staging"))?;
+    tokio::fs::copy(src, staging.path())
+        .await
+        .c(d!("copy binary"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(staging.path(), std::fs::Permissions::from_mode(0o755))
+            .c(d!("binary permissions"))?;
+    }
+    staging.persist(&dst).map_err(|e| eg!(e.to_string()))?;
 
     Command::new("chmod")
         .args(["755", &dst])
@@ -525,6 +633,26 @@ async fn local_install_bin(src: &Path, prefix: &str) -> Result<()> {
 
     println!("[deploy] installed {dst}");
     Ok(())
+}
+
+fn mount_guard_dropin(unit: &str) -> Option<String> {
+    let requires = unit
+        .lines()
+        .filter(|l| l.starts_with("RequiresMountsFor="))
+        .collect::<Vec<_>>();
+    let checks = unit
+        .lines()
+        .filter(|l| l.starts_with("ExecStartPre=") && l.contains("mountpoint"))
+        .collect::<Vec<_>>();
+    if requires.is_empty() && checks.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "[Unit]\n{}\n[Service]\n{}\n",
+            requires.join("\n"),
+            checks.join("\n")
+        ))
+    }
 }
 
 async fn local_install_systemd(
@@ -563,6 +691,17 @@ async fn local_install_systemd(
     let env_path = env_file.map(|(p, _)| p);
     let unit = systemd_unit(name, exec_start, run_as_root, env_path);
     let path = format!("/etc/systemd/system/{name}.service");
+    if let Ok(previous) = tokio::fs::read_to_string(&path).await
+        && let Some(guards) = mount_guard_dropin(&previous)
+    {
+        let directory = format!("{path}.d");
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .c(d!("mount guard directory"))?;
+        tokio::fs::write(format!("{directory}/90-ttstack-mounts.conf"), guards)
+            .await
+            .c(d!("preserve mount guards"))?;
+    }
     tokio::fs::write(&path, &unit).await.c(d!("write unit"))?;
 
     let output = Command::new("systemctl")
@@ -700,8 +839,9 @@ pub async fn deploy_local(role: &str, release_dir: &str) -> Result<()> {
             local_install_systemd("tt-ctl", &cmd, false, Some((&env_path, &env_content))).await?;
             local_restart_service("tt-ctl").await?;
 
-            println!("[deploy] API key: {api_key}");
-            println!("[deploy] Run: tt config 127.0.0.1:9200 --api-key {api_key}");
+            println!(
+                "[deploy] API key stored in {prefix}/etc/api-key (0600). Configure the CLI using TT_API_KEY."
+            );
         }
         _ => {}
     }
@@ -716,6 +856,8 @@ pub async fn deploy_distributed(config_path: &str) -> Result<()> {
     let cfg: DeployConfig =
         toml::from_str(&content).map_err(|e| eg!(format!("parse deploy.toml: {e}")))?;
 
+    // Reject values that cannot be represented safely in both shell and service units.
+    validate_config(&cfg)?;
     // Validate the entire fleet configuration before changing any remote host.
     for agent in &cfg.agents {
         parse_disk(&agent.disk_total)?;
@@ -794,8 +936,17 @@ pub async fn deploy_distributed(config_path: &str) -> Result<()> {
             port: ctl.ssh_port,
         };
 
-        let tmp = format!("/tmp/ttstack-deploy-{}", std::process::id());
-        target.exec(&format!("mkdir -p {tmp}")).await?;
+        let tmp = target
+            .exec("umask 077; mktemp -d /tmp/ttstack-deploy.XXXXXXXXXX")
+            .await?
+            .trim()
+            .to_owned();
+        validate_path(&tmp, true)?;
+        if !tmp.starts_with("/tmp/ttstack-deploy.")
+            || tmp["/tmp/ttstack-deploy.".len()..].contains('/')
+        {
+            return Err(eg!("invalid remote staging directory"));
+        }
 
         for bin in ["tt-ctl", "tt"] {
             target
@@ -826,7 +977,10 @@ pub async fn deploy_distributed(config_path: &str) -> Result<()> {
             &ctl.host,
             Some((&env_path, &env_content)),
         );
-        let out = target.exec(&script).await?;
+        let result = target.exec(&script).await;
+        let cleanup = target.exec(&format!("rm -rf -- {tmp}")).await;
+        let out = result?;
+        cleanup?;
         print!("{out}");
     }
 
@@ -839,8 +993,17 @@ pub async fn deploy_distributed(config_path: &str) -> Result<()> {
             port: agent.ssh_port,
         };
 
-        let tmp = format!("/tmp/ttstack-deploy-{}", std::process::id());
-        target.exec(&format!("mkdir -p {tmp}")).await?;
+        let tmp = target
+            .exec("umask 077; mktemp -d /tmp/ttstack-deploy.XXXXXXXXXX")
+            .await?
+            .trim()
+            .to_owned();
+        validate_path(&tmp, true)?;
+        if !tmp.starts_with("/tmp/ttstack-deploy.")
+            || tmp["/tmp/ttstack-deploy.".len()..].contains('/')
+        {
+            return Err(eg!("invalid remote staging directory"));
+        }
 
         let agent_release = agent
             .release_dir
@@ -885,19 +1048,29 @@ pub async fn deploy_distributed(config_path: &str) -> Result<()> {
             prefix,
             &tmp,
             &["tt-agent"],
-            &[image_dir.as_str(), runtime_dir.as_str()],
+            &if agent.storage == "file" {
+                vec![image_dir.as_str(), runtime_dir.as_str()]
+            } else {
+                vec![]
+            },
             &agent.host,
             Some((&env_path, &env_content)),
         );
-        let out = target.exec(&script).await?;
+        let result = target.exec(&script).await;
+        let cleanup = target.exec(&format!("rm -rf -- {tmp}")).await;
+        let out = result?;
+        cleanup?;
         print!("{out}");
     }
 
     println!("\n[deploy] distributed deployment complete");
-    println!("[deploy] API key: {api_key}");
+    println!(
+        "[deploy] API key stored in {} (0600). Configure the CLI using TT_API_KEY.",
+        sidecar.display()
+    );
     if let Some(ctl) = &cfg.controller {
         println!(
-            "[deploy] Run: tt config {}:{} --api-key {api_key}",
+            "[deploy] Run with TT_API_KEY set: tt config {}:{}",
             ctl.host,
             ctl.listen.rsplit(':').next().unwrap_or("9200")
         );
@@ -908,6 +1081,28 @@ pub async fn deploy_distributed(config_path: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upgrade_preserves_documented_mount_guards() {
+        let previous = "[Unit]\nRequiresMountsFor=/srv/tt-run\n[Service]\nExecStartPre=/usr/bin/mountpoint -q /srv/tt-run\nExecStart=/old-agent\n";
+        let dropin = mount_guard_dropin(previous).unwrap();
+        assert!(dropin.contains("RequiresMountsFor=/srv/tt-run"));
+        assert!(dropin.contains("ExecStartPre=/usr/bin/mountpoint -q /srv/tt-run"));
+        assert!(!dropin.contains("/old-agent"));
+    }
+
+    #[test]
+    fn deployment_rejects_shell_and_unit_injection_before_remote_work() {
+        let mut cfg: DeployConfig = toml::from_str("[[agents]]\nhost='127.0.0.1'\n").unwrap();
+        assert!(validate_config(&cfg).is_ok());
+        cfg.agents[0].image_dir = Some("/tmp/image;touch /root/pwned".into());
+        assert!(validate_config(&cfg).is_err());
+        cfg.agents[0].image_dir = Some("/tmp/image%u".into());
+        assert!(validate_config(&cfg).is_err());
+        cfg.agents[0].image_dir = None;
+        cfg.general.user = "user\nExecStart=evil".into();
+        assert!(validate_config(&cfg).is_err());
+    }
 
     #[test]
     fn parse_disk_gib() {
