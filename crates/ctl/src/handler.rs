@@ -796,15 +796,20 @@ async fn resize_virtual_machine(
     if host.state != HostState::Online {
         return Err((StatusCode::SERVICE_UNAVAILABLE, "VM host is offline".into()));
     }
-    if vm.engine != Engine::Firecracker
-        || !host
-            .capabilities
-            .iter()
-            .any(|c| c == "firecracker_resources")
-    {
+    let capability = match vm.engine {
+        Engine::Qemu => "qemu_resources",
+        Engine::Firecracker => "firecracker_resources",
+        Engine::Docker => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "resource updates require QEMU or Firecracker".into(),
+            ));
+        }
+    };
+    if !host.capabilities.iter().any(|c| c == capability) {
         return Err((
             StatusCode::BAD_REQUEST,
-            "agent lacks firecracker_resources; upgrade agent and controller".into(),
+            format!("agent lacks {capability}; upgrade agent and controller"),
         ));
     }
     if vm.state != VmState::Stopped || vm.pending_resources.is_some_and(|r| r != target) {
@@ -1268,6 +1273,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     struct MockAgent {
         resources_supported: AtomicBool,
+        qemu_resources_supported: AtomicBool,
         vms: Mutex<Vec<Vm>>,
         stall_info: AtomicBool,
         info_entered: AtomicBool,
@@ -1319,11 +1325,14 @@ mod tests {
             vms: None,
             warnings: vec![],
             image_sizes: Default::default(),
-            capabilities: if mock.resources_supported.load(Ordering::SeqCst) {
-                vec!["firecracker_resources".into()]
-            } else {
-                vec![]
-            },
+            capabilities: [
+                ("firecracker_resources", &mock.resources_supported),
+                ("qemu_resources", &mock.qemu_resources_supported),
+            ]
+            .into_iter()
+            .filter(|(_, enabled)| enabled.load(Ordering::SeqCst))
+            .map(|(name, _)| name.into())
+            .collect(),
             host_id: "host".into(),
             resource,
             engines: vec![Engine::Docker],
@@ -1419,71 +1428,95 @@ mod tests {
     }
     #[tokio::test]
     async fn resize_requires_capability_and_stopped_vm_and_recovers_lost_reply() {
-        let (state, mock, server) = fixture().await;
-        seed(&state, &mock);
-        let target = VmResources {
-            cpu: 2,
-            mem: 512,
-            disk: 1024,
-        };
-        assert_eq!(
-            resize_virtual_machine(&state, "good", target)
+        for engine in [Engine::Qemu, Engine::Firecracker] {
+            let (state, mock, server) = fixture().await;
+            seed(&state, &mock);
+            for vm in mock.vms.lock().unwrap().iter_mut() {
+                vm.engine = engine;
+            }
+            let target = VmResources {
+                cpu: 2,
+                mem: 512,
+                disk: 1024,
+            };
+            assert_eq!(
+                resize_virtual_machine(&state, "good", target)
+                    .await
+                    .unwrap_err()
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+            mock.resources_supported.store(true, Ordering::SeqCst);
+            if engine == Engine::Qemu {
+                // Firecracker support must not authorize QEMU resource updates.
+                let error = resize_virtual_machine(&state, "good", target)
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.0, StatusCode::BAD_REQUEST);
+                assert!(error.1.contains("qemu_resources"));
+                mock.qemu_resources_supported.store(true, Ordering::SeqCst);
+            }
+            assert_eq!(
+                resize_virtual_machine(&state, "good", target)
+                    .await
+                    .unwrap_err()
+                    .0,
+                StatusCode::CONFLICT
+            );
+            for vm in mock.vms.lock().unwrap().iter_mut() {
+                vm.state = VmState::Stopped;
+            }
+            assert_eq!(
+                resize_virtual_machine(&state, "good", VmResources { cpu: 17, ..target })
+                    .await
+                    .unwrap_err()
+                    .0,
+                StatusCode::CONFLICT
+            );
+            mock.fail_action.store(true, Ordering::SeqCst);
+            assert!(
+                resize_virtual_machine(&state, "good", target)
+                    .await
+                    .is_err()
+            );
+            let saved = state.lock_db().get_vm("good").unwrap().unwrap();
+            assert_eq!((saved.cpu, saved.mem, saved.disk), (2, 512, 1024));
+            assert!(saved.pending_resources.is_none());
+            mock.fail_action.store(false, Ordering::SeqCst);
+            assert!(resize_virtual_machine(&state, "good", target).await.is_ok());
+            assert_eq!(
+                resize_virtual_machine(
+                    &state,
+                    "good",
+                    VmResources {
+                        disk: 512,
+                        ..target
+                    }
+                )
                 .await
                 .unwrap_err()
                 .0,
-            StatusCode::BAD_REQUEST
-        );
-        mock.resources_supported.store(true, Ordering::SeqCst);
-        for vm in mock.vms.lock().unwrap().iter_mut() {
-            vm.engine = Engine::Firecracker;
-        }
-        assert_eq!(
-            resize_virtual_machine(&state, "good", target)
-                .await
-                .unwrap_err()
-                .0,
-            StatusCode::CONFLICT
-        );
-        for vm in mock.vms.lock().unwrap().iter_mut() {
-            vm.state = VmState::Stopped;
-        }
-        assert_eq!(
-            resize_virtual_machine(&state, "good", VmResources { cpu: 17, ..target })
-                .await
-                .unwrap_err()
-                .0,
-            StatusCode::CONFLICT
-        );
-        mock.fail_action.store(true, Ordering::SeqCst);
-        assert!(
-            resize_virtual_machine(&state, "good", target)
-                .await
-                .is_err()
-        );
-        let saved = state.lock_db().get_vm("good").unwrap().unwrap();
-        assert_eq!((saved.cpu, saved.mem, saved.disk), (2, 512, 1024));
-        assert!(saved.pending_resources.is_none());
-        mock.fail_action.store(false, Ordering::SeqCst);
-        assert!(resize_virtual_machine(&state, "good", target).await.is_ok());
-        assert_eq!(
-            resize_virtual_machine(
+                StatusCode::BAD_REQUEST
+            );
+            let reduced = resize_virtual_machine(
                 &state,
                 "good",
                 VmResources {
-                    disk: 512,
+                    cpu: 1,
+                    mem: 256,
                     ..target
-                }
+                },
             )
             .await
-            .unwrap_err()
-            .0,
-            StatusCode::BAD_REQUEST
-        );
-        server.abort();
+            .unwrap();
+            assert_eq!((reduced.cpu, reduced.mem, reduced.disk), (1, 256, 1024));
+            server.abort();
+        }
     }
     async fn fixture() -> (CtlState, Arc<MockAgent>, tokio::task::JoinHandle<()>) {
         let mock = Arc::new(MockAgent {
             resources_supported: AtomicBool::new(false),
+            qemu_resources_supported: AtomicBool::new(false),
             vms: Mutex::new(vec![]),
             stall_info: AtomicBool::new(false),
             info_entered: AtomicBool::new(false),

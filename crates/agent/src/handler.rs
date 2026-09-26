@@ -169,7 +169,7 @@ pub async fn resize_vm(
                 StatusCode::CONFLICT
             } else if e.contains("shrinking")
                 || e.contains("must be > 0")
-                || e.contains("require Firecracker")
+                || e.contains("require QEMU or Firecracker")
                 || e.contains("overflow")
             {
                 StatusCode::BAD_REQUEST

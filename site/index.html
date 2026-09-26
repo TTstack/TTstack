@@ -295,7 +295,8 @@ Fleet Status
         <h3>QEMU/KVM</h3>
         <p>
           Full VMs from cloud images, with root SSH key injection and virtual-disk
-          growth at creation.
+          growth at creation and while stopped. The guest manages its own
+          partition and filesystem growth.
         </p>
         <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md">Guest images and access &rarr;</a></p>
       </article>
@@ -420,10 +421,10 @@ Fleet Status
         </svg>
         <h3>Resize a stopped VM</h3>
         <p>
-          Firecracker supports CPU and memory increases or decreases for the next
-          boot, and root-disk growth while stopped. QEMU supports disk growth at
-          creation only; stopped-instance resource updates are unavailable for
-          QEMU and Docker/Podman.
+          QEMU and Firecracker support CPU and memory increases or decreases for
+          the next boot, and disk growth while stopped. QEMU guests manage their
+          own filesystem growth; Firecracker also grows ext4 offline.
+          Resource updates are unavailable for Docker/Podman.
         </p>
         <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md#offline-resource-updates">Offline resource updates &rarr;</a></p>
       </article>

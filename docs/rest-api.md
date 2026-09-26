@@ -61,11 +61,11 @@ unschedulable requests 422. Agent operation failures may surface as 502.
 
 `POST /api/vms/{id}/resources` takes `{"cpu": 4, "mem": 8192, "disk": 16384}`.
 All three positive values are required; memory/root disk use MiB. This operation
-supports only stopped Firecracker VMs on file or ZFS storage. The agent must advertise
-**`firecracker_resources`**, separate from creation-time `firecracker_disk_resize`.
-QEMU and Docker/Podman are rejected by both controller and agent; QEMU disk growth
-is implemented only at creation. This operation does not stop or start guests or
-offer an atomic multi-VM update. The CLI equivalent is:
+supports stopped QEMU and Firecracker VMs on file or ZFS storage. The agent must
+advertise **`qemu_resources`** for QEMU or **`firecracker_resources`** for Firecracker;
+the latter is separate from creation-time `firecracker_disk_resize`.
+Docker/Podman is rejected by both controller and agent. This operation does not
+stop or start guests or offer an atomic multi-VM update. The CLI equivalent is:
 
 ```sh
 tt env stop demo
@@ -74,19 +74,23 @@ tt env start demo
 ```
 
 CPU/RAM can increase or decrease and take effect on the next cold boot. Disk can
-only grow; the root disk and its ext4 filesystem are expanded during the offline
-update, before it returns successfully. `disk` excludes the 4 MiB guest
-configuration drive. The existing disk, VM identity, ports and opaque
-configuration are retained. Both recorded and actual stopped state are checked
-before disk mutation. Host admission includes VMM overhead and the additional disk
-reservation. A stopped VM does not reserve CPU/RAM for a later start; capacity is
+only grow. For QEMU, the offline update expands the virtual block device; the
+guest must expand its own partitions/filesystems, often at boot through cloud-init.
+Successful resize does not confirm guest filesystem growth. Firecracker expands
+both the root disk and its unpartitioned ext4 filesystem before returning success.
+`disk` excludes the separate 4 MiB Firecracker guest configuration drive. The
+existing disk, VM identity, ports and opaque configuration are retained. Both
+recorded and actual stopped state are checked before disk mutation. Host admission
+includes VMM overhead and the additional disk reservation. A stopped VM does not reserve CPU/RAM for a later start; capacity is
 checked again on start. No migration is attempted when its host has no capacity.
 
 Intent is persisted as `Vm.pending_resources` before storage changes. While set,
 the larger disk remains reserved and start is refused. Retry the **same target**
 to complete an interrupted operation: equal device capacity still runs filesystem
-growth, covering interruption between device growth and `resize2fs`. A successful
-response clears intent and updates `cpu`, `mem`, `disk` and `options.requested_disk`.
+growth for Firecracker, covering interruption between device growth and `resize2fs`.
+QEMU retries recheck virtual disk capacity and finish an already-applied growth
+without replacing the disk. A successful response clears intent and updates
+`cpu`, `mem`, `disk` and `options.requested_disk`.
 The VM remains stopped. Invalid values/shrink/unsupported capability return 400;
 state conflicts or insufficient schedulable capacity return 409. A timeout or 502
 can have an unknown outcome: inspect the VM, including pending resources and error,

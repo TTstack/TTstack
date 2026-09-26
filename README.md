@@ -86,10 +86,12 @@ For multiple hosts, use [distributed deployment](docs/deployment.md#distributed-
 - Scheduling prefers eligible ZFS hosts for VMs, falling back to file hosts.
   It uses configured CPU, memory and disk reservations, not measured load.
   Limits of 50 hosts and 1000 tracked VMs are guardrails, not tested fleet capacity.
-- QEMU cloud images support root SSH key injection and virtual-disk growth.
-  Firecracker uses a prepared kernel/rootfs and supports ext4 growth at creation
-  and explicit [stopped-VM resource updates](docs/rest-api.md#offline-resource-updates);
-  its built-in recipe only checks boot and networking. Docker requires a long-running image default command.
+- QEMU cloud images support root SSH key injection and virtual-disk growth;
+  guest partitions/filesystems must grow separately. Firecracker uses a prepared
+  kernel/rootfs and supports ext4 growth; its built-in recipe only checks boot
+  and networking. Both support explicit
+  [stopped-VM resource updates](docs/rest-api.md#offline-resource-updates).
+  Docker requires a long-running image default command.
 - Firecracker uses jailer and per-VM resource limits, supports opaque read-only
   guest configuration, and requests orderly shutdown before forced termination.
 - Linux QEMU and Firecracker both support routed outgoing traffic restrictions

@@ -101,6 +101,10 @@ binary also passed. This check did not boot guests or exercise the remote hosts.
   installation, connection leases and idle-stop policy belong in callers.
 - No automatic guest restart after host reboot, migration, HA, distributed storage,
   image distribution or application/database provisioning.
+- QEMU and Firecracker support stopped-VM CPU/RAM updates and disk growth on file
+  and ZFS storage. QEMU requires `qemu_resources` and expands only the virtual disk;
+  the guest must grow its partitions/filesystems. See the
+  [offline resource API](rest-api.md#offline-resource-updates).
 - Docker does not support managed SSH keys, disk quotas or outgoing restrictions.
   Firecracker supports creation-time ext4 growth and explicit stopped-VM resource
   updates (`firecracker_resources`), but not managed SSH keys, interactive consoles

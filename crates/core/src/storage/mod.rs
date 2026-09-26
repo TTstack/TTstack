@@ -37,25 +37,25 @@ pub trait ImageStore: Send + Sync {
     /// Disk format string for the engine (e.g. `"qcow2"` or `"raw"`).
     fn disk_format(&self) -> &'static str;
 
-    /// Inspect the base before reserving identity or cloning it.
+    /// Inspect a QEMU base image or an offline clone's virtual disk capacity.
     fn qemu_size(&self, path: &str) -> Result<u64> {
         use crate::command::CommandExt;
         let output = std::process::Command::new("qemu-img")
             .args(["info", "--output=json", &self.resolve_disk(path)])
             .bounded_output()
-            .c(d!("inspect QEMU base"))?;
+            .c(d!("inspect QEMU disk"))?;
         if !output.status.success() {
-            return Err(eg!("cannot inspect QEMU base image"));
+            return Err(eg!("cannot inspect QEMU disk"));
         }
         let info: serde_json::Value =
-            serde_json::from_slice(&output.stdout).c(d!("QEMU base metadata"))?;
+            serde_json::from_slice(&output.stdout).c(d!("QEMU disk metadata"))?;
         if info["format"] != self.disk_format() {
-            return Err(eg!("unexpected QEMU base image format"));
+            return Err(eg!("unexpected QEMU disk format"));
         }
         info["virtual-size"]
             .as_u64()
             .filter(|n| *n > 0)
-            .ok_or_else(|| eg!("invalid QEMU base size"))
+            .ok_or_else(|| eg!("invalid QEMU disk size"))
     }
 
     /// Grow a QEMU disk, rejecting shrink requests.

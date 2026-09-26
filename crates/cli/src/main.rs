@@ -133,7 +133,7 @@ enum EnvCmd {
     Stop { name: String },
     /// Start all VMs in an environment.
     Start { name: String },
-    /// Change one stopped Firecracker VM; disk can only grow. Inspect env show for VM IDs.
+    /// Change one stopped QEMU/Firecracker VM; disk can only grow. Inspect env show for VM IDs.
     Resize {
         vm_id: String,
         #[arg(long)]

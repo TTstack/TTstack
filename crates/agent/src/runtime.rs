@@ -376,11 +376,11 @@ impl Runtime {
         self.recount()
     }
 
-    /// Change a stopped Firecracker guest without replacing its disk or identity.
+    /// Change a stopped VM without replacing its disk or identity.
     pub fn resize_vm(&mut self, id: &str, target: VmResources) -> Result<Vm> {
         let mut vm = load_vm(&self.db, id)?.ok_or_else(|| eg!(format!("VM not found: {id}")))?;
-        if vm.engine != Engine::Firecracker {
-            return Err(eg!("resource updates currently require Firecracker"));
+        if !matches!(vm.engine, Engine::Qemu | Engine::Firecracker) {
+            return Err(eg!("resource updates require QEMU or Firecracker"));
         }
         if target.cpu == 0 || target.mem == 0 || target.disk == 0 {
             return Err(eg!("cpu, memory and root disk must be > 0"));
@@ -399,7 +399,12 @@ impl Runtime {
             ));
         }
         let path = self.clone_path(&vm);
-        let current = self.store.firecracker_size(&path)?.div_ceil(1024 * 1024);
+        let current = if vm.engine == Engine::Qemu {
+            self.store.qemu_size(&path)?
+        } else {
+            self.store.firecracker_size(&path)?
+        }
+        .div_ceil(1024 * 1024);
         let overhead = if vm.options.guest_config_digest.is_some() {
             ttcore::guest_config::CONFIG_DISK_MIB
         } else {
@@ -439,7 +444,11 @@ impl Runtime {
         save_vm(&self.db, &vm)?;
         self.recount()?;
         if let Err(e) = if grow {
-            self.store.resize_firecracker(&path, target.disk)
+            if vm.engine == Engine::Qemu {
+                self.store.resize_disk(&path, target.disk)
+            } else {
+                self.store.resize_firecracker(&path, target.disk)
+            }
         } else {
             Ok(())
         } {
@@ -878,6 +887,11 @@ fn detect_engines() -> Vec<Engine> {
 fn detect_capabilities(engines: &[Engine], storage: Storage) -> Vec<String> {
     let mut caps = Vec::new();
     if cfg!(target_os = "linux") {
+        if engines.contains(&Engine::Qemu)
+            && (storage == Storage::File || probe("zfs", &["version"]))
+        {
+            caps.push("qemu_resources".into());
+        }
         if probe("nft", &["--version"]) && probe("ip", &["-Version"]) {
             caps.push("isolated_network".into());
         }
@@ -1127,6 +1141,151 @@ mod lifecycle_tests {
             },
             engine_factory: |_| Ok(Box::new(FakeEngine)),
             network_ready: false,
+        }
+    }
+    /// Fault injection at the storage boundary, without changing process-wide PATH.
+    struct QemuTestStore {
+        fail_after_growth: bool,
+    }
+    impl storage::ImageStore for QemuTestStore {
+        fn clone_image(&self, _: &str, _: &str) -> Result<()> {
+            unreachable!()
+        }
+        fn remove_image(&self, _: &str) -> Result<()> {
+            unreachable!()
+        }
+        fn list_images(&self, _: &str) -> Result<Vec<String>> {
+            unreachable!()
+        }
+        fn image_exists(&self, _: &str) -> Result<bool> {
+            unreachable!()
+        }
+        fn resolve_disk(&self, path: &str) -> String {
+            path.into()
+        }
+        fn disk_format(&self) -> &'static str {
+            "qcow2"
+        }
+        fn name(&self) -> &'static str {
+            "qemu-test"
+        }
+        fn qemu_size(&self, path: &str) -> Result<u64> {
+            Ok(std::fs::metadata(path).c(d!())?.len())
+        }
+        fn resize_disk(&self, path: &str, size: u32) -> Result<()> {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .c(d!())?
+                .set_len(u64::from(size) * 1024 * 1024)
+                .c(d!())?;
+            if self.fail_after_growth {
+                return Err(eg!("injected failure after disk growth"));
+            }
+            Ok(())
+        }
+    }
+    #[test]
+    fn qemu_resources_recover_growth_after_reopen_and_allow_cpu_memory_reduction() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("agent.db");
+        let mut rt = runtime(Connection::open(&database).unwrap());
+        rt.runtime_dir = dir.path().to_str().unwrap().into();
+        rt.store = Box::new(QemuTestStore {
+            fail_after_growth: true,
+        });
+        let mut guest = vm("resize-qemu", "offline", VmState::Stopped);
+        guest.engine = Engine::Qemu;
+        guest.disk = 64;
+        guest.options.requested_disk = 64;
+        guest.options.ssh_keys = vec!["ssh-ed25519 AAAA retained".into()];
+        guest.options.deny_outgoing = true;
+        guest.ip = "10.10.0.2".into();
+        guest.port_map.insert(22, 20000);
+        save_vm(&rt.db, &guest).unwrap();
+        let disk = rt.clone_path(&guest);
+        std::fs::write(&disk, b"retained").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&disk)
+            .unwrap()
+            .set_len(64 * 1024 * 1024)
+            .unwrap();
+        let target = VmResources {
+            cpu: 4,
+            mem: 2048,
+            disk: 96,
+        };
+        assert!(rt.resize_vm(&guest.id, target).is_err());
+        let pending = load_vm(&rt.db, &guest.id).unwrap().unwrap();
+        assert_eq!(pending.pending_resources, Some(target));
+        assert_eq!((pending.cpu, pending.mem, pending.disk), (2, 1024, 64));
+        assert_eq!(rt.resource.disk_used, 96);
+        assert_eq!(rt.resource.cpu_used, 0);
+        assert!(rt.start_vm(&guest.id).is_err());
+        assert!(
+            rt.resize_vm(&guest.id, VmResources { cpu: 1, ..target })
+                .is_err()
+        );
+        drop(rt);
+
+        let mut rt = runtime(Connection::open(&database).unwrap());
+        rt.runtime_dir = dir.path().to_str().unwrap().into();
+        rt.store = Box::new(QemuTestStore {
+            fail_after_growth: false,
+        });
+        let done = rt.resize_vm(&guest.id, target).unwrap();
+        assert_eq!((done.cpu, done.mem, done.disk), (4, 2048, 96));
+        assert_eq!(done.state, VmState::Stopped);
+        assert!(done.pending_resources.is_none());
+        assert!(done.error.is_none());
+        assert_eq!(done.id, guest.id);
+        assert_eq!(done.ip, guest.ip);
+        assert_eq!(done.port_map, guest.port_map);
+        assert_eq!(done.options.ssh_keys, guest.options.ssh_keys);
+        assert!(done.options.deny_outgoing);
+        let mut marker = [0; 8];
+        std::fs::File::open(&disk)
+            .unwrap()
+            .read_exact(&mut marker)
+            .unwrap();
+        assert_eq!(&marker, b"retained");
+        assert!(rt.resize_vm(&guest.id, target).is_ok());
+        // CPU/RAM-only updates must not invoke disk growth.
+        rt.store = Box::new(QemuTestStore {
+            fail_after_growth: true,
+        });
+        let reduced = rt
+            .resize_vm(
+                &guest.id,
+                VmResources {
+                    cpu: 1,
+                    mem: 256,
+                    ..target
+                },
+            )
+            .unwrap();
+        assert_eq!((reduced.cpu, reduced.mem, reduced.disk), (1, 256, 96));
+        for invalid in [
+            VmResources { cpu: 0, ..target },
+            VmResources { mem: 0, ..target },
+            VmResources { disk: 64, ..target },
+            VmResources { cpu: 9, ..target },
+        ] {
+            assert!(rt.resize_vm(&guest.id, invalid).is_err());
+        }
+        for (engine, state, image) in [
+            (Engine::Qemu, VmState::Running, "offline"),
+            (Engine::Qemu, VmState::Stopped, "live"),
+            (Engine::Docker, VmState::Stopped, "offline"),
+        ] {
+            let mut invalid = reduced.clone();
+            invalid.engine = engine;
+            invalid.state = state;
+            invalid.image = image.into();
+            save_vm(&rt.db, &invalid).unwrap();
+            assert!(rt.resize_vm(&guest.id, target).is_err());
         }
     }
     #[test]

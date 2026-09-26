@@ -70,6 +70,10 @@ The QEMU engine still needs `genisoimage` or `mkisofs` to build the seed.
 cannot shrink below the base image's virtual size. The guest must also grow its
 partition/filesystem; increasing the virtual disk alone does not do that. Disk
 reservations track virtual capacity, not physical bytes used by sparse files.
+For an existing stopped VM on file or ZFS storage, use
+[`tt env resize`](rest-api.md#offline-resource-updates) to change CPU/RAM and grow
+the virtual disk. The agent must advertise `qemu_resources`. CPU/RAM take effect
+at the next boot; guest filesystem growth remains the guest's responsibility.
 
 Stop requests guest shutdown, then terminates QEMU if necessary. Start boots the
 preserved disk in a new process. Memory is not preserved; save guest work first.
