@@ -328,10 +328,12 @@ repeat across hosts. QEMU cloud-init configures DNS as `8.8.8.8` and `1.1.1.1`;
 the guest/network must be able to reach them for name resolution.
 
 Port forwarding is **TCP only**, from allocated host ports to requested guest
-ports. `--deny-outgoing` blocks routed outbound initiation while permitting replies
-to inbound traffic. It can also prevent external DNS access; it is not isolation
-from the host or other guests on the bridge. Environments do not create a private
-cross-host network. Docker uses its own networking and port publishing.
+ports. On both QEMU and Firecracker, `--deny-outgoing` blocks routed outbound
+initiation while permitting replies to inbound traffic. It can also prevent
+external DNS access; it is not isolation from the host or other guests on the
+bridge. Environments do not create a private cross-host network.
+Docker/Podman uses its own networking and port publishing;
+TTstack rejects `deny_outgoing` and `isolated_network` for this engine.
 
 For mutually untrusted Linux QEMU/Firecracker guests, set `isolated_network: true`
 or `--isolated-network`. Host-enforced bridge rules block direct peer traffic,

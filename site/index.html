@@ -382,16 +382,18 @@ Fleet Status
         </p>
       </article>
       <article class="card">
-        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Isolated and resource limited" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Guest network controls" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
           <rect x="5.5" y="11.5" width="15" height="10.5" rx="2.5"></rect>
           <path d="M9 11.5V8.5a4 4 0 0 1 8 0v3"></path>
         </svg>
-        <h3>Jailed, limited, isolatable</h3>
+        <h3>Guest network controls</h3>
         <p>
-          Firecracker runs under jailer with per-VM resource limits, and guests can be
-          denied outgoing traffic or isolated from the host network.
+          Both Linux QEMU and Firecracker support blocking routed outgoing traffic
+          while allowing replies to inbound connections. Separate opt-in isolation
+          blocks guest-initiated access to host services, peers and private networks.
+          These controls are unavailable for Docker/Podman.
         </p>
-        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md#firecracker-guest-configuration">Isolation setup &rarr;</a></p>
+        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md#networking-and-platform-scope">Networking and isolation &rarr;</a></p>
       </article>
       <article class="card">
         <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Disks retained across stop" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
@@ -415,8 +417,10 @@ Fleet Status
         </svg>
         <h3>Resize a stopped VM</h3>
         <p>
-          CPU, memory and root disk can be changed on a stopped Firecracker VM
-          &mdash; grow-only, applied when it boots again.
+          Firecracker supports CPU and memory increases or decreases for the next
+          boot, and root-disk growth while stopped. QEMU supports disk growth at
+          creation only; stopped-instance resource updates are unavailable for
+          QEMU and Docker/Podman.
         </p>
         <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md#offline-resource-updates">Offline resource updates &rarr;</a></p>
       </article>
