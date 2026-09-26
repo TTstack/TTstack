@@ -7,12 +7,12 @@ requires Linux. QEMU/KVM, Firecracker and Docker/Podman are the available engine
 
 | Workflow | Implementation | Current live evidence |
 |---|---|---|
-| Linux QEMU/KVM + file storage | Full VMs, cloud-init, TCP forwarding, disk growth | Alpine 3.21.7 and Debian 13 guests on Ubuntu 24.04.4 hosts |
+| Linux QEMU/KVM + file storage | Full VMs, cloud-init, TCP forwarding, offline resource updates | Alpine 3.21.7 and Debian 13 lifecycle; [Alpine resize and recovery](validation/qemu-resize-validation-2026-09-26.md) on two Ubuntu 24.04.4 hosts |
 | Linux Docker | Container lifecycle and native port publishing | Temporary HTTP workload on two Ubuntu 24.04.4 hosts |
 | Linux Firecracker + file storage | Jailer, config drive, orderly shutdown, opt-in network isolation | Alpine fixture: config/read-only access, retained data, isolation, restart and cleanup on Ubuntu 24.04 |
 | Linux Firecracker + zvol | Snapshot clones, jailed block device, ext4 growth, retained disks | [Dedicated ZFS host validation](validation/firecracker-zvol-validation-2026-09-24.md) |
 | Podman | Alternate runtime selected when `docker --version` fails | Not covered by the 2026-09-24 lifecycle run |
-| QEMU + zvol | Raw ZFS volumes and snapshot clones | Not covered by the 2026-09-24 lifecycle run |
+| QEMU + zvol | Raw ZFS volumes, snapshot clones, offline resource updates | [Alpine resize and recovery](validation/qemu-resize-validation-2026-09-26.md) on two Ubuntu 24.04.4 hosts with dedicated NVMe pools |
 | Ubuntu cloud guest | Built-in QEMU recipe | Not covered by the 2026-09-24 lifecycle run |
 | Linux/systemd deployment | Local and distributed service generation | Temporary systemd services exercised; not every deploy configuration |
 | Linux/OpenRC, musl binaries | Distributed deployment support | Not covered by the 2026-09-24 lifecycle run |
