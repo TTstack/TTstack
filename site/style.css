@@ -1,14 +1,17 @@
-/* Light theme. Colour roles come from the validated reference palette
-   (light surface #fcfcfb): ink and status steps are used as documented, and
-   every status colour always ships with its text label so colour never
-   carries meaning alone. The controller dashboard keeps its own dark theme. */
+/* Light theme with a cool tinted page plane (#eef3fa) and white panels, so the
+   page never reads as dark. Ink and status steps come from the validated
+   reference palette and every status colour always ships with its text label,
+   so colour never carries meaning alone. The controller dashboard keeps its own
+   dark theme. When this file changes, bump the ?v= token on the stylesheet link
+   in index.html - GitHub Pages caches assets for ten minutes. */
 
 :root {
   color-scheme: light;
 
-  --plane: #f9f9f7;
-  --surface: #fcfcfb;
-  --code-bg: #f1f1ee;
+  --plane: #eef3fa;
+  --surface: #ffffff;
+  --figure-bg: #f7fafd;
+  --code-bg: #e6edf7;
 
   --ink: #0b0b0b;
   --ink-2: #52514e;
@@ -153,7 +156,7 @@ h3 { margin: 0 0 8px; font-size: 1.05rem; }
 .figure {
   margin: 20px 0 0;
   padding: 22px 20px;
-  background: var(--surface);
+  background: var(--figure-bg);
   border: 1px solid var(--hairline);
   border-radius: var(--radius);
   overflow-x: auto;
