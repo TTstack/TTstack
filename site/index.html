@@ -276,8 +276,10 @@ Fleet Status
       </li>
       <li>
         <strong>Expiry is a cleanup trigger.</strong>
-        Environments expire on their lifetime, and the controller then runs the same
-        cleanup path &mdash; it is not an exact termination deadline.
+        The default lifetime is six hours. Choose a longer lifetime, or use
+        <code>--lifetime 0</code> to disable automatic expiry. When a lifetime ends,
+        the controller runs the deletion cleanup path &mdash; it is not an exact
+        termination deadline.
       </li>
     </ul>
   </section>
@@ -338,8 +340,9 @@ Fleet Status
         </svg>
         <h3>Automatic lifecycle management</h3>
         <p>
-          Environments expire on their own lifetime, and the controller then runs
-          cleanup on a loop &mdash; retrying what failed instead of forgetting it.
+          Choose a lifetime or keep an environment until you delete it. When expiry
+          is enabled, the controller cleans up expired environments and retries
+          incomplete deletion.
         </p>
         <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md#lifecycle-and-recovery">Recovery semantics &rarr;</a></p>
       </article>

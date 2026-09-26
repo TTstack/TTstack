@@ -1737,6 +1737,30 @@ mod tests {
         server.abort();
     }
     #[tokio::test]
+    async fn lifetime_defaults_long_terms_and_permanent_envs_survive_expiry_sweep() {
+        for lifetime in [None, Some(30 * 86400), Some(3650 * 86400), Some(0)] {
+            let (state, mock, server) = fixture().await;
+            let mut req = request();
+            req.lifetime = lifetime;
+            let accepted = create_environment(&state, req).await.unwrap();
+            let expected = match lifetime.unwrap_or(DEFAULT_LIFETIME) {
+                0 => 0,
+                seconds => accepted.env.created_at + seconds,
+            };
+            assert_eq!(accepted.env.expires_at, expected);
+            {
+                let _finished = state.operation_lock("new-env").lock_owned().await;
+            }
+            crate::expire_envs(&state).await;
+            let detail = environment_detail(&state, "new-env").unwrap();
+            assert_eq!(detail.env.expires_at, expected);
+            assert_eq!(detail.env.state, EnvState::Active);
+            assert_eq!(detail.vms.len(), 1);
+            assert_eq!(mock.vms.lock().unwrap().len(), 1);
+            server.abort();
+        }
+    }
+    #[tokio::test]
     async fn lost_create_response_is_reconciled_without_duplicate_resources() {
         let (state, mock, server) = fixture().await;
         mock.lose_create_response.store(true, Ordering::SeqCst);
