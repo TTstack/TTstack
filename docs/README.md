@@ -26,6 +26,7 @@ establish. A new report belongs in `docs/validation/` and is linked here.
 
 | Evidence | Document |
 | --- | --- |
+| Native QEMU resize, Docker/Podman resource and network feasibility | [Engine capability probes, 2026-09-26](validation/engine-capability-probes-2026-09-26.md) |
 | Offline stopped-VM resource updates on file and ZFS storage | [Offline resource update, 2026-09-25](validation/offline-resource-validation-2026-09-25.md) |
 | Native caller stop/resume and zvol lifecycle | [Native caller lifecycle, 2026-09-25](validation/native-caller-validation-2026-09-25.md) |
 | Audit correction regressions and recovery | [Audit correction, 2026-09-25](validation/audit-validation-2026-09-25.md) |
