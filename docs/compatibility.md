@@ -92,7 +92,9 @@ anchors; deletion removes both translation and filter rules.
 When the agent itself runs in a VNET jail, its parent must delegate child-jail
 creation and devfs mounting (`children.max`, `allow.mount`, `allow.mount.devfs`,
 `enforce_statfs < 2`), and expose the needed PF/TAP/VMM devices. Bhyve additionally
-requires `allow.vmm`. Use a dedicated test jail; changing a gateway jail's
+requires `allow.vmm`. Nested Jail guests also need permission to mount devfs with
+ruleset 4; the agent's VMM/ZFS devices can use a separate devfs mount ruleset.
+Use a dedicated test jail; changing a gateway jail's
 permissions or firewall is not required by TTstack.
 
 The Linux-only release cannot deserialize restored engine names in persisted

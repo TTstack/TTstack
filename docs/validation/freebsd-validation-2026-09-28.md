@@ -9,6 +9,18 @@ build tree; every file matched. The last rebase changed no Rust source. This rep
 commitment. Maintained FreeBSD behavior and prerequisites are in
 [compatibility](../compatibility.md#experimental-freebsd-restoration).
 
+## Follow-up correction
+
+The [zvol and egress follow-up](freebsd-zvol-validation-2026-09-28.md) found that
+this revision's `ps` column syntax could misreport a live bhyve process as stopped.
+The observations below established process presence through separate host probes;
+they did not establish correct agent process-state interpretation or prove that
+stop used the identity-checked signal path. The follow-up corrects that defect
+and validates running API state, identity-aware stop and orderly guest shutdown.
+It also restores bhyve `deny_outgoing` with corrected PF rules; Jail remains
+unsupported. The original test counts and artifact hashes below apply only to
+the revision recorded here.
+
 ## Host, isolation and artifacts
 
 The explicitly authorized host ran FreeBSD 15.1-RELEASE-p3 on amd64, with four
