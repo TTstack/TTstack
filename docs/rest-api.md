@@ -186,6 +186,10 @@ include only online hosts; tracked VM counts also include offline allocations.
 Agent `/api/info` returns `host_id`, `resource`, `engines`, `storage`, `images`,
 `image_sizes`, `capabilities`, `vms` and optional `warnings`. VM rows and resources
 come from the same snapshot; older agents without `vms` use the legacy list read.
+Image names and sizes use a separate background cache, refreshed after startup and
+15 seconds after each completed scan. Slow image inspection does not block host
+health or lifecycle reads; `warnings` reports delayed/failed catalog refreshes.
+Wait for a newly installed image to appear in `tt image list` before scheduling it.
 Known allocations missing from a snapshot retain conservative reservations;
 untracked agent VMs are counted and logged, never silently adopted. Hosts retain
 image sizes and a nullable `error` describing the latest probe failure/warnings.

@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use ttcore::{api::*, model::Vm};
 
 pub struct AgentShared {
@@ -14,8 +14,26 @@ pub struct AgentShared {
     pub db_path: String,
     pub info: AgentInfo,
     pub image_dir: String,
+    pub images: RwLock<ImageCatalog>,
 }
 pub type AppState = Arc<AgentShared>;
+
+#[derive(Clone)]
+pub struct ImageCatalog {
+    pub images: Vec<String>,
+    pub sizes: std::collections::BTreeMap<String, u32>,
+    pub warning: Option<String>,
+}
+
+impl Default for ImageCatalog {
+    fn default() -> Self {
+        Self {
+            images: vec![],
+            sizes: Default::default(),
+            warning: Some("image catalog refresh pending".into()),
+        }
+    }
+}
 
 type Reply<T> = (StatusCode, Json<ApiResp<T>>);
 fn failure<T>(e: impl std::fmt::Display) -> Reply<T> {
@@ -36,29 +54,50 @@ async fn read_snapshot(state: AppState) -> Result<(AgentInfo, Vec<Vm>), String> 
     .map_err(|e| e.to_string())?
 }
 
-async fn read_images(
-    state: AppState,
-) -> Result<(Vec<String>, std::collections::BTreeMap<String, u32>), String> {
-    tokio::task::spawn_blocking(move || {
+/// One background worker refreshes the catalog; HTTP reads never wait for disk tools.
+pub async fn refresh_images(state: AppState) {
+    let reader = state.clone();
+    let mut task = tokio::task::spawn_blocking(move || {
+        let state = reader;
         let store = ttcore::storage::create_store(state.info.storage);
         let images = store
             .list_images(&state.image_dir)
             .map_err(|e| e.to_string())?;
         let sizes = ttcore::storage::image_sizes(store.as_ref(), &state.image_dir, &images);
-        Ok((images, sizes))
-    })
-    .await
-    .map_err(|e| e.to_string())?
+        Ok::<_, String>(ImageCatalog {
+            images,
+            sizes,
+            warning: None,
+        })
+    });
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await {
+        Ok(result) => result,
+        Err(_) => {
+            state
+                .images
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .warning = Some("image catalog refresh is slow; serving cached images".into());
+            // Keep the single worker until completion: timing out a blocking task
+            // does not cancel it and must not start overlapping inspections.
+            task.await
+        }
+    };
+    let catalog = result
+        .map_err(|e| e.to_string())
+        .and_then(|r| r)
+        .unwrap_or_else(|e| {
+            eprintln!("[agent] image catalog unavailable: {e}");
+            ImageCatalog {
+                images: vec![],
+                sizes: Default::default(),
+                warning: Some(format!("image catalog unavailable: {e}")),
+            }
+        });
+    *state.images.write().unwrap_or_else(|e| e.into_inner()) = catalog;
 }
 
 pub async fn get_info(State(state): State<AppState>) -> impl IntoResponse {
-    let (images, sizes) = match read_images(state.clone()).await {
-        Ok(images) => images,
-        Err(e) => {
-            eprintln!("[agent] image catalog unavailable: {e}");
-            (vec![], Default::default())
-        }
-    };
     let snapshot = tokio::task::spawn_blocking(move || {
         let (vms, corrupt) =
             runtime::read_recovery_snapshot(&state.db_path).map_err(|e| e.to_string())?;
@@ -72,8 +111,10 @@ pub async fn get_info(State(state): State<AppState>) -> impl IntoResponse {
                 "unreadable VM records retained; new admission disabled; inspect agent logs".into(),
             );
         }
-        info.images = images;
-        info.image_sizes = sizes;
+        let catalog = state.images.read().unwrap_or_else(|e| e.into_inner());
+        info.images = catalog.images.clone();
+        info.image_sizes = catalog.sizes.clone();
+        info.warnings.extend(catalog.warning.clone());
         info.vms = Some(vms);
         Ok::<_, String>(info)
     })
@@ -86,10 +127,11 @@ pub async fn get_info(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 pub async fn list_images(State(state): State<AppState>) -> impl IntoResponse {
-    match read_images(state).await {
-        Ok((images, _)) => (StatusCode::OK, Json(ApiResp::success(images))),
-        Err(e) => failure(e),
-    }
+    let catalog = state.images.read().unwrap_or_else(|e| e.into_inner());
+    (
+        StatusCode::OK,
+        Json(ApiResp::success(catalog.images.clone())),
+    )
 }
 pub async fn list_vms(State(state): State<AppState>) -> impl IntoResponse {
     match read_snapshot(state).await {

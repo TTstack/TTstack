@@ -590,10 +590,8 @@ impl Runtime {
             resource: self.resource.clone(),
             engines: self.engines.clone(),
             storage: self.storage,
-            images: self.store.list_images(&self.image_dir).unwrap_or_else(|e| {
-                eprintln!("[agent] image catalog unavailable: {e}");
-                vec![]
-            }),
+            // The background catalog worker fills these after the listener starts.
+            images: vec![],
         })
     }
 }
@@ -1544,6 +1542,103 @@ mod lifecycle_tests {
         assert_eq!(
             rt.image_path(&record).unwrap(),
             "/tmp/tt-runtime/clone-guest"
+        );
+    }
+
+    #[test]
+    fn slow_image_inspection_does_not_block_snapshots_and_publishes_when_ready() {
+        use ttcore::command::CommandExt;
+        const CHILD: &str = "TT_IMAGE_CATALOG_TEST_DIR";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let dir = std::path::PathBuf::from(path);
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                use axum::response::IntoResponse;
+                let db_path = dir.join("agent.db");
+                let rt = runtime(Connection::open(&db_path).unwrap());
+                let image_dir = dir.join("images");
+                std::fs::create_dir(&image_dir).unwrap();
+                std::fs::write(image_dir.join("test.qcow2"), b"fixture").unwrap();
+                let info = AgentInfo {
+                    vms: None,
+                    warnings: vec![],
+                    image_sizes: Default::default(),
+                    capabilities: vec![],
+                    host_id: rt.host_id.clone(),
+                    resource: rt.resource.clone(),
+                    engines: vec![Engine::Docker],
+                    storage: Storage::File,
+                    images: vec![],
+                };
+                let state = std::sync::Arc::new(crate::handler::AgentShared {
+                    runtime: std::sync::Arc::new(tokio::sync::Mutex::new(rt)),
+                    db_path: db_path.to_string_lossy().into(),
+                    info,
+                    image_dir: image_dir.to_string_lossy().into(),
+                    images: Default::default(),
+                });
+                let refresh = tokio::spawn(crate::handler::refresh_images(state.clone()));
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    while !dir.join("entered").exists() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                for _ in 0..3 {
+                    let response = tokio::time::timeout(
+                        std::time::Duration::from_secs(1),
+                        crate::handler::get_info(axum::extract::State(state.clone())),
+                    )
+                    .await
+                    .unwrap()
+                    .into_response();
+                    assert_eq!(response.status(), axum::http::StatusCode::OK);
+                    let bytes = axum::body::to_bytes(response.into_body(), 16384)
+                        .await
+                        .unwrap();
+                    let reply: ttcore::api::ApiResp<AgentInfo> =
+                        serde_json::from_slice(&bytes).unwrap();
+                    let info = reply.data.unwrap();
+                    assert!(info.images.is_empty());
+                    assert!(info.vms.is_some());
+                    assert!(!info.warnings.is_empty());
+                }
+                std::fs::write(dir.join("release"), b"").unwrap();
+                refresh.await.unwrap();
+                let catalog = state.images.read().unwrap();
+                assert_eq!(catalog.images, ["test.qcow2"]);
+                assert_eq!(catalog.sizes["test.qcow2"], 64);
+                assert!(catalog.warning.is_none());
+            });
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("qemu-img");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+: > "$TT_IMAGE_CATALOG_TEST_DIR/entered"
+n=0
+while [ ! -e "$TT_IMAGE_CATALOG_TEST_DIR/release" ] && [ "$n" -lt 300 ]; do
+  /bin/sleep 0.01
+  n=$((n + 1))
+done
+printf '%s\n' '{"format":"qcow2","virtual-size":67108864}'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "runtime::lifecycle_tests::slow_image_inspection_does_not_block_snapshots_and_publishes_when_ready", "--nocapture"])
+            .env(CHILD, dir.path())
+            .env("PATH", dir.path())
+            .output_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 }

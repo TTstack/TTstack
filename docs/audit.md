@@ -24,6 +24,8 @@ Review of `bff24fb` identified the following boundary failures and corrections.
 - An old agent snapshot could erase unresolved controller resize intent. Snapshot
   merging now retains the target and disk reservation until confirmation; a fresh
   request explicitly rejected before mutation can release only its new intent.
+- Image inspection ran on the host-info request path. A single background catalog
+  worker now keeps slow inspection independent of health and lifecycle reads.
 
 ## Disposition, 2026-09-25
 

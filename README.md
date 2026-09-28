@@ -52,6 +52,9 @@ sudo mkdir -p /home/ttstack/images
 sudo /opt/ttstack/bin/tt image create alpine-cloud
 tt host add 127.0.0.1:9100
 
+# Wait until the refreshed catalog lists alpine-cloud before creating the VM.
+tt image list
+
 # Use an existing SSH public key; never pass the private key.
 tt env create demo --image alpine-cloud --engine qemu \
   --cpu 1 --mem 256 --disk 2048 --ssh-key ~/.ssh/id_ed25519.pub

@@ -80,6 +80,14 @@ async fn main() {
         db_path,
         info,
         image_dir: cfg.image_dir.clone(),
+        images: Default::default(),
+    });
+    let catalog = state.clone();
+    tokio::spawn(async move {
+        loop {
+            handler::refresh_images(catalog.clone()).await;
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        }
     });
     let recovery = state.clone();
     tokio::spawn(async move {
