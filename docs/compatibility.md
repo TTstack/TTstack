@@ -21,7 +21,7 @@ code change does not inherit a fresh live-validation claim from an older report.
 | Linux/systemd deployment | Local/distributed service generation and isolated service restart | [Linux upgrade, 2026-09-24](validation/linux-host-upgrade-validation-2026-09-24.md) and later isolated runs; not every deploy configuration |
 | Agent database initialization | Current native schema, identity and runtime/network bindings | [Process-level checks, 2026-09-28](validation/native-agent-schema-2026-09-28.md): fresh initialization, reopen and non-mutating rejection of incompatible fixtures; no production data migration |
 | Linux/OpenRC, musl binaries | Distributed deployment support | No complete live deployment coverage in the listed reports |
-| FreeBSD Bhyve/Jail/PF | Restored experimental implementation, manual setup | No new native build or live verification; see [limits below](#experimental-freebsd-restoration) |
+| FreeBSD Bhyve/Jail/PF | Restored experimental implementation, manual setup | Native FreeBSD 15.1 functional checks; see [the dated report](validation/freebsd-validation-2026-09-28.md) |
 | Other host platforms | No validated agent deployment path | No support commitment |
 
 The [validation index](README.md#validation-evidence) retains earlier engine,
@@ -30,38 +30,59 @@ a recipe's presence do not establish guest boot or application readiness.
 
 ## Experimental FreeBSD restoration
 
-This branch extracts the FreeBSD code removed by `8775fdb` and patches it onto
-`83b7e95`, retaining the later Linux Firecracker, ZFS and lifecycle fixes. It
-restores the `bhyve` and `jail` API values, engine detection, `sysctl hw.physmem`
-memory detection, ifconfig/PF networking, the `freebsd-base` recipe and CLI/UI
-entries. These paths remain experimental. The core library and its test targets
-pass cross-target checking for `x86_64-unknown-freebsd` on Linux; no native
-FreeBSD agent/controller build or guest boot was performed.
+The `bhyve` and `jail` engines remain experimental. Native binaries and manual
+service/network setup are required; automated deployment and primary CI remain
+Linux-only. The [dated FreeBSD report](validation/freebsd-validation-2026-09-28.md)
+records the exact tested revision and scope.
 
-Use native FreeBSD binaries and manual service setup; automated deployment still
-requires Linux. Bhyve invokes `bhyveload`, `bhyve` and `bhyvectl`, so its disk must
-already be bootable by that loader. There is no Bhyve image recipe, SSH injection
-or disk resizing. Zvol readiness accepts FreeBSD character devices, matching
-the [OpenZFS FreeBSD implementation](https://github.com/openzfs/zfs/blob/master/module/os/freebsd/zfs/zvol_os.c);
-Linux still requires block devices. Jail expects a copied root directory with file storage; zvols
-are rejected for Jail by both scheduler and agent. Its SSH-key support only writes
-`root/.ssh/authorized_keys`; the restored code does not start guest services or
-configure sshd. Jail CPU/memory values are scheduling reservations, not enforced
-host limits. Linux guest configuration drives and network isolation are rejected
-for both FreeBSD engines.
+- Bhyve uses `bhyveload`, `bhyve`, `bhyvectl` and `/dev/vmmctl`. Supply a raw disk
+  that `bhyveload` can boot, with its own guest networking and credentials. There
+  is no Bhyve image recipe, SSH injection, guest configuration or resource resize.
+  Renamed interfaces retain a separately recorded `/dev/tapN` device. Startup
+  failures are reported with a runtime log; process identity is checked before
+  termination. A leftover VMM device alone does not mean a VM is running.
+- Jail uses file storage with a copied FreeBSD root. The `freebsd-base` recipe
+  requires a RELEASE host, uses its exact major/minor release (without the patch
+  suffix), downloads with the native `fetch` utility, and publishes only a
+  completely extracted/configured root. Existing incomplete/unmanaged recipe
+  directories require inspection and moving aside before retry. Custom roots
+  must provide `/etc/rc`, `/etc/rc.shutdown` and their desired services.
+- Jails share the agent's IP stack, receive an alias on `tt0`, and run their rc
+  scripts. Public keys enable root key authentication; the built-in recipe starts
+  sshd. This is not VNET isolation. `deny_outgoing` is rejected for both FreeBSD engines: the inherited PF
+  implementation does not provide a validated guarantee of blocked initiation
+  with working inbound replies. Existing records with that option report a recovery error.
+- Stop/start cold-boots a retained bhyve disk or Jail root. Jail stop invokes
+  `rc.shutdown`; bhyve stop requests ACPI shutdown with SIGTERM and can fall back
+  to SIGKILL. Deletion waits for confirmed termination, and a failed devfs
+  unmount retains the Jail root. Guest memory is not retained.
+- Jail CPU/memory and both engines' disk usage are not enforced host limits;
+  FreeBSD disk accounting is currently zero. CPU/memory reservations are used
+  for placement. Jail zvol storage is rejected. Bhyve zvols accept FreeBSD
+  character devices, but this run does not validate their lifecycle.
+- Both FreeBSD engines reject Linux guest configuration and `isolated_network`.
+  Keep mutually untrusted tenants on a separately validated isolation setup.
 
-The extraction preserves known limitations of the old implementation:
+PF must already be enabled and the operator must install the following hooks
+in the active root ruleset, with the filter hook before broader pass rules:
 
-- Bhyve rejects in-place restart. Jail stop removes the jail, while start tries
-  to modify an existing jail; do not assume Linux stop/start guarantees apply.
-- TAP creation is not idempotent, and the Jail path uses shared host networking.
-  Network recovery and repeated operations need native lifecycle validation.
-- PF requires operator configuration in `/etc/pf.conf`. The restored rule writer
-  reloads a shared anchor per rule; multiple forwards or guests can overwrite
-  earlier rules. Cleanup errors can be ignored by the legacy engine/network code.
-- `freebsd-base` uses the host major release with a fixed `.3-RELEASE` suffix
-  (fallback `14.3-RELEASE`). Download availability is unverified, and a failed
-  extraction can leave a directory that later attempts treat as complete.
+```pf
+# Place any operator-owned outbound NAT here, before rdr rules.
+rdr-anchor "ttstack/*"
+anchor "ttstack/*" quick
+```
+
+Outbound NAT and external firewall policy remain operator-owned. TTstack refuses
+missing hooks and does not enable PF or replace the root ruleset. It maintains
+one child anchor per forward and a separate deny anchor per guest, preserving
+other guests' mappings on create/restart/delete. Forwarding matches destinations
+on the agent itself. Guest egress restrictions on FreeBSD remain operator-owned.
+
+When the agent itself runs in a VNET jail, its parent must delegate child-jail
+creation and devfs mounting (`children.max`, `allow.mount`, `allow.mount.devfs`,
+`enforce_statfs < 2`), and expose the needed PF/TAP/VMM devices. Bhyve additionally
+requires `allow.vmm`. Use a dedicated test jail; changing a gateway jail's
+permissions or firewall is not required by TTstack.
 
 The Linux-only release cannot deserialize restored engine names in persisted
 VMs or cached host lists. Upgrade controller and agents together when trying this

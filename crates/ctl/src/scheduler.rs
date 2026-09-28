@@ -290,7 +290,7 @@ mod tests {
         spec.disk = None;
         for engine in [Engine::Bhyve, Engine::Jail] {
             spec.engine = engine;
-            assert!(place_vm(&[linux.clone()], &spec, &HashMap::new()).is_err());
+            assert!(place_vm(std::slice::from_ref(&linux), &spec, &HashMap::new()).is_err());
             let placement =
                 place_vm(&[linux.clone(), freebsd.clone()], &spec, &HashMap::new()).unwrap();
             assert_eq!(placement.host_id, "freebsd");

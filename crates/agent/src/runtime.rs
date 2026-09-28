@@ -404,16 +404,26 @@ impl Runtime {
     fn restore_network(&self, vm: &Vm) -> Result<()> {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if vm.engine != Engine::Docker {
+            if matches!(vm.engine, Engine::Bhyve | Engine::Jail) && vm.options.deny_outgoing {
+                return Err(eg!(
+                    "FreeBSD engines do not support deny_outgoing; retained guest requires operator review"
+                ));
+            }
             #[cfg(target_os = "linux")]
             if vm.options.isolated_network {
                 net::isolate(&vm.id, &vm.ip)?;
             }
-            if matches!(vm.state, VmState::Running | VmState::Paused) && !net::tap_exists(&vm.id)? {
+            if vm.engine != Engine::Jail
+                && matches!(vm.state, VmState::Running | VmState::Paused)
+                && !net::tap_exists(&vm.id)?
+            {
                 return Err(eg!(
                     "live VM tap is missing; stop/start the VM to attach a new tap"
                 ));
             }
-            net::create_tap(&vm.id, &vm.ip)?;
+            if vm.engine != Engine::Jail {
+                net::create_tap(&vm.id, &vm.ip)?;
+            }
             net::remove_port_forwards(&vm.ip)?;
             for (&guest, &host) in &vm.port_map {
                 net::add_port_forward(host, &vm.ip, guest)?;
@@ -488,7 +498,10 @@ impl Runtime {
             self.restore_network(&vm)?;
             let eng = (self.engine_factory)(vm.engine, self.container_runtime)?;
             if previous == VmState::Stopped
-                && matches!(vm.engine, Engine::Qemu | Engine::Firecracker)
+                && matches!(
+                    vm.engine,
+                    Engine::Qemu | Engine::Firecracker | Engine::Bhyve | Engine::Jail
+                )
             {
                 eng.create(
                     &vm,
@@ -632,7 +645,9 @@ impl Runtime {
         if vm.engine != Engine::Docker {
             collect(net::remove_port_forwards(&vm.ip));
             collect(net::allow_outgoing(&vm.ip));
-            collect(net::destroy_tap(id));
+            if vm.engine != Engine::Jail {
+                collect(net::destroy_tap(id));
+            }
             #[cfg(target_os = "linux")]
             if vm.options.isolated_network {
                 collect(net::remove_isolation(id));
@@ -1099,10 +1114,30 @@ fn detect_engines(container_runtime: Option<ContainerRuntime>) -> Vec<Engine> {
     }
     #[cfg(target_os = "freebsd")]
     {
-        if probe("which", &["bhyve"]) {
+        let vmm = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/vmmctl")
+            .is_ok();
+        if vmm
+            && ["bhyve", "bhyveload", "bhyvectl"]
+                .iter()
+                .all(|tool| probe("which", &[tool]))
+        {
             engines.push(Engine::Bhyve);
         }
-        if probe("which", &["jail"]) {
+        let sysctl = |key: &str| -> Option<u32> {
+            use ttcore::command::CommandExt;
+            let out = std::process::Command::new("sysctl")
+                .args(["-n", key])
+                .bounded_output()
+                .ok()?;
+            out.status.success().then_some(())?;
+            String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+        };
+        let can_create_jail = sysctl("security.jail.jailed") == Some(0)
+            || sysctl("security.jail.children.max").is_some_and(|n| n > 0);
+        if can_create_jail && probe("which", &["jail"]) && probe("which", &["jls"]) {
             engines.push(Engine::Jail);
         }
     }
@@ -1689,6 +1724,7 @@ mod lifecycle_tests {
             assert!(rt.resize_vm(&guest.id, target).is_err());
         }
     }
+    #[cfg(target_os = "linux")]
     #[test]
     fn resource_update_retries_after_reopen_and_keeps_disk_and_identity() {
         let dir = tempfile::tempdir().unwrap();

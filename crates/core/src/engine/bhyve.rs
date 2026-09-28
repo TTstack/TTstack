@@ -1,150 +1,242 @@
-//! Experimental FreeBSD support; outside the primary validation scope.
-//! Bhyve engine implementation (FreeBSD only).
-//!
-//! Bhyve is the native hypervisor on FreeBSD. This module is only
-//! compiled on FreeBSD targets via `#[cfg(target_os = "freebsd")]`.
-
+//! Experimental FreeBSD bhyve with cold restart and verified process cleanup.
 use super::VmEngine;
 use crate::command::CommandExt;
 use crate::model::{RUN_DIR, Vm, VmState};
 use crate::net;
 use ruc::*;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 #[derive(Default)]
 pub struct BhyveEngine;
-
 impl BhyveEngine {
     pub fn new() -> Self {
         Self
     }
-
-    fn pid_path(vm: &Vm) -> String {
-        format!("{RUN_DIR}/bhyve-{}.pid", vm.id)
+    fn artifact(vm: &Vm, suffix: &str) -> PathBuf {
+        Path::new(RUN_DIR).join(format!("bhyve-{}.{suffix}", vm.id))
     }
-
-    fn read_pid(vm: &Vm) -> Option<i32> {
-        std::fs::read_to_string(Self::pid_path(vm))
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
+    fn device(vm: &Vm) -> PathBuf {
+        Path::new("/dev/vmm").join(&vm.id)
+    }
+    fn pid(vm: &Vm) -> Result<Option<i32>> {
+        // bhyve changes its process title. Never signal a PID solely from a stale file.
+        let out = Command::new("ps")
+            .args(["-axo", "pid=,stat=,comm=,args="])
+            .bounded_output()
+            .c(d!("inspect bhyve processes"))?;
+        if !out.status.success() {
+            return Err(eg!("cannot query bhyve processes"));
+        }
+        let found = find_process(&vm.id, &String::from_utf8_lossy(&out.stdout))?;
+        if found.is_some() && !Self::artifact(vm, "disk").is_file() {
+            return Err(eg!("bhyve ownership metadata missing; retain resources"));
+        }
+        Ok(found)
+    }
+    fn remove_device(vm: &Vm) -> Result<()> {
+        if Self::device(vm)
+            .try_exists()
+            .c(d!("inspect bhyve device"))?
+        {
+            if !Self::artifact(vm, "disk").is_file() {
+                return Err(eg!("unowned bhyve device; retain resources"));
+            }
+            let out = Command::new("bhyvectl")
+                .args(["--destroy", "--vm", &vm.id])
+                .bounded_output()
+                .c(d!("destroy bhyve device"))?;
+            if !out.status.success() {
+                return Err(eg!(
+                    "bhyvectl destroy failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+impl VmEngine for BhyveEngine {
+    fn create(&self, vm: &Vm, image_path: &str, _: &str, _: &[String]) -> Result<()> {
+        if Self::pid(vm)?.is_some() {
+            return Err(eg!("bhyve is still running"));
+        }
+        Self::remove_device(vm)?;
+        std::fs::create_dir_all(RUN_DIR).c(d!())?;
+        let disk = Path::new(image_path)
+            .canonicalize()
+            .c(d!("resolve bhyve disk"))?;
+        std::fs::write(
+            Self::artifact(vm, "disk"),
+            disk.as_os_str().as_encoded_bytes(),
+        )
+        .c(d!("record bhyve disk"))?;
+        let out = Command::new("bhyveload")
+            .args([
+                "-m",
+                &format!("{}M", vm.mem),
+                "-e",
+                "autoboot_delay=0",
+                "-d",
+            ])
+            .arg(&disk)
+            .arg(&vm.id)
+            .stdin(Stdio::null())
+            .bounded_output()
+            .c(d!("run bhyveload"))?;
+        if !out.status.success() {
+            return Err(eg!(
+                "bhyveload failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        let log = std::fs::File::create(Self::artifact(vm, "log")).c(d!("create bhyve log"))?;
+        let mut child = Command::new("bhyve")
+            .args([
+                "-A",
+                "-H",
+                "-P",
+                "-c",
+                &vm.cpu.to_string(),
+                "-m",
+                &format!("{}M", vm.mem),
+            ])
+            .args([
+                "-s",
+                "0:0,hostbridge",
+                "-s",
+                &format!("3:0,virtio-blk,{}", disk.display()),
+            ])
+            .args([
+                "-s",
+                &format!("4:0,virtio-net,{}", net::bhyve_tap_device(&vm.id)?),
+                "-s",
+                "31,lpc",
+                "-l",
+                "com1,stdio",
+            ])
+            .arg(&vm.id)
+            .stdin(Stdio::null())
+            .stdout(log.try_clone().c(d!())?)
+            .stderr(log)
+            .spawn()
+            .c(d!("spawn bhyve"))?;
+        // Keep a failed live launch discoverable; the agent retains the VM record.
+        std::fs::write(Self::artifact(vm, "pid"), child.id().to_string())
+            .c(d!("record bhyve PID"))?;
+        for _ in 0..10 {
+            if let Some(status) = child.try_wait().c(d!("check bhyve startup"))? {
+                return Err(eg!(format!(
+                    "bhyve exited during startup ({status}); inspect its runtime log"
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // Reap a later exit while the agent remains alive.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
+    }
+    fn start(&self, _: &Vm) -> Result<()> {
+        Err(eg!(
+            "stopped bhyve VMs require cold creation from their retained disk"
+        ))
+    }
+    fn stop(&self, vm: &Vm) -> Result<()> {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+        for signal in [Signal::SIGTERM, Signal::SIGKILL] {
+            let Some(pid) = Self::pid(vm)? else {
+                break;
+            };
+            if signal == Signal::SIGKILL {
+                eprintln!(
+                    "[bhyve] {} did not stop after ACPI request; forcing termination",
+                    vm.id
+                );
+            }
+            match kill(Pid::from_raw(pid), signal) {
+                Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+                Err(e) => return Err(eg!(e)),
+            }
+            for _ in 0..100 {
+                if Self::pid(vm)?.is_none() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+        if Self::pid(vm)?.is_some() {
+            return Err(eg!("bhyve process did not exit; retain disk"));
+        }
+        Self::remove_device(vm)
+    }
+    fn destroy(&self, vm: &Vm) -> Result<()> {
+        self.stop(vm)?;
+        for suffix in ["pid", "disk", "log"] {
+            match std::fs::remove_file(Self::artifact(vm, suffix)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(eg!(e)),
+            }
+        }
+        Ok(())
+    }
+    fn state(&self, vm: &Vm) -> Result<VmState> {
+        Ok(if Self::pid(vm)?.is_some() {
+            VmState::Running
+        } else {
+            VmState::Stopped
+        })
+    }
+    fn name(&self) -> &'static str {
+        "bhyve"
     }
 }
 
-impl VmEngine for BhyveEngine {
-    fn create(
-        &self,
-        vm: &Vm,
-        image_path: &str,
-        _disk_format: &str,
-        _ssh_keys: &[String],
-    ) -> Result<()> {
-        // Load the VM into bhyve via bhyveload
-        let output = Command::new("bhyveload")
-            .args(["-m", &format!("{}M", vm.mem)])
-            .args(["-d", image_path])
-            .arg(&vm.id)
-            .bounded_output()
-            .c(d!("failed to run bhyveload"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(eg!("bhyveload failed: {}", stderr));
+fn find_process(id: &str, listing: &str) -> Result<Option<i32>> {
+    let mut found = None;
+    for line in listing.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.len() < 4 || fields[1].starts_with('Z') || fields[2] != "bhyve" {
+            continue;
         }
-
-        // Launch the VM as a background daemon
-        let tap = net::tap_name(&vm.id);
-        let pid_path = format!("{RUN_DIR}/bhyve-{}.pid", vm.id);
-        std::fs::create_dir_all(RUN_DIR).c(d!("create pid dir"))?;
-
-        let child = Command::new("bhyve")
-            .args(["-A", "-H", "-P"])
-            .args(["-c", &vm.cpu.to_string()])
-            .args(["-m", &format!("{}M", vm.mem)])
-            .args(["-s", "0:0,hostbridge"])
-            .args(["-s", &format!("3:0,virtio-blk,{image_path}")])
-            .args(["-s", &format!("4:0,virtio-net,{tap}")])
-            .args(["-s", "31,lpc"])
-            .args(["-l", "com1,/dev/null"])
-            .arg(&vm.id)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .c(d!("failed to spawn bhyve"))?;
-
-        // Record PID
-        std::fs::write(&pid_path, child.id().to_string()).c(d!("write pid"))?;
-
-        Ok(())
-    }
-
-    fn start(&self, _vm: &Vm) -> Result<()> {
-        // Bhyve doesn't support pause/resume natively;
-        // "start" after destroy requires re-create.
-        Err(eg!(
-            "bhyve does not support in-place restart; re-create the VM"
-        ))
-    }
-
-    fn stop(&self, vm: &Vm) -> Result<()> {
-        // Kill the bhyve process first, then clean up the VM device
-        if let Some(pid) = Self::read_pid(vm) {
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid),
-                nix::sys::signal::Signal::SIGTERM,
-            );
-            // Give it a moment to exit gracefully
-            std::thread::sleep(std::time::Duration::from_millis(500));
-        }
-
-        let output = Command::new("bhyvectl")
-            .args(["--destroy", "--vm", &vm.id])
-            .bounded_output()
-            .c(d!("bhyvectl destroy"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            // Not fatal — the VM device may already be gone
-            eprintln!(
-                "[bhyve] WARN: bhyvectl --destroy failed for {}: {}",
-                vm.id, stderr
-            );
-        }
-
-        Ok(())
-    }
-
-    fn destroy(&self, vm: &Vm) -> Result<()> {
-        // Kill the bhyve process if still alive
-        if let Some(pid) = Self::read_pid(vm) {
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid),
-                nix::sys::signal::Signal::SIGKILL,
-            );
-        }
-
-        // Clean up the bhyve VM device
-        let _ = Command::new("bhyvectl")
-            .args(["--destroy", "--vm", &vm.id])
-            .bounded_output();
-
-        let _ = std::fs::remove_file(Self::pid_path(vm));
-
-        Ok(())
-    }
-
-    fn state(&self, vm: &Vm) -> Result<VmState> {
-        let output = Command::new("bhyvectl")
-            .args(["--get-lowmem", "--vm", &vm.id])
-            .bounded_output();
-
-        match output {
-            Ok(o) if o.status.success() => Ok(VmState::Running),
-            _ => Ok(VmState::Stopped),
+        let args = &fields[3..];
+        if (args.first() == Some(&"bhyve:") && args.get(1) == Some(&id))
+            || (args.last() == Some(&id) && !args[0].ends_with(':'))
+        {
+            if found.is_some() {
+                return Err(eg!("multiple bhyve processes match; retain resources"));
+            }
+            let pid = fields[0].parse::<i32>().c(d!("parse bhyve PID"))?;
+            if pid <= 0 {
+                return Err(eg!("invalid bhyve PID"));
+            }
+            found = Some(pid);
         }
     }
+    Ok(found)
+}
 
-    fn name(&self) -> &'static str {
-        "bhyve"
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn bhyve_identity_uses_exact_live_process_titles_instead_of_stale_pids() {
+        let listing = "10 S sleep sleep guest\n11 Z bhyve bhyve: guest (bhyve)\n12 S bhyve bhyve: guest-other (bhyve)\n13 ICJ bhyve bhyve: guest (bhyve)\n";
+        assert_eq!(find_process("guest", listing).unwrap(), Some(13));
+        assert_eq!(find_process("absent", listing).unwrap(), None);
+        assert_eq!(
+            find_process("guest", "14 S bhyve bhyve -c 1 guest").unwrap(),
+            Some(14)
+        );
+        assert!(
+            find_process(
+                "guest",
+                &(listing.to_string() + "15 S bhyve bhyve: guest (bhyve)\n")
+            )
+            .is_err()
+        );
     }
 }
