@@ -17,3 +17,12 @@ worktree were not modified. The test VMs, isolated services, network namespace,
 SSH ingress rules and remote staging directories were removed.
 
 See the maintained [SSH contract](../ssh.md) and [documentation index](../README.md).
+
+## Subsequent Firecracker/ZFS deployment
+
+The [formal fleet report](https://github.com/openmathmodel/omm-deploy/blob/main/docs/test-reports/2026-09-28-expert-ssh-deployment.md)
+records TTstack `e8980bf` deployed with matching Workspace and Code. Native SSH,
+full guest sudo, SCP, private-management denial and retained key/file/host identity
+through cold resume passed on the actual Firecracker/ZFS service. Its disposable
+VM and ingress rule were deleted; existing guests were retained. This extends
+Linux evidence only and does not validate the independent FreeBSD branch.
