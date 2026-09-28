@@ -36,6 +36,7 @@ establish. A new report belongs in `docs/validation/` and is linked here.
 
 | Evidence | Document |
 | --- | --- |
+| Master rebase, native database/ownership regressions and FreeBSD Jail/bhyve lifecycle | [FreeBSD master port, 2026-09-28](validation/freebsd-master-port-2026-09-28.md) |
 | Native agent database initialization, reopen and non-mutating format rejection | [Native agent schema, 2026-09-28](validation/native-agent-schema-2026-09-28.md) |
 | Configuration-disk accounting, resource ownership, restart recovery and cleanup on two hosts | [Lifecycle audit fixes, 2026-09-28](validation/audit-fixes-2026-09-28.md) |
 | Native SSH/SCP, full guest sudo and cold restart on QEMU/Firecracker | [Expert SSH, 2026-09-28](validation/expert-ssh-2026-09-28.md) |
