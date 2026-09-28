@@ -827,7 +827,7 @@ async fn resize_virtual_machine(
     let capability = match vm.engine {
         Engine::Qemu => "qemu_resources",
         Engine::Firecracker => "firecracker_resources",
-        Engine::Docker => {
+        Engine::Docker | Engine::Bhyve | Engine::Jail => {
             return Err((
                 StatusCode::BAD_REQUEST,
                 "resource updates require QEMU or Firecracker".into(),

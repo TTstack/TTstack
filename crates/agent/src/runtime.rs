@@ -229,7 +229,7 @@ impl Runtime {
             return Err(eg!("base image does not exist"));
         }
         let disk = match req.engine {
-            Engine::Docker => 0,
+            Engine::Docker | Engine::Bhyve | Engine::Jail => 0,
             Engine::Firecracker => {
                 let bytes = self.store.firecracker_size(&base_image)?;
                 let base_mib =
@@ -633,6 +633,7 @@ impl Runtime {
             collect(net::remove_port_forwards(&vm.ip));
             collect(net::allow_outgoing(&vm.ip));
             collect(net::destroy_tap(id));
+            #[cfg(target_os = "linux")]
             if vm.options.isolated_network {
                 collect(net::remove_isolation(id));
             }

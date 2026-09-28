@@ -17,7 +17,7 @@ pub struct Placement {
 }
 
 fn disk_reservation(spec: &VmSpec, host: &Host) -> Option<u32> {
-    if spec.engine == Engine::Docker {
+    if matches!(spec.engine, Engine::Docker | Engine::Bhyve | Engine::Jail) {
         return Some(0);
     }
     let base = host.image_sizes.get(&spec.image).copied();
