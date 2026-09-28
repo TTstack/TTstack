@@ -67,6 +67,13 @@ records the exact tested revision and scope.
 - Both FreeBSD engines reject Linux guest configuration and `isolated_network`.
   Keep mutually untrusted tenants on a separately validated isolation setup.
 
+The agent uses the same native database format and persistent network ownership
+checks as Linux. Its configured `--port-start`/`--port-end` range governs PF
+mappings and cannot change while VM records remain. Reconciliation probes one
+VM at a time, allowing queued lifecycle operations between probes. Linux outer
+SSH namespace options are rejected on FreeBSD; Jail root-key access continues
+through its ordinary mapped port without managed SSH endpoint metadata.
+
 PF must already be enabled and the operator must install the following hooks
 in the active root ruleset, with the filter hook before broader pass rules:
 
@@ -91,8 +98,9 @@ anchors; deletion removes both translation and filter rules.
 
 When the agent itself runs in a VNET jail, its parent must delegate child-jail
 creation and devfs mounting (`children.max`, `allow.mount`, `allow.mount.devfs`,
-`enforce_statfs < 2`), and expose the needed PF/TAP/VMM devices. Bhyve additionally
-requires `allow.vmm`. Nested Jail guests also need permission to mount devfs with
+`enforce_statfs < 2`), and expose the needed PF/TAP/VMM devices. For bhyve this includes
+`/dev/vmmctl`, `/dev/vmm/*` and `/dev/vmm.io/*`, as well as the TAP devices;
+bhyve additionally requires `allow.vmm`. Nested Jail guests also need permission to mount devfs with
 ruleset 4; the agent's VMM/ZFS devices can use a separate devfs mount ruleset.
 Use a dedicated test jail; changing a gateway jail's
 permissions or firewall is not required by TTstack.

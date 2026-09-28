@@ -171,17 +171,8 @@ impl Runtime {
         if req.cpu == 0 || req.mem == 0 {
             return Err(eg!("cpu and memory must be > 0"));
         }
-        let ssh = if req.ssh_keys.is_empty() {
-            req.ssh.clone()
-        } else {
-            Some(req.ssh.clone().unwrap_or_default())
-        };
-        if let Some(settings) = &ssh {
-            settings.validate().map_err(|e| eg!(e))?;
-            if req.ssh_keys.is_empty() {
-                return Err(eg!("SSH bootstrap requires a public key"));
-            }
-        }
+        let ssh = ttcore::ssh::resolve_options(req.engine, req.ssh.as_ref(), &req.ssh_keys)
+            .map_err(|e| eg!(e))?;
         if req.guest_config.contains_key(ttcore::ssh::SEED_FILE) {
             return Err(eg!("reserved guest configuration filename"));
         }
@@ -275,7 +266,9 @@ impl Runtime {
         };
         let mut ports = req.ports.clone();
         if (matches!(req.engine, Engine::Qemu | Engine::Bhyve | Engine::Jail)
-            || options.ssh.is_some()) && !ports.contains(&22) {
+            || options.ssh.is_some())
+            && !ports.contains(&22)
+        {
             ports.push(22);
         }
         let port_map = allocate_ports(&vms, &ports, self.port_range.clone(), |p| {
@@ -1925,8 +1918,8 @@ mod lifecycle_tests {
         let path = dir.path().join("agent.db");
         let ingress = crate::ssh_ingress::SshIngress {
             public_address: "192.0.2.1".parse().unwrap(),
-            namespace: Some("/proc/self/ns/net".into()),
-            target: Some("192.0.2.2".parse().unwrap()),
+            namespace: cfg!(target_os = "linux").then(|| dir.path().to_path_buf()),
+            target: cfg!(target_os = "linux").then(|| "192.0.2.2".parse().unwrap()),
         };
         let mut rt = runtime(Connection::open(&path).unwrap());
         rt.configure_network(Some(ingress.clone()), 21000, 21999)
@@ -1942,7 +1935,7 @@ mod lifecycle_tests {
                 .is_err()
         );
         let changed = crate::ssh_ingress::SshIngress {
-            target: Some("192.0.2.3".parse().unwrap()),
+            public_address: "192.0.2.3".parse().unwrap(),
             ..ingress.clone()
         };
         assert!(rt.configure_network(Some(changed), 21000, 21999).is_err());
@@ -2224,6 +2217,7 @@ mod lifecycle_tests {
         rt.storage = Storage::Zvol;
         rt.engines = vec![Engine::Jail];
         let req = CreateVmReq {
+            ssh: None,
             vm_id: "jail-zvol".into(),
             env_id: "env".into(),
             image: "freebsd-base".into(),
@@ -2245,6 +2239,33 @@ mod lifecycle_tests {
         );
         assert!(rt.list_vms().unwrap().is_empty());
         assert_eq!(rt.resource.vm_count, 0);
+    }
+
+    #[test]
+    fn bhyve_propagates_strict_file_disk_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        rt.store = Box::new(ttcore::storage::file::FileStore);
+        rt.runtime_dir = dir.path().to_str().unwrap().into();
+        let mut record = vm("bhyve-disk", "image", VmState::Stopped);
+        record.engine = Engine::Bhyve;
+        let clone = dir.path().join("clone-bhyve-disk");
+        assert!(rt.image_path(&record).is_err());
+        std::fs::create_dir(&clone).unwrap();
+        let disk = clone.join("disk.raw");
+        std::fs::write(&disk, b"raw disk").unwrap();
+        assert_eq!(rt.image_path(&record).unwrap(), disk.to_str().unwrap());
+        std::fs::write(clone.join("other.raw"), b"another disk").unwrap();
+        assert!(rt.image_path(&record).is_err());
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(clone.join("other.raw")).unwrap();
+            std::fs::remove_file(&disk).unwrap();
+            let outside = dir.path().join("outside.raw");
+            std::fs::write(&outside, b"unowned").unwrap();
+            std::os::unix::fs::symlink(outside, &disk).unwrap();
+            assert!(rt.image_path(&record).is_err());
+        }
     }
 
     #[test]

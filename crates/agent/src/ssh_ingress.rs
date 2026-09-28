@@ -15,6 +15,9 @@ pub struct SshIngress {
 
 impl SshIngress {
     pub fn validate(&self) -> Result<()> {
+        if !cfg!(target_os = "linux") && self.namespace.is_some() {
+            return Err(eg!("outer SSH network namespaces require Linux"));
+        }
         if self.namespace.is_some() != self.target.is_some() {
             return Err(eg!(
                 "SSH ingress requires both namespace and target address"
@@ -163,5 +166,30 @@ mod tests {
             "delete rule ip tt-ssh prerouting handle 1\n"
         );
         assert_eq!(remove_rules(None, "mine"), "");
+    }
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+mod platform_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_linux_namespace_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut ingress = SshIngress {
+            public_address: "192.0.2.1".parse().unwrap(),
+            namespace: Some(directory.path().to_path_buf()),
+            target: Some("192.0.2.2".parse().unwrap()),
+        };
+        assert!(
+            ingress
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("require Linux")
+        );
+        ingress.namespace = None;
+        ingress.target = None;
+        assert!(ingress.validate().is_ok());
     }
 }

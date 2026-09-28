@@ -20,6 +20,11 @@ the agent's [public-address configuration](#reachable-endpoint). `ssh.user` is
 1–32 characters, starting with a lowercase letter and followed by lowercase
 letters, digits, `_` or `-`. CLI account/sudo options accompany `--ssh-key`.
 
+Experimental FreeBSD Jail retains root public-key injection without Linux SSH
+bootstrap or `ssh` response metadata. Its keys do not require `ssh_bootstrap`;
+only the default root/no-sudo SSH options are accepted. Bhyve does not support
+key injection or SSH options. See [FreeBSD scope](compatibility.md#experimental-freebsd-restoration).
+
 TTstack receives no login private key. The caller owns key generation, custody
 and download. Initial provisioning creates the account, installs its public keys,
 generates an independent Ed25519 host identity and, when requested, grants
