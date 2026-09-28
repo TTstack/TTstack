@@ -33,7 +33,7 @@ async fn main() {
         std::process::exit(1);
     });
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     let _state_lock = ttcore::lock_state(&std::path::Path::new(&cfg.data_dir).join("service.lock"))
         .unwrap_or_else(|e| {
             eprintln!("Cannot lock state: {e}");
