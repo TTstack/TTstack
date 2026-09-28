@@ -17,7 +17,8 @@ None.
 
 ## Disposition, 2026-09-28
 
-Review of `bff24fb` identified the following boundary failures and corrections.
+Review of `bff24fb` identified additional boundary failures, corrected in the
+implementation revision identified by the [two-host validation report](validation/lifecycle-corrections-2026-09-28.md):
 
 - Docker deletion could remain stuck after a failed pull created no container.
   Stop now accepts confirmed absence and still propagates query/stop failures.
@@ -29,6 +30,11 @@ Review of `bff24fb` identified the following boundary failures and corrections.
 - Published-port DNAT also matched traffic addressed to other hosts. Rules now
   restrict destination matching to local host addresses. The access guide and CLI
   distinguish direct host-local guest access from incoming mapped-port access.
+
+Focused fault regressions and the complete workspace checks passed. Both
+authorized hosts passed the bounded live cases and cleanup checks recorded in the
+report. Maintained behavior remains in the [REST API](rest-api.md) and
+[networking guide](guest-images.md#networking-and-platform-scope).
 
 ## Disposition, 2026-09-25
 
