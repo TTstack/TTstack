@@ -1138,7 +1138,17 @@ pub async fn refresh_all_hosts(state: &CtlState, client: &reqwest::Client) {
 }
 async fn refresh_hosts(state: &CtlState, client: &reqwest::Client, owned_env: Option<&str>) {
     let revision = state.revision.load(Ordering::SeqCst);
-    let hosts = match state.lock_db().recovery_hosts() {
+    // Foreground operations only need snapshots from their own resource hosts.
+    // Background health checks and new placement still inspect the whole fleet.
+    let hosts = match (|| -> ruc::Result<Vec<Host>> {
+        let db = state.lock_db();
+        let mut hosts = db.recovery_hosts()?;
+        if let Some(id) = owned_env {
+            let vms = db.vms_by_env(id)?;
+            hosts.retain(|host| vms.iter().any(|vm| vm.host_id == host.id));
+        }
+        Ok(hosts)
+    })() {
         Ok(h) => h,
         Err(e) => {
             eprintln!("[ctl] list hosts: {e}");
@@ -1948,6 +1958,56 @@ mod tests {
         assert!(detail.env.error.unwrap().contains("offline"));
         assert_eq!(detail.vms.len(), 2);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn environment_actions_do_not_wait_for_unrelated_hosts() {
+        let (state, mock, server) = fixture().await;
+        let (other, stalled, other_server) = fixture().await;
+        seed(&state, &mock);
+        mock.qemu_resources_supported.store(true, Ordering::SeqCst);
+        for vm in mock.vms.lock().unwrap().iter_mut() {
+            vm.engine = Engine::Qemu;
+        }
+        let mut unrelated = other.lock_db().get_host("host").unwrap().unwrap();
+        unrelated.id = "unrelated".into();
+        state.lock_db().put_host(&unrelated).unwrap();
+        stalled.stall_info.store(true, Ordering::SeqCst);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            change_environment(&state, "env", "stop").await.unwrap();
+            resize_virtual_machine(
+                &state,
+                "good",
+                VmResources {
+                    cpu: 2,
+                    mem: 512,
+                    disk: 1024,
+                },
+            )
+            .await
+            .unwrap();
+            change_environment(&state, "env", "start").await.unwrap();
+        })
+        .await
+        .unwrap();
+        assert!(!stalled.info_entered.load(Ordering::SeqCst));
+        let refresh = {
+            let state = state.clone();
+            tokio::spawn(
+                async move { refresh_all_hosts(&state, &agent_client(None, 1).unwrap()).await },
+            )
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !stalled.info_entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        stalled.stall_info.store(false, Ordering::SeqCst);
+        refresh.await.unwrap();
+        server.abort();
+        other_server.abort();
     }
 
     #[tokio::test]
