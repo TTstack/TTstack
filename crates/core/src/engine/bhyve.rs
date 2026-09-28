@@ -21,14 +21,7 @@ impl BhyveEngine {
     }
     fn pid(vm: &Vm) -> Result<Option<i32>> {
         // bhyve changes its process title. Never signal a PID solely from a stale file.
-        let out = Command::new("ps")
-            .args(["-axo", "pid=,stat=,comm=,args="])
-            .bounded_output()
-            .c(d!("inspect bhyve processes"))?;
-        if !out.status.success() {
-            return Err(eg!("cannot query bhyve processes"));
-        }
-        let found = find_process(&vm.id, &String::from_utf8_lossy(&out.stdout))?;
+        let found = find_process(&vm.id, &process_listing()?)?;
         if found.is_some() && !Self::artifact(vm, "disk").is_file() {
             return Err(eg!("bhyve ownership metadata missing; retain resources"));
         }
@@ -195,12 +188,36 @@ impl VmEngine for BhyveEngine {
     }
 }
 
+fn process_listing() -> Result<String> {
+    // FreeBSD treats commas after an empty column header as part of that header.
+    // Separate -o arguments are required; -ww keeps long VM identities intact.
+    let out = Command::new("ps")
+        .args([
+            "-axww", "-o", "pid=", "-o", "stat=", "-o", "comm=", "-o", "args=",
+        ])
+        .bounded_output()
+        .c(d!("inspect bhyve processes"))?;
+    if !out.status.success() {
+        return Err(eg!("cannot query bhyve processes"));
+    }
+    String::from_utf8(out.stdout).c(d!("invalid process inventory encoding"))
+}
+
 fn find_process(id: &str, listing: &str) -> Result<Option<i32>> {
+    if listing.trim().is_empty() {
+        return Err(eg!("empty process inventory; retain resources"));
+    }
     let mut found = None;
-    for line in listing.lines() {
+    for line in listing.lines().filter(|line| !line.trim().is_empty()) {
         let fields: Vec<_> = line.split_whitespace().collect();
-        if fields.len() < 4 || fields[1].starts_with('Z') || fields[2] != "bhyve" {
+        if fields.len() < 3 || fields[0].parse::<i32>().is_err() {
+            return Err(eg!("invalid process inventory; retain resources"));
+        }
+        if fields[1].starts_with('Z') || fields[2] != "bhyve" {
             continue;
+        }
+        if fields.len() < 4 {
+            return Err(eg!("unreadable bhyve process identity; retain resources"));
         }
         let args = &fields[3..];
         if (args.first() == Some(&"bhyve:") && args.get(1) == Some(&id))
@@ -222,6 +239,20 @@ fn find_process(id: &str, listing: &str) -> Result<Option<i32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_ps_inventory_has_separate_columns() {
+        let listing = process_listing().unwrap();
+        let own_pid = std::process::id().to_string();
+        assert!(
+            listing
+                .lines()
+                .any(|line| line.split_whitespace().next() == Some(own_pid.as_str()))
+        );
+        assert!(find_process("ttstack-nonexistent-test-vm", &listing).is_ok());
+        assert!(find_process("guest", ",stat=,comm=,args=\n123\n").is_err());
+        assert!(find_process("guest", "").is_err());
+    }
+
     #[test]
     fn bhyve_identity_uses_exact_live_process_titles_instead_of_stale_pids() {
         let listing = "10 S sleep sleep guest\n11 Z bhyve bhyve: guest (bhyve)\n12 S bhyve bhyve: guest-other (bhyve)\n13 ICJ bhyve bhyve: guest (bhyve)\n";
