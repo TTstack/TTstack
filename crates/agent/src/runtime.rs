@@ -159,11 +159,7 @@ impl Runtime {
                 }
                 req.disk
                     .max(base_mib)
-                    .checked_add(if req.guest_config.is_empty() && options.ssh.is_none() {
-                        0
-                    } else {
-                        ttcore::guest_config::CONFIG_DISK_MIB
-                    })
+                    .checked_add(options.config_disk_mib(req.engine))
                     .ok_or_else(|| eg!("rootfs and configuration disk are too large"))?
             }
             Engine::Qemu => {
@@ -466,13 +462,7 @@ impl Runtime {
             self.store.firecracker_size(&path)?
         }
         .div_ceil(1024 * 1024);
-        let overhead = if vm.engine == Engine::Firecracker
-            && (vm.options.guest_config_digest.is_some() || vm.options.ssh.is_some())
-        {
-            ttcore::guest_config::CONFIG_DISK_MIB
-        } else {
-            0
-        };
+        let overhead = vm.options.config_disk_mib(vm.engine);
         if u64::from(target.disk) < current
             || target.disk < vm.disk.saturating_sub(overhead)
             || target.disk < vm.options.requested_disk

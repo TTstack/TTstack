@@ -846,11 +846,7 @@ async fn resize_virtual_machine(
             "stop the VM first; an unfinished update must use its recorded target".into(),
         ));
     }
-    let overhead = if vm.options.guest_config_digest.is_some() {
-        ttcore::guest_config::CONFIG_DISK_MIB
-    } else {
-        0
-    };
+    let overhead = vm.options.config_disk_mib(vm.engine);
     let disk = target
         .disk
         .checked_add(overhead)
@@ -1306,11 +1302,7 @@ fn apply_snapshot(
 fn merge_vm_snapshot(known: &Vm, actual: &Vm) -> Vm {
     let mut vm = actual.clone();
     if let Some(target) = known.pending_resources {
-        let overhead = if vm.options.guest_config_digest.is_some() {
-            ttcore::guest_config::CONFIG_DISK_MIB
-        } else {
-            0
-        };
+        let overhead = vm.options.config_disk_mib(vm.engine);
         let completed = vm.pending_resources.is_none()
             && vm.cpu == target.cpu
             && vm.mem == target.mem
@@ -1490,7 +1482,7 @@ mod tests {
         let vm = rows.iter_mut().find(|v| v.id == id).unwrap();
         vm.cpu = target.cpu;
         vm.mem = target.mem;
-        vm.disk = target.disk;
+        vm.disk = target.disk + vm.options.config_disk_mib(vm.engine);
         vm.options.requested_disk = target.disk;
         if mock.fail_action.load(Ordering::SeqCst) {
             return (
@@ -1959,8 +1951,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ssh_only_firecracker_resize_preserves_config_disk_and_recovers_lost_reply() {
+        let (state, mock, server) = fixture().await;
+        seed(&state, &mock);
+        mock.resources_supported.store(true, Ordering::SeqCst);
+        for vm in mock.vms.lock().unwrap().iter_mut() {
+            vm.engine = Engine::Firecracker;
+            vm.state = VmState::Stopped;
+            vm.disk = 1028;
+            vm.options.requested_disk = 1024;
+            vm.options.ssh = Some(Default::default());
+        }
+        let target = VmResources {
+            cpu: 2,
+            mem: 512,
+            disk: 1024,
+        };
+        let changed = resize_virtual_machine(&state, "good", target)
+            .await
+            .unwrap();
+        assert_eq!(changed.disk, 1028);
+        assert!(changed.options.guest_config_digest.is_none());
+        assert!(changed.options.ssh.is_some());
+        let grown = VmResources {
+            disk: 2048,
+            ..target
+        };
+        let changed = resize_virtual_machine(&state, "good", grown).await.unwrap();
+        assert_eq!(changed.disk, 2052);
+        assert!(changed.pending_resources.is_none());
+        mock.fail_action.store(true, Ordering::SeqCst);
+        let lost = VmResources {
+            disk: 3072,
+            ..target
+        };
+        assert!(resize_virtual_machine(&state, "good", lost).await.is_err());
+        let recovered = state.lock_db().get_vm("good").unwrap().unwrap();
+        assert_eq!(recovered.disk, 3076);
+        assert!(recovered.pending_resources.is_none());
+        mock.fail_action.store(false, Ordering::SeqCst);
+        assert!(resize_virtual_machine(&state, "good", lost).await.is_ok());
+        change_environment(&state, "env", "start").await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn pending_resize_survives_old_snapshots_until_the_target_is_confirmed() {
-        for engine in [Engine::Qemu, Engine::Firecracker] {
+        for (engine, ssh_only) in [
+            (Engine::Qemu, false),
+            (Engine::Firecracker, false),
+            (Engine::Firecracker, true),
+        ] {
             let (state, mock, server) = fixture().await;
             seed(&state, &mock);
             mock.resources_supported.store(true, Ordering::SeqCst);
@@ -1971,7 +2012,9 @@ mod tests {
                 vm.state = VmState::Stopped;
                 vm.disk = 64 + overhead;
                 vm.options.requested_disk = 64;
-                vm.options.guest_config_digest = (overhead > 0).then(|| "retained-config".into());
+                vm.options.guest_config_digest =
+                    (overhead > 0 && !ssh_only).then(|| "retained-config".into());
+                vm.options.ssh = ssh_only.then(Default::default);
             }
             let client = agent_client(None, 5).unwrap();
             refresh_all_hosts(&state, &client).await;

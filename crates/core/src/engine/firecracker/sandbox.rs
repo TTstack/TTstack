@@ -72,10 +72,7 @@ impl Sandbox {
             &serde_json::to_vec(&sandbox).c(d!("sandbox metadata"))?,
         )?;
         for name in ["vmlinux", "rootfs.ext4"].into_iter().chain(
-            vm.options
-                .guest_config_digest
-                .as_ref()
-                .map(|_| crate::guest_config::CONFIG_DISK),
+            (vm.options.config_disk_mib(vm.engine) > 0).then_some(crate::guest_config::CONFIG_DISK),
         ) {
             let source = image.join(name);
             let target = sandbox.root.join(name);

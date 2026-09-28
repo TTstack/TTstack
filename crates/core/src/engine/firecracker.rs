@@ -22,7 +22,7 @@ fn configuration(vm: &Vm, mac: &str) -> serde_json::Value {
         "drive_id": "rootfs", "path_on_host": "/rootfs.ext4",
         "is_root_device": true, "is_read_only": false
     })];
-    if vm.options.guest_config_digest.is_some() {
+    if vm.options.config_disk_mib(vm.engine) > 0 {
         drives.push(serde_json::json!({
             "drive_id": "config", "path_on_host": "/guest-config.ext4",
             "is_root_device": false, "is_read_only": true
@@ -275,6 +275,28 @@ fn wait_for_boot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configuration_attaches_one_read_only_disk_for_config_or_ssh() {
+        for (config, ssh) in [(false, false), (true, false), (false, true), (true, true)] {
+            let expected_drives = if config || ssh { 2 } else { 1 };
+            let mut vm: Vm = serde_json::from_value(serde_json::json!({
+                "id": "test", "env_id": "env", "host_id": "host", "image": "alpine",
+                "engine": "firecracker", "cpu": 1, "mem": 128, "disk": 128,
+                "ip": "10.10.0.2", "port_map": {}, "state": "stopped", "created_at": 0
+            }))
+            .unwrap();
+            vm.options.guest_config_digest = config.then(|| "caller-config".into());
+            vm.options.ssh = ssh.then(Default::default);
+            let config = configuration(&vm, "02:54:0a:0a:00:02");
+            let drives = config["drives"].as_array().unwrap();
+            assert_eq!(drives.len(), expected_drives);
+            if drives.len() == 2 {
+                assert_eq!(drives[1]["path_on_host"], "/guest-config.ext4");
+                assert_eq!(drives[1]["is_read_only"], true);
+            }
+        }
+    }
 
     #[test]
     fn startup_waits_for_readiness_without_treating_missing_marker_as_exit() {

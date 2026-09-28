@@ -200,7 +200,7 @@ pub struct Vm {
     pub cpu: u32,
     /// Memory in MiB.
     pub mem: u32,
-    /// Disk in MiB.
+    /// Total disk reservation in MiB, including any guest configuration disk.
     pub disk: u32,
     /// Internal IP (on the host bridge).
     pub ip: String,
@@ -226,15 +226,10 @@ pub struct VmResources {
 impl Vm {
     pub fn reserved_disk(&self) -> u32 {
         self.pending_resources.map_or(self.disk, |r| {
-            self.disk.max(r.disk.saturating_add(
-                if self.engine == Engine::Firecracker
-                    && (self.options.guest_config_digest.is_some() || self.options.ssh.is_some())
-                {
-                    crate::guest_config::CONFIG_DISK_MIB
-                } else {
-                    0
-                },
-            ))
+            self.disk.max(
+                r.disk
+                    .saturating_add(self.options.config_disk_mib(self.engine)),
+            )
         })
     }
 }
@@ -253,6 +248,20 @@ pub struct VmOptions {
     /// Only a digest is exposed/persisted here; configuration contents stay on the agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_config_digest: Option<String>,
+}
+
+impl VmOptions {
+    /// Firecracker carries caller configuration and/or the initial SSH seed on one disk.
+    /// The caller configuration digest remains independent of the generated SSH identity.
+    pub fn config_disk_mib(&self, engine: Engine) -> u32 {
+        if engine == Engine::Firecracker
+            && (self.guest_config_digest.is_some() || self.ssh.is_some())
+        {
+            crate::guest_config::CONFIG_DISK_MIB
+        } else {
+            0
+        }
+    }
 }
 
 /// An environment — a logical group of related VMs.
