@@ -21,7 +21,6 @@ pub struct Runtime {
     network_ready: bool,
     container_runtime: Option<ContainerRuntime>,
     port_range: std::ops::RangeInclusive<u16>,
-    network_binding_error: Option<String>,
     pub resource: Resource,
     engine_factory: fn(Engine, Option<ContainerRuntime>) -> Result<Box<dyn engine::VmEngine>>,
 }
@@ -58,7 +57,6 @@ impl Runtime {
             network_ready: false,
             container_runtime: None,
             port_range: 20000..=65535,
-            network_binding_error: None,
         };
         // Reconcile retries network recovery; a transient firewall error must not
         // prevent the management listener from starting.
@@ -132,26 +130,9 @@ impl Runtime {
                 ));
             }
         } else if occupied {
-            let (vms, corrupt) = load_recoverable_vms(&self.db)?;
-            if corrupt {
-                self.network_binding_error = Some("network binding deferred: inspect unreadable VM records and restart with the original ingress configuration; creation, start and SSH VM deletion remain disabled".into());
-                return Ok(());
-            }
-            let public = ingress
-                .as_ref()
-                .map(|i| i.public_address.to_string())
-                .unwrap_or_default();
-            if vms.iter().any(|vm| {
-                vm.ssh.as_ref().is_some_and(|ssh| ssh.host != public)
-                    || vm
-                        .port_map
-                        .values()
-                        .any(|port| !(start..=end).contains(port))
-            }) {
-                return Err(eg!(
-                    "cannot adopt network configuration; restore the original SSH ingress and a range containing existing ports, and inspect unreadable records"
-                ));
-            }
+            return Err(eg!(
+                "agent database has VM records but no network binding; inspect the database before starting"
+            ));
         }
         self.db
             .execute(
@@ -161,14 +142,10 @@ impl Runtime {
             .c(d!("persist network binding"))?;
         self.ssh_ingress = ingress;
         self.port_range = start..=end;
-        self.network_binding_error = None;
         Ok(())
     }
 
     pub fn create_vm(&mut self, req: &CreateVmReq) -> Result<Vm> {
-        if let Some(error) = &self.network_binding_error {
-            return Err(eg!(error.clone()));
-        }
         validate_name(&req.vm_id, "vm_id").map_err(|e| eg!(e))?;
         validate_name(&req.env_id, "env_id").map_err(|e| eg!(e))?;
         validate_image(&req.image, req.engine).map_err(|e| eg!(e))?;
@@ -399,9 +376,6 @@ impl Runtime {
     }
 
     fn ensure_network(&mut self) -> Result<()> {
-        if let Some(error) = &self.network_binding_error {
-            return Err(eg!(error.clone()));
-        }
         #[cfg(target_os = "linux")]
         if !self.network_ready {
             net::setup_bridge()?;
@@ -423,9 +397,6 @@ impl Runtime {
         }
     }
     fn restore_network(&self, vm: &Vm) -> Result<()> {
-        if let Some(error) = &self.network_binding_error {
-            return Err(eg!(error.clone()));
-        }
         #[cfg(target_os = "linux")]
         if vm.engine != Engine::Docker {
             #[cfg(target_os = "linux")]
@@ -482,9 +453,6 @@ impl Runtime {
     }
 
     pub fn start_vm(&mut self, id: &str) -> Result<()> {
-        if let Some(error) = &self.network_binding_error {
-            return Err(eg!(error.clone()));
-        }
         let mut vm = load_vm(&self.db, id)?.ok_or_else(|| eg!(format!("VM not found: {id}")))?;
         if vm.pending_resources.is_some() {
             return Err(eg!(
@@ -636,11 +604,6 @@ impl Runtime {
         let Some(mut vm) = load_vm(&self.db, id)? else {
             return Ok(());
         };
-        if vm.ssh.is_some()
-            && let Some(error) = &self.network_binding_error
-        {
-            return Err(eg!(error.clone()));
-        }
         vm.state = VmState::Deleting;
         save_vm(&self.db, &vm)?;
         // Disk deletion is safe only after process termination is confirmed.
@@ -751,13 +714,11 @@ impl Runtime {
             }
         }
         if let Some(ssh) = &mut vm.ssh {
-            if self.network_binding_error.is_none() {
-                ssh.host = self
-                    .ssh_ingress
-                    .as_ref()
-                    .map(|c| c.public_address.to_string())
-                    .unwrap_or_default();
-            }
+            ssh.host = self
+                .ssh_ingress
+                .as_ref()
+                .map(|c| c.public_address.to_string())
+                .unwrap_or_default();
             let reachable = vm.state == VmState::Running && ttcore::ssh::ready(&vm.ip);
             if reachable && !ssh.initialized {
                 ssh.initialized = ttcore::ssh::initial_identity_ready(&vm.ip, &ssh.host_key);
@@ -793,16 +754,9 @@ impl Runtime {
         load_all_vms(&self.db)
     }
     pub fn agent_info(&self) -> Result<AgentInfo> {
-        let mut warnings: Vec<_> = self.network_binding_error.iter().cloned().collect();
-        let (vms, corrupt) = load_recoverable_vms(&self.db)?;
-        if self.container_runtime.is_none()
-            && (corrupt || vms.iter().any(|vm| vm.engine == Engine::Docker))
-        {
-            warnings.push("container runtime is unbound; verify the original runtime and set --container-runtime docker or podman (or TT_CONTAINER_RUNTIME), then restart; container mutations are disabled".into());
-        }
         Ok(AgentInfo {
             vms: None,
-            warnings,
+            warnings: vec![],
             image_sizes: Default::default(),
             capabilities: detect_capabilities(&self.engines, self.storage),
             host_id: self.host_id.clone(),
@@ -897,8 +851,19 @@ fn bind_container_runtime(
         .transpose()
         .map_err(|e| eg!(e))?;
     let (vms, corrupt) = load_recoverable_vms(db)?;
-    let occupied = corrupt || vms.iter().any(|vm| vm.engine == Engine::Docker);
+    let containers = vms.iter().any(|vm| vm.engine == Engine::Docker);
+    if bound.is_none() && containers {
+        return Err(eg!(
+            "agent database has container records but no runtime binding; inspect the database before starting"
+        ));
+    }
+    let occupied = corrupt || containers;
     let selected = match (bound, requested) {
+        (None, Some(_)) if corrupt => {
+            return Err(eg!(
+                "cannot select a container runtime while unreadable records remain"
+            ));
+        }
         (Some(old), Some(new)) if old != new && occupied => {
             return Err(eg!(
                 "cannot change the container runtime while container or unreadable records remain; retain {} and drain them first",
@@ -919,75 +884,68 @@ fn bind_container_runtime(
     Ok(selected)
 }
 
-/// Current agent schema version.
+/// The only supported agent database format. There is no in-agent migration.
 const SCHEMA_VERSION: u32 = 5;
 
 fn init_db(db: &Connection) -> Result<()> {
-    db.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         PRAGMA synchronous=NORMAL;
-         CREATE TABLE IF NOT EXISTS _meta (
-             key   TEXT PRIMARY KEY,
-             value TEXT NOT NULL
-         );",
-    )
-    .c(d!("init meta table"))?;
-
-    let current = get_schema_version(db)?;
-
-    if current > SCHEMA_VERSION {
-        return Err(eg!(
-            "agent DB schema v{} is newer than this binary (v{}); upgrade TTstack first",
-            current,
-            SCHEMA_VERSION
-        ));
-    }
-
-    if current < 1 {
-        db.execute_batch(
-            "CREATE TABLE IF NOT EXISTS vms (
+    let populated: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*')",
+            [],
+            |row| row.get(0),
+        )
+        .c(d!("inspect agent database format"))?;
+    if populated {
+        let current = get_schema_version(db)?;
+        if current != SCHEMA_VERSION {
+            return Err(eg!(
+                "unsupported agent DB schema v{current}; expected v{SCHEMA_VERSION}; database migration or cleanup belongs to the caller's deployment script"
+            ));
+        }
+        // A damaged native database is not an invitation to recreate missing tables.
+        db.prepare("SELECT id, data FROM vms")
+            .c(d!("validate agent VM table"))?;
+    } else {
+        let transaction = db
+            .unchecked_transaction()
+            .c(d!("initialize agent database"))?;
+        transaction
+            .execute_batch(
+                "CREATE TABLE _meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+             );
+             CREATE TABLE vms (
                 id       TEXT PRIMARY KEY,
                 data     TEXT NOT NULL
             );",
-        )
-        .c(d!("migration v1"))?;
+            )
+            .c(d!("create native agent schema"))?;
+        transaction
+            .execute(
+                "INSERT INTO _meta (key,value) VALUES ('schema_version',?1)",
+                [SCHEMA_VERSION.to_string()],
+            )
+            .c(d!("record agent database format"))?;
+        transaction
+            .commit()
+            .c(d!("commit agent database initialization"))?;
     }
-
-    // v3 adds durable pending resource updates; older binaries must not ignore them.
-    // v5 binds the container runtime and network configuration to this inventory.
-    // v2 adds lifecycle fields in serialized records, decoded with serde defaults.
-    // The version guard prevents older binaries from opening this state.
-
-    set_schema_version(db, SCHEMA_VERSION)?;
-    if current < SCHEMA_VERSION {
-        eprintln!("agent DB migrated: v{current} → v{SCHEMA_VERSION}");
-    }
-
+    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+        .c(d!("configure agent database"))?;
     Ok(())
 }
 
 fn get_schema_version(db: &Connection) -> Result<u32> {
-    let mut stmt = db
-        .prepare("SELECT value FROM _meta WHERE key = 'schema_version'")
-        .c(d!())?;
-    let mut rows = stmt.query([]).c(d!())?;
-    match rows.next().c(d!())? {
-        Some(row) => {
-            let val: String = row.get(0).c(d!())?;
-            val.parse::<u32>()
-                .map_err(|_| eg!(format!("invalid schema_version: {val}")))
-        }
-        None => Ok(0),
-    }
-}
-
-fn set_schema_version(db: &Connection, ver: u32) -> Result<()> {
-    db.execute(
-        "INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', ?1)",
-        rusqlite::params![ver.to_string()],
-    )
-    .c(d!("set schema version"))?;
-    Ok(())
+    let value: Option<String> = db.query_row(
+        "SELECT value FROM _meta WHERE key='schema_version'", [], |row| row.get(0)
+    ).optional().c(d!("read agent database format; incompatible state must be handled by the caller's deployment script"))?;
+    value
+        .ok_or_else(|| {
+            eg!("agent database has no schema marker; deployment must supply a native database")
+        })?
+        .parse()
+        .c(d!("invalid agent database schema marker"))
 }
 
 /// Load or generate a stable host_id persisted in the agent database.
@@ -997,13 +955,7 @@ fn set_schema_version(db: &Connection, ver: u32) -> Result<()> {
 /// when neither is available do we generate a new random ID.
 pub fn resolve_host_id(db_path: &str, cli_id: Option<String>) -> Result<String> {
     let conn = Connection::open(db_path).c(d!("open DB for host_id"))?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS _meta (
-             key   TEXT PRIMARY KEY,
-             value TEXT NOT NULL
-         );",
-    )
-    .c(d!("ensure meta table"))?;
+    init_db(&conn)?;
 
     if let Some(id) = cli_id {
         validate_name(&id, "host_id").map_err(|e| eg!(e))?;
@@ -1327,19 +1279,119 @@ mod tests {
     }
 
     #[test]
-    fn container_runtime_binding_survives_reopen_and_refuses_implicit_migration() {
+    fn incompatible_databases_are_rejected_before_any_identity_or_schema_write() {
+        for marker in [
+            None,
+            Some("0"),
+            Some("1"),
+            Some("2"),
+            Some("3"),
+            Some("4"),
+            Some("6"),
+            Some("invalid"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("agent.db");
+            {
+                let db = Connection::open(&path).unwrap();
+                db.execute_batch(
+                    "CREATE TABLE _meta (key TEXT PRIMARY KEY,value TEXT NOT NULL);
+                    CREATE TABLE vms (id TEXT PRIMARY KEY,data TEXT NOT NULL);
+                    INSERT INTO _meta VALUES ('host_id','original-host');
+                    INSERT INTO vms VALUES ('retained','original-payload');",
+                )
+                .unwrap();
+                if let Some(marker) = marker {
+                    db.execute("INSERT INTO _meta VALUES ('schema_version',?1)", [marker])
+                        .unwrap();
+                }
+            }
+            let before = std::fs::read(&path).unwrap();
+            assert!(
+                resolve_host_id(path.to_str().unwrap(), Some("replacement-host".into())).is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            let db = Connection::open(&path).unwrap();
+            assert_eq!(
+                db.query_row("SELECT value FROM _meta WHERE key='host_id'", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+                "original-host"
+            );
+            assert_eq!(
+                db.query_row("SELECT data FROM vms WHERE id='retained'", [], |r| r
+                    .get::<_, String>(0))
+                    .unwrap(),
+                "original-payload"
+            );
+        }
+    }
+
+    #[test]
+    fn unversioned_or_incomplete_databases_are_not_automatically_repaired() {
+        // Only SQLite's reserved sqlite_ prefix denotes internal objects.
+        let named = Connection::open_in_memory().unwrap();
+        named
+            .execute_batch("CREATE TABLE sqliteCustom (value TEXT);")
+            .unwrap();
+        assert!(init_db(&named).is_err());
+        assert_eq!(
+            named
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE name='_meta'",
+                    [],
+                    |r| r.get::<_, u32>(0)
+                )
+                .unwrap(),
+            0
+        );
+
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE vms (id TEXT PRIMARY KEY,data TEXT NOT NULL);
+            INSERT INTO vms VALUES ('retained','original-payload');",
+        )
+        .unwrap();
+        assert!(init_db(&db).is_err());
+        assert_eq!(
+            db.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE name='_meta'",
+                [],
+                |r| r.get::<_, u32>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM vms", [], |r| r.get::<_, u32>(0))
+                .unwrap(),
+            1
+        );
+
+        let db = test_db();
+        db.execute_batch("DROP TABLE vms;").unwrap();
+        assert!(init_db(&db).is_err());
+        assert_eq!(get_schema_version(&db).unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            db.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE name='vms'",
+                [],
+                |r| r.get::<_, u32>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn container_runtime_binding_survives_reopen_and_rejects_switching() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agent.db");
         let db = Connection::open(&path).unwrap();
         init_db(&db).unwrap();
         let mut vm = make_vm("container", VmState::Running);
         vm.engine = Engine::Docker;
-        save_vm(&db, &vm).unwrap();
-        assert_eq!(
-            bind_container_runtime(&db, None, || panic!("must not guess legacy ownership"))
-                .unwrap(),
-            None
-        );
         assert_eq!(
             bind_container_runtime(&db, Some(ContainerRuntime::Podman), || panic!(
                 "must not detect"
@@ -1347,6 +1399,7 @@ mod tests {
             .unwrap(),
             Some(ContainerRuntime::Podman)
         );
+        save_vm(&db, &vm).unwrap();
         drop(db);
         let db = Connection::open(path).unwrap();
         init_db(&db).unwrap();
@@ -1466,7 +1519,6 @@ mod lifecycle_tests {
             engine_factory: |_, _| Ok(Box::new(FakeEngine)),
             container_runtime: None,
             port_range: 20000..=65535,
-            network_binding_error: None,
             network_ready: false,
         }
     }
@@ -1857,49 +1909,51 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn corrupt_legacy_inventory_defers_bindings_without_blocking_healthy_stop() {
+    fn missing_native_bindings_are_rejected_instead_of_adopted() {
         let mut rt = runtime(Connection::open_in_memory().unwrap());
+        let guest = vm("retained", "live", VmState::Running);
+        save_vm(&rt.db, &guest).unwrap();
+        assert!(rt.configure_network(None, 20000, 65535).is_err());
+        for requested in [
+            None,
+            Some(ContainerRuntime::Docker),
+            Some(ContainerRuntime::Podman),
+        ] {
+            assert!(
+                bind_container_runtime(&rt.db, requested, || panic!("must not infer ownership"))
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            load_vm(&rt.db, &guest.id).unwrap().unwrap().state,
+            VmState::Running
+        );
+        assert_eq!(rt.db.query_row("SELECT COUNT(*) FROM _meta WHERE key IN ('network_config','container_runtime')", [], |r| r.get::<_, u32>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn corrupt_vm_row_does_not_block_existing_native_bindings_or_healthy_stop() {
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        rt.configure_network(None, 20000, 65535).unwrap();
+        bind_container_runtime(&rt.db, Some(ContainerRuntime::Podman), || {
+            panic!("explicit runtime")
+        })
+        .unwrap();
+        save_vm(&rt.db, &vm("healthy", "live", VmState::Running)).unwrap();
         rt.db
             .execute("INSERT INTO vms VALUES ('broken','not-json')", [])
             .unwrap();
-        let mut healthy = vm("healthy", "offline", VmState::Running);
-        healthy.engine = Engine::Qemu;
-        save_vm(&rt.db, &healthy).unwrap();
-        assert_eq!(
-            bind_container_runtime(&rt.db, None, || panic!("must not detect")).unwrap(),
-            None
-        );
         rt.configure_network(None, 20000, 65535).unwrap();
-        assert!(rt.network_binding_error.is_some());
-        assert!(rt.ensure_network().is_err());
-        assert_eq!(rt.db.query_row("SELECT COUNT(*) FROM _meta WHERE key IN ('network_config','container_runtime')", [], |r| r.get::<_, u32>(0)).unwrap(), 0);
-        rt.stop_vm(&healthy.id).unwrap();
         assert_eq!(
-            load_vm(&rt.db, &healthy.id).unwrap().unwrap().state,
+            bind_container_runtime(&rt.db, None, || panic!("must retain runtime")).unwrap(),
+            Some(ContainerRuntime::Podman)
+        );
+        rt.stop_vm("healthy").unwrap();
+        assert_eq!(
+            load_vm(&rt.db, "healthy").unwrap().unwrap().state,
             VmState::Stopped
         );
-        assert!(rt.start_vm(&healthy.id).is_err());
-        healthy.ssh = Some(ttcore::ssh::SshInfo {
-            user: "root".into(),
-            sudo: false,
-            host: String::new(),
-            port: 20000,
-            host_key: "public".into(),
-            ready: false,
-            checked_at: 0,
-            initialized: false,
-        });
-        save_vm(&rt.db, &healthy).unwrap();
-        assert!(rt.destroy_vm(&healthy.id).is_err());
-        assert!(load_vm(&rt.db, &healthy.id).unwrap().is_some());
-        delete_vm(&rt.db, "broken").unwrap();
-        rt.configure_network(None, 20000, 65535).unwrap();
-        assert!(rt.network_binding_error.is_none());
-        rt.db
-            .execute("INSERT INTO vms VALUES ('broken','not-json')", [])
-            .unwrap();
-        rt.configure_network(None, 20000, 65535).unwrap();
-        assert!(rt.network_binding_error.is_none());
+        assert!(load_vm(&rt.db, "broken").is_err());
     }
 
     #[test]

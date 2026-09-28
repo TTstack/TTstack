@@ -100,8 +100,8 @@ Docker when available, otherwise Podman, and persists that selection. Set
 Installing another runtime or losing the selected executable never switches stores.
 Changing the binding requires an inventory without container or unreadable records.
 Use the bound runtime/store to prepare images; rootless and root-owned stores are
-distinct. See [upgrade migration](deployment.md#resource-update-schema-gate) for
-older inventories without a recorded binding.
+distinct. The agent accepts only its [native database format](deployment.md#resource-update-schema-gate);
+incompatible data is handled by the caller's deployment script.
 
 A minimal web-container workflow on a host with a working Docker runtime is:
 

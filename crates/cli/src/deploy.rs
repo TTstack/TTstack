@@ -147,7 +147,7 @@ pub struct AgentConfig {
     #[serde(default = "default_disk_total")]
     pub disk_total: String,
     pub host_id: Option<String>,
-    /// Bind this agent's inventory to docker or podman, including legacy migration.
+    /// Bind this agent's inventory to docker or podman.
     pub container_runtime: Option<String>,
     /// Override release_dir for this agent (e.g. for musl/cross-compiled binaries).
     pub release_dir: Option<String>,

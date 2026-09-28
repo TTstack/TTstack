@@ -181,7 +181,9 @@ Deployment replaces generated service units; put operator customizations in
 are migrated into `90-ttstack-mounts.conf`. Guest disks and jail ownership are not
 recursively changed. Remote scripts travel through SSH stdin and binaries use
 private random staging directories with SHA-256 transfer verification.
-Schema changes are applied on startup; older binaries reject a newer schema.
+The agent opens only its native database format; it does not migrate or reset
+existing databases. The caller's deployment script handles incompatible state
+before starting the agent. See the [schema contract](#resource-update-schema-gate).
 For rollback, retain matching binaries and consistent backups of controller/agent
 databases and guest storage, taken while services/workloads are stopped.
 
@@ -202,8 +204,8 @@ contains an unsupported engine, use its compatible prior release to drain/remove
 those workloads and unregister their hosts before upgrading. Do not edit raw state
 to pretend that an existing workload uses a different engine.
 
-The retained engine names and state schema are unchanged. Ordinary Linux
-workspaces keep their identities, disks and lifecycle state through an upgrade.
+With a compatible database, ordinary Linux workspaces retain their identities,
+disks and lifecycle state through an upgrade.
 
 CLI credentials are written atomically with mode 0600 and require `HOME`.
 Reconfiguring the same address without a key preserves its saved key. Changing
@@ -213,31 +215,26 @@ its address exactly matches the configured one.
 
 ### Resource-update schema gate
 
-Controller schema v4 and agent schema v5 retain interrupted offline resource
-updates and initial SSH state. Agent v5 also binds the container runtime and
-[SSH ingress/port range](ssh.md#reachable-endpoint) to the inventory, so older
-agents cannot silently ignore resource ownership. Back up both databases before
-upgrade and deploy matching binaries. Older binaries cannot open newer state;
-do not restore stale metadata over disks that have grown.
+The controller uses schema v4. The agent has one native schema, identified by
+marker `5`, containing VM state, pending resource updates, SSH metadata and
+container/network bindings. An empty database is initialized atomically in that
+format. An existing database must already match it; older, newer, unversioned or
+incomplete databases are rejected without migration, repair or automatic deletion.
+Validation precedes host-identity updates.
 
-An older inventory with container records but no runtime binding requires one
-explicit selection of its **original** runtime: `--container-runtime docker` or
-`--container-runtime podman`, or the environment variable `TT_CONTAINER_RUNTIME`.
-Distributed deployment accepts `container_runtime = "docker"` or `"podman"` in
-each agent section. Verify the original store before selecting it; installation
-order is not evidence of ownership. Until selected, the API remains available
-with a warning and container mutations are disabled. The selection is then
-persisted. A failed or missing runtime retains records and never falls back to
-another store.
+Preparation and cleanup of incompatible agent data belong to the caller's
+deployment script, while the agent is stopped. TTstack's deployment commands do
+not erase that data. Clearing a database does not stop guests, remove disks or
+firewall rules, or clear controller tracking; the caller must account for these
+resources before supplying a fresh database. There is no old-record adoption path.
 
-On the first v5 upgrade, retain the original SSH ingress namespace/target and a
-port range containing existing mappings. Older records lack namespace/target
-metadata, so adoption cannot reconstruct a previously changed configuration.
-Once bound, configuration changes require draining the agent inventory. See
+Use `--container-runtime docker|podman` or `TT_CONTAINER_RUNTIME` to select a runtime
+for a new container inventory. Distributed deployment accepts `container_runtime`
+in each agent section. Runtime and [network bindings](ssh.md#reachable-endpoint)
+are persisted before VM creation. Missing required bindings in an existing
+inventory are errors, not an opportunity to infer new ownership. Valid bindings
+continue to protect healthy VM operations when an unrelated VM row is unreadable.
+
+Deploy matching controller/agent binaries and preserve compatible state for
+rollback; do not restore stale metadata over disks that have grown. See
 [offline resource recovery](rest-api.md#offline-resource-updates).
-
-Unreadable legacy VM records defer initial network binding without hiding healthy
-records. Inspection and stop remain available; creation, start, network restoration
-and deletion of SSH-enabled VMs wait until the records are repaired and the agent
-restarts with its original configuration. An existing valid binding continues to
-protect healthy VM operations when an unrelated record becomes unreadable.
