@@ -36,6 +36,26 @@ impl Default for ImageCatalog {
 }
 
 type Reply<T> = (StatusCode, Json<ApiResp<T>>);
+
+/// Yield the host mutation lock between VM observations so queued lifecycle work progresses.
+pub async fn reconcile_once(state: AppState) -> Result<(), String> {
+    let path = state.db_path.clone();
+    let vms = tokio::task::spawn_blocking(move || {
+        runtime::read_recovery_snapshot(&path)
+            .map(|(vms, _)| vms)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    for vm in vms {
+        let id = vm.id;
+        let diagnostic_id = id.clone();
+        if let Err(e) = mutate(state.clone(), move |rt| rt.reconcile_vm(&id)).await {
+            eprintln!("[agent] reconcile {diagnostic_id}: {e}");
+        }
+    }
+    Ok(())
+}
 fn failure<T>(e: impl std::fmt::Display) -> Reply<T> {
     (
         StatusCode::INTERNAL_SERVER_ERROR,

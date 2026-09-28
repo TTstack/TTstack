@@ -56,7 +56,9 @@ impl Runtime {
         // Reconcile retries network recovery; a transient firewall error must not
         // prevent the management listener from starting.
         for mut vm in load_recoverable_vms(&rt.db)?.0 {
-            if vm.engine != Engine::Docker && matches!(vm.state, VmState::Running | VmState::Paused)
+            if vm.engine != Engine::Docker
+                && matches!(vm.state, VmState::Running | VmState::Paused)
+                && vm.error.is_none()
             {
                 vm.error = Some("network recovery pending".into());
                 save_vm(&rt.db, &vm)?;
@@ -569,76 +571,93 @@ impl Runtime {
         self.recount()
     }
 
-    pub fn reconcile(&mut self) -> Result<()> {
-        for mut vm in load_recoverable_vms(&self.db)?.0 {
-            if vm.state == VmState::Deleting {
-                if let Err(e) = self.destroy_vm(&vm.id) {
-                    eprintln!("[agent] cleanup {}: {e}", vm.id);
+    /// Re-read under the mutation lock; a queued scan must not resurrect a deleted VM.
+    pub fn reconcile_vm(&mut self, id: &str) -> Result<()> {
+        let Some(mut vm) = load_vm(&self.db, id)? else {
+            return Ok(());
+        };
+        if vm.state == VmState::Deleting {
+            return self.destroy_vm(&vm.id);
+        }
+        let needs_recovery = vm.error.is_some();
+        let was_running = matches!(vm.state, VmState::Running | VmState::Paused);
+        match (self.engine_factory)(vm.engine).and_then(|eng| eng.state(&vm)) {
+            Ok(actual) => {
+                if vm
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.starts_with("cannot query engine:"))
+                {
+                    vm.error = None;
                 }
-                continue;
-            }
-            let needs_recovery = vm.error.is_some();
-            let was_running = matches!(vm.state, VmState::Running | VmState::Paused);
-            match (self.engine_factory)(vm.engine).and_then(|eng| eng.state(&vm)) {
-                Ok(actual) => {
-                    if vm
-                        .error
-                        .as_deref()
-                        .is_some_and(|e| e.starts_with("cannot query engine:"))
-                    {
-                        vm.error = None;
-                    }
-                    if vm.state == VmState::Creating
-                        && !matches!(actual, VmState::Running | VmState::Paused)
-                    {
-                        vm.state = VmState::Failed;
-                        vm.error = Some(
-                            "operation interrupted; delete this VM to clean up and recreate".into(),
-                        );
-                    } else if vm.state != VmState::Failed
-                        || matches!(actual, VmState::Running | VmState::Paused)
-                    {
-                        vm.state = actual;
-                    }
-                    if matches!(actual, VmState::Running | VmState::Paused)
-                        && (!was_running || needs_recovery || !self.network_ready)
-                    {
-                        let recovery = if vm.engine == Engine::Docker {
-                            Ok(())
-                        } else {
-                            self.ensure_network()
-                                .and_then(|_| self.restore_network(&vm))
-                        };
-                        match recovery {
-                            Ok(()) => vm.error = None,
-                            Err(e) => {
-                                self.network_ready = false;
-                                vm.error = Some(format!("network recovery failed: {e}"));
-                            }
+                if vm.state == VmState::Creating
+                    && !matches!(actual, VmState::Running | VmState::Paused)
+                {
+                    vm.state = VmState::Failed;
+                    vm.error = Some(
+                        "operation interrupted; delete this VM to clean up and recreate".into(),
+                    );
+                } else if vm.state != VmState::Failed
+                    || matches!(actual, VmState::Running | VmState::Paused)
+                {
+                    vm.state = actual;
+                }
+                if actual == VmState::Stopped
+                    && vm.pending_resources.is_none()
+                    && vm.error.as_deref().is_some_and(|error| {
+                        error == "network recovery pending"
+                            || error.starts_with("network recovery failed:")
+                    })
+                {
+                    vm.error = None;
+                }
+                if matches!(actual, VmState::Running | VmState::Paused)
+                    && (!was_running || needs_recovery || !self.network_ready)
+                {
+                    let recovery = if vm.engine == Engine::Docker {
+                        Ok(())
+                    } else {
+                        self.ensure_network()
+                            .and_then(|_| self.restore_network(&vm))
+                    };
+                    match recovery {
+                        Ok(()) => vm.error = None,
+                        Err(e) => {
+                            self.network_ready = false;
+                            vm.error = Some(format!("network recovery failed: {e}"));
                         }
                     }
                 }
-                Err(e) => {
-                    vm.error = Some(format!("cannot query engine: {e}"));
-                }
             }
-            if let Some(ssh) = &mut vm.ssh {
-                ssh.host = self
-                    .ssh_ingress
-                    .as_ref()
-                    .map(|c| c.public_address.to_string())
-                    .unwrap_or_default();
-                let reachable = vm.state == VmState::Running && ttcore::ssh::ready(&vm.ip);
-                if reachable && !ssh.initialized {
-                    ssh.initialized = ttcore::ssh::initial_identity_ready(&vm.ip, &ssh.host_key);
-                }
-                ssh.ready = reachable && ssh.initialized;
-                ssh.checked_at = now();
+            Err(e) => {
+                vm.error = Some(format!("cannot query engine: {e}"));
             }
-            save_vm(&self.db, &vm)?;
+        }
+        if let Some(ssh) = &mut vm.ssh {
+            ssh.host = self
+                .ssh_ingress
+                .as_ref()
+                .map(|c| c.public_address.to_string())
+                .unwrap_or_default();
+            let reachable = vm.state == VmState::Running && ttcore::ssh::ready(&vm.ip);
+            if reachable && !ssh.initialized {
+                ssh.initialized = ttcore::ssh::initial_identity_ready(&vm.ip, &ssh.host_key);
+            }
+            ssh.ready = reachable && ssh.initialized;
+            ssh.checked_at = now();
+        }
+        save_vm(&self.db, &vm)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn reconcile(&mut self) -> Result<()> {
+        for vm in load_recoverable_vms(&self.db)?.0 {
+            self.reconcile_vm(&vm.id)?;
         }
         self.recount()
     }
+
     fn recount(&mut self) -> Result<()> {
         let (vms, corrupt) = load_recoverable_vms(&self.db)?;
         self.resource = resources_for(&self.resource, &vms);
@@ -1520,6 +1539,52 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn confirmed_stop_clears_only_obsolete_network_recovery_errors() {
+        for state in [VmState::Running, VmState::Paused, VmState::Stopped] {
+            for error in [
+                "network recovery pending",
+                "network recovery failed: transient",
+            ] {
+                let mut rt = runtime(Connection::open_in_memory().unwrap());
+                let mut guest = vm("rebooted", "offline", state);
+                guest.engine = Engine::Qemu;
+                guest.error = Some(error.into());
+                save_vm(&rt.db, &guest).unwrap();
+                rt.reconcile().unwrap();
+                rt.stop_vm(&guest.id).unwrap();
+                let saved = load_vm(&rt.db, &guest.id).unwrap().unwrap();
+                assert_eq!(saved.state, VmState::Stopped);
+                assert!(saved.error.is_none());
+            }
+        }
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        let mut guest = vm("pending", "offline", VmState::Stopped);
+        guest.error = Some("disk growth failed".into());
+        guest.pending_resources = Some(VmResources {
+            cpu: 1,
+            mem: 128,
+            disk: 1024,
+        });
+        save_vm(&rt.db, &guest).unwrap();
+        rt.reconcile().unwrap();
+        assert_eq!(
+            load_vm(&rt.db, &guest.id).unwrap().unwrap().error,
+            guest.error
+        );
+        guest.state = VmState::Creating;
+        guest.pending_resources = None;
+        guest.error = Some("network recovery pending".into());
+        save_vm(&rt.db, &guest).unwrap();
+        rt.reconcile().unwrap();
+        let saved = load_vm(&rt.db, &guest.id).unwrap().unwrap();
+        assert_eq!(saved.state, VmState::Failed);
+        assert!(saved.error.unwrap().contains("operation interrupted"));
+        delete_vm(&rt.db, &guest.id).unwrap();
+        rt.reconcile_vm(&guest.id).unwrap();
+        assert!(load_vm(&rt.db, &guest.id).unwrap().is_none());
+    }
+
+    #[test]
     fn late_readiness_clears_errors_without_a_restart() {
         let mut rt = runtime(Connection::open_in_memory().unwrap());
         let mut record = vm("late", "live", VmState::Failed);
@@ -1622,6 +1687,95 @@ mod lifecycle_tests {
         let lock = std::sync::Mutex::new(rt);
         let _guard = lock.lock().unwrap();
         assert_eq!(read_vms(path.to_str().unwrap()).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reconciliation_yields_to_queued_mutations_between_vm_probes() {
+        struct GatedEngine;
+        impl VmEngine for GatedEngine {
+            fn create(&self, _: &Vm, _: &str, _: &str, _: &[String]) -> Result<()> {
+                unreachable!()
+            }
+            fn start(&self, _: &Vm) -> Result<()> {
+                Ok(())
+            }
+            fn stop(&self, _: &Vm) -> Result<()> {
+                Ok(())
+            }
+            fn destroy(&self, _: &Vm) -> Result<()> {
+                Ok(())
+            }
+            fn name(&self) -> &'static str {
+                "gated"
+            }
+            fn state(&self, vm: &Vm) -> Result<VmState> {
+                let dir = std::path::Path::new(&vm.image);
+                if !dir.join("entered").exists() {
+                    std::fs::write(dir.join("entered"), b"").unwrap();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    while !dir.join("release").exists() && std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                } else {
+                    std::fs::write(dir.join("second"), vm.state.to_string()).unwrap();
+                }
+                Ok(VmState::Stopped)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.db");
+        let mut rt = runtime(Connection::open(&path).unwrap());
+        rt.engine_factory = |_| Ok(Box::new(GatedEngine));
+        for id in ["first", "second"] {
+            save_vm(
+                &rt.db,
+                &vm(id, dir.path().to_str().unwrap(), VmState::Running),
+            )
+            .unwrap();
+        }
+        let state = std::sync::Arc::new(crate::handler::AgentShared {
+            info: AgentInfo {
+                vms: None,
+                warnings: vec![],
+                image_sizes: Default::default(),
+                capabilities: vec![],
+                host_id: "h1".into(),
+                resource: rt.resource.clone(),
+                engines: vec![],
+                storage: Storage::File,
+                images: vec![],
+            },
+            runtime: std::sync::Arc::new(tokio::sync::Mutex::new(rt)),
+            db_path: path.to_string_lossy().into(),
+            image_dir: String::new(),
+            images: Default::default(),
+        });
+        let scan = tokio::spawn(crate::handler::reconcile_once(state.clone()));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !dir.path().join("entered").exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let waiting = state.runtime.lock();
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut waiting)
+                .await
+                .is_err()
+        );
+        std::fs::write(dir.path().join("release"), b"").unwrap();
+        let mut rt = waiting.await;
+        assert!(!dir.path().join("second").exists());
+        rt.stop_vm("first").unwrap();
+        rt.stop_vm("second").unwrap();
+        drop(rt);
+        scan.await.unwrap().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("second")).unwrap(),
+            "stopped"
+        );
     }
     #[test]
     fn firecracker_receives_root_directory_not_qcow2_path() {

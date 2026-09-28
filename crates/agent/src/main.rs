@@ -106,13 +106,8 @@ async fn main() {
     let recovery = state.clone();
     tokio::spawn(async move {
         loop {
-            if let Ok(mut rt) = recovery.runtime.clone().try_lock_owned() {
-                let _ = tokio::task::spawn_blocking(move || {
-                    if let Err(e) = rt.reconcile() {
-                        eprintln!("[agent] reconciliation failed: {e}");
-                    }
-                })
-                .await;
+            if let Err(e) = handler::reconcile_once(recovery.clone()).await {
+                eprintln!("[agent] reconciliation failed: {e}");
             }
             tokio::time::sleep(std::time::Duration::from_secs(15)).await;
         }
