@@ -17,6 +17,14 @@ behavior and are updated together with the code.
 | Configure distributed deployment | [Fleet template](../tools/deploy.toml.example) |
 | Contribute or choose an AI workflow | [Repository instructions](../AGENTS.md) and [Claude workflows](../.claude/README.md) |
 
+## Proposals
+
+These describe required additions, not current API or deployment behavior.
+
+- [VM SSH access and recovery evidence](proposals/vm-access-and-recovery.md):
+  common SSH/key injection across VM engines, retained-VM onboarding and host-side
+  diagnostics for caller-managed recovery.
+
 ## Validation evidence
 
 Reports are newest first. Each describes only the code revision, hosts, tests and
