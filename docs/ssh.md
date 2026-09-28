@@ -53,10 +53,8 @@ Public ingress currently supports IPv4. Caddy HTTP routes do not carry SSH.
 The agent persists the ingress configuration and port range before creating any
 VM. Changing or removing that configuration while VM records remain is rejected:
 restore the original settings, delete the owned VMs and then reconfigure. This
-keeps the location needed to remove each VM's outer rule. Existing VM records must
-already have a network binding; the agent does not adopt older records or infer
-missing ownership. The caller's deployment script handles incompatible databases
-and their resources as described in the [schema contract](deployment.md#resource-update-schema-gate).
+keeps the location needed to remove each VM's outer rule. For database compatibility
+and upgrade requirements, consult the [deployment guide](deployment.md#resource-update-schema-gate).
 Remove only rules with established ownership, never flush the shared table.
 
 VM `ssh` metadata contains `user`, boolean `sudo`, `host`, `port`, initial public
@@ -71,8 +69,7 @@ The advertised host key is the initial identity, not a key-rotation registry.
 Agents require ssh-keygen and ssh-keyscan to advertise `ssh_bootstrap`.
 Controller schema v4 and agent schema v5 preserve SSH options, host identity and
 bootstrap observation; v5 additionally protects agent runtime/network bindings.
-Upgrade them together and prepare compatible state first; the agent only opens
-its native v5 format and performs no database migration or reset.
+Upgrade them together following the target revision's compatibility requirements.
 Existing VMs without SSH options are not rekeyed or reimaged.
 
 See [live validation](validation/expert-ssh-2026-09-28.md) and the

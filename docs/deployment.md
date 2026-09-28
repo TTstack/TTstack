@@ -181,9 +181,8 @@ Deployment replaces generated service units; put operator customizations in
 are migrated into `90-ttstack-mounts.conf`. Guest disks and jail ownership are not
 recursively changed. Remote scripts travel through SSH stdin and binaries use
 private random staging directories with SHA-256 transfer verification.
-The agent opens only its native database format; it does not migrate or reset
-existing databases. The caller's deployment script handles incompatible state
-before starting the agent. See the [schema contract](#resource-update-schema-gate).
+Check the target revision's database compatibility and upgrade requirements
+before starting the new services. See [schema compatibility](#resource-update-schema-gate).
 For rollback, retain matching binaries and consistent backups of controller/agent
 databases and guest storage, taken while services/workloads are stopped.
 
@@ -215,25 +214,17 @@ its address exactly matches the configured one.
 
 ### Resource-update schema gate
 
-The controller uses schema v4. The agent has one native schema, identified by
-marker `5`, containing VM state, pending resource updates, SSH metadata and
-container/network bindings. An empty database is initialized atomically in that
-format. An existing database must already match it; older, newer, unversioned or
-incomplete databases are rejected without migration, repair or automatic deletion.
-Validation precedes host-identity updates.
-
-Preparation and cleanup of incompatible agent data belong to the caller's
-deployment script, while the agent is stopped. TTstack's deployment commands do
-not erase that data. Clearing a database does not stop guests, remove disks or
-firewall rules, or clear controller tracking; the caller must account for these
-resources before supplying a fresh database. There is no old-record adoption path.
+The current controller uses schema v4 and the agent uses schema v5. Agent state
+contains VM records, pending resource updates, SSH metadata and container/network
+bindings. The pre-production transition to this layout, its rationale and tested
+behavior are recorded in the [dated validation record](validation/native-agent-schema-2026-09-28.md).
 
 Use `--container-runtime docker|podman` or `TT_CONTAINER_RUNTIME` to select a runtime
 for a new container inventory. Distributed deployment accepts `container_runtime`
 in each agent section. Runtime and [network bindings](ssh.md#reachable-endpoint)
-are persisted before VM creation. Missing required bindings in an existing
-inventory are errors, not an opportunity to infer new ownership. Valid bindings
-continue to protect healthy VM operations when an unrelated VM row is unreadable.
+are persisted before VM creation. Current agents require these bindings for
+managed workloads. Valid bindings continue to protect healthy VM operations when
+an unrelated VM row is unreadable.
 
 Deploy matching controller/agent binaries and preserve compatible state for
 rollback; do not restore stale metadata over disks that have grown. See

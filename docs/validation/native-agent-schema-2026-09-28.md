@@ -1,15 +1,22 @@
 # Native agent schema validation — 2026-09-28
 
-The agent now supports one native database format, marked `5`. Empty databases
-are initialized directly; existing databases are validated without migration,
-repair, reset or old-record adoption. Incompatible data preparation belongs to
-the caller's deployment script. See the maintained
-[schema contract](../deployment.md#resource-update-schema-gate).
+This was a one-time pre-production simplification: no production data required
+preservation at the time. Historical database compatibility paths were therefore
+removed rather than maintained for this transition. This decision does not set
+a policy of discarding older data or foregoing migrations in future releases.
+
+In the tested revision, the agent supported one native database format, marked
+`5`. Empty databases were initialized directly; incompatible existing databases
+were rejected without migration, repair, reset or old-record adoption, before
+host-identity updates. For this transition, any incompatible test-data preparation
+or cleanup was left to the caller's deployment script; the agent did not erase
+existing databases. Future migration decisions remain outside this record's scope.
+See the maintained [deployment guide](../deployment.md#resource-update-schema-gate).
 
 ## Tested source
 
-The tested source is `448bd29` plus the native-schema changes committed with this
-report. SHA-256 of `git diff --binary 448bd29 -- crates` before committing:
+The tested implementation is revision `2908561`, following `448bd29`. SHA-256 of
+`git diff --binary 448bd29 2908561 -- crates`:
 
 `c1ea7e5e168dd146ce9e14ac80fc152be740d95ce7373df863ae168f2fa4a87e`
 
