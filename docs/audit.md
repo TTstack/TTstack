@@ -27,7 +27,8 @@ Review of `bff24fb` identified the following boundary failures and corrections.
 - Image inspection ran on the host-info request path. A single background catalog
   worker now keeps slow inspection independent of health and lifecycle reads.
 - Published-port DNAT also matched traffic addressed to other hosts. Rules now
-  restrict destination matching to local host addresses.
+  restrict destination matching to local host addresses. The access guide and CLI
+  distinguish direct host-local guest access from incoming mapped-port access.
 
 ## Disposition, 2026-09-25
 

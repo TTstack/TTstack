@@ -52,9 +52,10 @@ a bootable image.
 /opt/ttstack/bin/tt env show demo
 ```
 
-Port 22 is included automatically. Connect to the **agent host** at the mapped
-host port shown by `env show`; do not assume the controller address or a fixed
-port. `running` does not imply SSH has finished starting.
+Port 22 is included automatically. From the agent host, connect directly to the
+guest IP on port 22. From another machine, connect to the **agent host** at the
+mapped host port shown by `env show`; do not assume the controller address or a
+fixed port. `running` does not imply SSH has finished starting.
 
 At boot TTstack attaches a NoCloud seed ISO containing root SSH public keys,
 password-login-disabled SSH configuration, and static network settings. Use
@@ -334,6 +335,11 @@ the guest/network must be able to reach them for name resolution.
 Port forwarding is **TCP only**, for incoming traffic addressed to the agent host,
 from allocated host ports to requested guest ports. Traffic routed to other
 destinations keeps its original destination, including matching port numbers.
+For QEMU/Firecracker access from the agent host itself, use the guest IP and guest
+port directly: published ports do not provide host-local/loopback DNAT. Remote
+clients use the agent's reachable address and mapped port. Docker/Podman publishing
+follows its runtime's local-access behavior.
+
 On both QEMU and Firecracker, `--deny-outgoing` blocks routed outbound
 initiation while permitting replies to inbound traffic. It can also prevent
 external DNS access; it is not isolation from the host or other guests on the

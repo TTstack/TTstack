@@ -61,12 +61,13 @@ tt env create demo --image alpine-cloud --engine qemu \
 tt env show demo
 ```
 
-Use the host and mapped SSH port printed by `env show`, for example
-`ssh -i ~/.ssh/id_ed25519 -p 20000 root@127.0.0.1` **if that is the assigned port**.
+From the agent host, use the guest IP printed by `env show`, for example
+`ssh -i ~/.ssh/id_ed25519 root@10.10.0.2` **if that is the assigned guest IP**.
 `running` means the VM process is running; SSH may need more time to start.
-These loopback addresses assume the CLI and SSH client are on the same host.
-For remote access, register a host address reachable by the controller and use
-that host's reachable address for guest connections.
+The loopback management addresses above assume the CLI is on the same host.
+For remote access, register a host address reachable by the controller; clients
+on another machine use that host's reachable address and the assigned mapped port.
+See [networking](docs/guest-images.md#networking-and-platform-scope) for access paths.
 
 ```bash
 tt env stop demo

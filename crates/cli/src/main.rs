@@ -626,12 +626,32 @@ async fn print_access(client: &Client, vms: &[Vm]) {
         }
     };
     for vm in vms {
+        if vm.engine != Engine::Docker && !vm.ip.is_empty() {
+            for &guest in vm.port_map.keys() {
+                println!(
+                    "  On agent host {}: {}:{guest} (direct guest TCP)",
+                    vm.host_id, vm.ip
+                );
+            }
+        }
         if let Some(host) = hosts.iter().find(|h| h.id == vm.host_id)
             && let Ok(url) = reqwest::Url::parse(&format!("http://{}", host.addr))
             && let Some(addr) = url.host_str()
         {
             for (&guest, &port) in &vm.port_map {
-                println!("  Access {}: {addr}:{port} -> guest TCP {guest}", vm.id);
+                if vm.engine == Engine::Docker {
+                    println!("  Access {}: {addr}:{port} -> guest TCP {guest}", vm.id);
+                } else if !addr.eq_ignore_ascii_case("localhost")
+                    && !addr
+                        .trim_matches(['[', ']'])
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+                {
+                    println!(
+                        "  From another machine, if reachable: {addr}:{port} -> {} TCP {guest}",
+                        vm.id
+                    );
+                }
             }
         }
     }
