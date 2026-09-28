@@ -414,47 +414,135 @@ async fn create_qemu(name: &str, image_dir: &Path) -> Result<()> {
 
 // ── Jail images (FreeBSD) ───────────────────────────────────────────
 
-async fn create_jail(name: &str, image_dir: &Path) -> Result<()> {
-    let target = image_dir.join(name);
+fn freebsd_base_url(version: &str) -> Result<String> {
+    let version = version.trim();
+    let release = version.split("-p").next().unwrap_or(version);
+    let numbers = release
+        .strip_suffix("-RELEASE")
+        .ok_or_else(|| eg!("freebsd-base requires a RELEASE host; prepare other roots manually"))?;
+    let parts: Vec<_> = numbers.split('.').collect();
+    if parts.len() != 2
+        || parts
+            .iter()
+            .any(|v| v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(eg!("invalid FreeBSD release"));
+    }
+    Ok(format!(
+        "https://download.freebsd.org/releases/amd64/amd64/{release}/base.txz"
+    ))
+}
 
+fn jail_image_complete(target: &Path) -> bool {
+    [
+        "bin/sh",
+        "etc/rc",
+        "etc/master.passwd",
+        ".ttstack-image-complete",
+    ]
+    .iter()
+    .all(|file| target.join(file).is_file())
+}
+
+async fn install_jail_archive(archive: &Path, target: &Path) -> Result<()> {
+    let parent = target.parent().unwrap_or(Path::new("."));
+    let staging = tempfile::Builder::new()
+        .prefix(".freebsd-base-")
+        .tempdir_in(parent)
+        .c(d!("create jail image staging directory"))?;
+    let mut args = vec![
+        "-xpf",
+        archive
+            .to_str()
+            .ok_or_else(|| eg!("invalid archive path"))?,
+        "-C",
+        staging
+            .path()
+            .to_str()
+            .ok_or_else(|| eg!("invalid staging path"))?,
+    ];
+    if cfg!(target_os = "freebsd") {
+        args.push("--no-fflags");
+    }
+    run_cmd("tar", &args).await?;
+    for file in ["bin/sh", "etc/rc", "etc/master.passwd"] {
+        if !staging.path().join(file).is_file() {
+            return Err(eg!(format!("incomplete jail archive: missing {file}")));
+        }
+    }
+    tokio::fs::write(
+        staging.path().join("etc/resolv.conf"),
+        "nameserver 8.8.8.8\n",
+    )
+    .await
+    .c(d!("write jail resolver"))?;
+    tokio::fs::write(
+        staging.path().join("etc/rc.conf"),
+        "sendmail_enable=\"NONE\"\nsyslogd_flags=\"-ss\"\nsshd_enable=\"YES\"\n",
+    )
+    .await
+    .c(d!("write jail rc.conf"))?;
+    tokio::fs::write(
+        staging.path().join(".ttstack-image-complete"),
+        "freebsd-base\n",
+    )
+    .await
+    .c(d!("mark completed jail image"))?;
+    // Publish only a fully extracted/configured root. Failed attempts are retryable.
+    tokio::fs::rename(staging.path(), target)
+        .await
+        .c(d!("publish jail image"))?;
+    Ok(())
+}
+
+async fn create_jail(name: &str, image_dir: &Path) -> Result<()> {
+    if !cfg!(target_os = "freebsd") {
+        return Err(eg!("freebsd-base must be built on FreeBSD"));
+    }
+    let target = image_dir.join(name);
     if target.exists() {
+        if !jail_image_complete(&target) {
+            return Err(eg!(
+                "existing jail image is incomplete or unmanaged; inspect and move it before retrying"
+            ));
+        }
         println!("[image] {name} already exists");
         return Ok(());
     }
-
-    println!("[image] fetching FreeBSD base for jail...");
-    tokio::fs::create_dir_all(&target).await.c(d!("mkdir"))?;
-
-    // Detect FreeBSD version
-    let ver = Command::new("freebsd-version")
+    let output = Command::new("freebsd-version")
+        .arg("-u")
         .output()
         .await
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|_| "14.3-RELEASE".into());
-
-    // Extract major version for URL
-    let major = ver.split('.').next().unwrap_or("14");
-    let url = format!("https://download.freebsd.org/releases/amd64/{major}.3-RELEASE/base.txz");
-
-    let txz = format!("{}/base.txz", target.display());
-    download_file(&url, Path::new(&txz)).await?;
-
-    println!("[image] extracting base...");
-    run_cmd("tar", &["xf", &txz, "-C", &target.display().to_string()]).await?;
-    tokio::fs::remove_file(&txz).await.ok();
-
-    // Configure the jail root
-    let etc = target.join("etc");
-    tokio::fs::write(etc.join("resolv.conf"), "nameserver 8.8.8.8\n")
+        .c(d!("read FreeBSD release"))?;
+    if !output.status.success() {
+        return Err(eg!("freebsd-version failed"));
+    }
+    let url = freebsd_base_url(&String::from_utf8_lossy(&output.stdout))?;
+    tokio::fs::create_dir_all(image_dir)
         .await
-        .ok();
-    tokio::fs::write(
-        etc.join("rc.conf"),
-        "sendmail_enable=\"NONE\"\nsyslogd_flags=\"-ss\"\n",
+        .c(d!("create image directory"))?;
+    let download = tempfile::Builder::new()
+        .prefix(".freebsd-download-")
+        .tempdir_in(image_dir)
+        .c(d!("create download directory"))?;
+    let archive = download.path().join("base.txz");
+    println!("[image] fetching {url}...");
+    // FreeBSD base systems include fetch; keep curl-based recipes unchanged.
+    run_cmd(
+        "fetch",
+        &[
+            "-q",
+            "-T",
+            "120",
+            "-o",
+            archive
+                .to_str()
+                .ok_or_else(|| eg!("invalid archive path"))?,
+            &url,
+        ],
     )
-    .await
-    .ok();
-
+    .await?;
+    install_jail_archive(&archive, &target).await?;
     println!("[image] {name} ready: FreeBSD jail base");
     Ok(())
 }
@@ -677,6 +765,63 @@ async fn human_size(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn freebsd_recipe_uses_exact_release_and_official_architecture_path() {
+        assert_eq!(
+            freebsd_base_url("15.1-RELEASE-p3\n").unwrap(),
+            "https://download.freebsd.org/releases/amd64/amd64/15.1-RELEASE/base.txz"
+        );
+        assert!(
+            freebsd_base_url("14.4-RELEASE")
+                .unwrap()
+                .contains("14.4-RELEASE")
+        );
+        for invalid in ["", "15.0-STABLE", "15.1/../../-RELEASE", "15-RELEASE"] {
+            assert!(freebsd_base_url(invalid).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn jail_archive_failure_is_not_published_and_can_be_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("base.txz");
+        let target = dir.path().join("freebsd-base");
+        std::fs::write(&archive, b"bad archive").unwrap();
+        assert!(install_jail_archive(&archive, &target).await.is_err());
+        assert!(!target.exists());
+        let source = dir.path().join("source");
+        for file in ["bin/sh", "etc/rc", "etc/master.passwd"] {
+            let path = source.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"fixture").unwrap();
+        }
+        run_cmd(
+            "tar",
+            &[
+                "cf",
+                archive.to_str().unwrap(),
+                "-C",
+                source.to_str().unwrap(),
+                ".",
+            ],
+        )
+        .await
+        .unwrap();
+        install_jail_archive(&archive, &target).await.unwrap();
+        assert!(jail_image_complete(&target));
+        assert!(
+            std::fs::read_to_string(target.join("etc/rc.conf"))
+                .unwrap()
+                .contains("sshd_enable=\"YES\"")
+        );
+        assert!(!std::fs::read_dir(dir.path()).unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".freebsd-base-")
+        }));
+    }
 
     #[test]
     fn recipes_have_unique_names() {
