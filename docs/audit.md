@@ -26,6 +26,8 @@ Review of `bff24fb` identified the following boundary failures and corrections.
   request explicitly rejected before mutation can release only its new intent.
 - Image inspection ran on the host-info request path. A single background catalog
   worker now keeps slow inspection independent of health and lifecycle reads.
+- Published-port DNAT also matched traffic addressed to other hosts. Rules now
+  restrict destination matching to local host addresses.
 
 ## Disposition, 2026-09-25
 

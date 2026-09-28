@@ -331,8 +331,10 @@ host-local IPv4 addresses and nftables NAT. Guest IPs are local to a host and ma
 repeat across hosts. QEMU cloud-init configures DNS as `8.8.8.8` and `1.1.1.1`;
 the guest/network must be able to reach them for name resolution.
 
-Port forwarding is **TCP only**, from allocated host ports to requested guest
-ports. On both QEMU and Firecracker, `--deny-outgoing` blocks routed outbound
+Port forwarding is **TCP only**, for incoming traffic addressed to the agent host,
+from allocated host ports to requested guest ports. Traffic routed to other
+destinations keeps its original destination, including matching port numbers.
+On both QEMU and Firecracker, `--deny-outgoing` blocks routed outbound
 initiation while permitting replies to inbound traffic. It can also prevent
 external DNS access; it is not isolation from the host or other guests on the
 bridge. Environments do not create a private cross-host network.

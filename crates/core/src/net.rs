@@ -207,7 +207,7 @@ add rule ip {NFT_TABLE} postrouting ip saddr 10.10.0.0/16 masquerade
 
     pub fn add_port_forward(host_port: u16, vm_ip_addr: &str, guest_port: u16) -> Result<()> {
         nft(&format!(
-            "add rule ip {NFT_TABLE} prerouting tcp dport {host_port} dnat to {vm_ip_addr}:{guest_port}"
+            "add rule ip {NFT_TABLE} prerouting fib daddr type local tcp dport {host_port} dnat to {vm_ip_addr}:{guest_port}"
         ))
     }
 
