@@ -168,16 +168,35 @@ pub(crate) fn terminate(pid: u32, marker: &str) -> Result<()> {
 #[cfg(all(test, target_os = "linux"))]
 mod recovery_tests {
     use super::*;
+    use std::os::unix::process::CommandExt;
+
     #[test]
     fn corrupt_and_missing_pid_files_recover_the_exact_process() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vm.pid");
         let marker = dir.path().join("specific-vm.sock").display().to_string();
-        let mut child = std::process::Command::new("bash")
-            .args(["-c", "exec -a \"$1\" sleep 20", "test", &marker])
+        // Avoid a shell's later exec changing identity during recovery.
+        let mut child = std::process::Command::new("sleep")
+            .arg0(&marker)
+            .arg("20")
             .spawn()
             .unwrap();
         let result = || {
+            // Even a direct spawn can return before /proc exposes its argv.
+            // Establish the fixture's identity before testing PID recovery.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let cmdline = std::fs::read(format!("/proc/{}/cmdline", child.id())).unwrap();
+                if cmdline.split(|c| *c == 0).next() == Some(marker.as_bytes()) {
+                    break;
+                }
+                assert!(child.try_wait().unwrap().is_none(), "test child exited");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "test child did not expose its process identity"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             std::fs::write(&path, b"truncated").unwrap();
             assert_eq!(
                 recover_pid(path.to_str().unwrap(), std::slice::from_ref(&marker)).unwrap(),
