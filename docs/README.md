@@ -39,6 +39,7 @@ establish. A new report belongs in `docs/validation/` and is linked here.
 | Native agent database initialization, reopen and non-mutating format rejection | [Native agent schema, 2026-09-28](validation/native-agent-schema-2026-09-28.md) |
 | Configuration-disk accounting, resource ownership, restart recovery and cleanup on two hosts | [Lifecycle audit fixes, 2026-09-28](validation/audit-fixes-2026-09-28.md) |
 | Native SSH/SCP, full guest sudo and cold restart on QEMU/Firecracker | [Expert SSH, 2026-09-28](validation/expert-ssh-2026-09-28.md) |
+| Native FreeBSD build, Jail/bhyve lifecycle, SSH and PF cleanup after PR #12 corrections | [FreeBSD restoration validation, 2026-09-28](validation/freebsd-validation-2026-09-28.md) |
 | Container cleanup, unknown resize outcomes, heartbeat availability and scoped port forwarding on two hosts | [Lifecycle correction validation, 2026-09-28](validation/lifecycle-corrections-2026-09-28.md) |
 | Implemented QEMU resize, partial-growth recovery and lifecycle on file/ZFS | [QEMU resize validation, 2026-09-26](validation/qemu-resize-validation-2026-09-26.md) |
 | Native QEMU resize, Docker/Podman resource and network feasibility | [Engine capability probes, 2026-09-26](validation/engine-capability-probes-2026-09-26.md) |

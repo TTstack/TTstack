@@ -46,7 +46,8 @@ records the exact tested revision and scope.
   suffix), downloads with the native `fetch` utility, and publishes only a
   completely extracted/configured root. Existing incomplete/unmanaged recipe
   directories require inspection and moving aside before retry. Custom roots
-  must provide `/etc/rc`, `/etc/rc.shutdown` and their desired services.
+  must provide `/etc/rc`, `/etc/rc.shutdown` and their desired services. Jail root
+  paths must be UTF-8 without whitespace.
 - Jails share the agent's IP stack, receive an alias on `tt0`, and run their rc
   scripts. Public keys enable root key authentication; the built-in recipe starts
   sshd. This is not VNET isolation. `deny_outgoing` is rejected for both FreeBSD engines: the inherited PF
