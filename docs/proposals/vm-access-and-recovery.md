@@ -1,156 +1,99 @@
-# VM SSH access and recovery evidence
+# Native VM SSH and recovery evidence
 
-Status: Proposed requirements/design; not implemented or validated. Current
-[API](../rest-api.md), [guest image](../guest-images.md) and
-[compatibility](../compatibility.md) guides still describe shipped behavior.
+Status: Proposed additions; not implemented or validated. Current [API](../rest-api.md)
+and [guest image](../guest-images.md) guides describe shipped behavior.
 
-## Engine-independent requirement
+## Inspected implementation
 
-SSH key injection and a usable SSH connection are generic VM capabilities. QEMU
-and Firecracker must expose the same caller contract; future VM engines must
-implement an adapter. An unsupported image is a preparation error, not permission
-to require a different login/key workflow for each virtualization engine.
+At `c8101e9`, `VmSpec.ssh_keys` and `VmOptions.ssh_keys` already carry public keys,
+but `validate_vm_options` rejects them for Firecracker. QEMU's
+`generate_seed_iso` uses first-boot cloud-init; Firecracker's `create` ignores its
+SSH-key argument. VM records expose `port_map`, not an SSH login descriptor, host
+key or authenticated-session activity. Controller/agent routes offer resource
+updates, but no key or general mapped-port update operation. See the caller's
+[inspection record](https://github.com/openmathmodel/omm-workspace/blob/main/docs/test-reports/2026-09-28-ssh-design-inspection.md).
 
-TTstack owns provisioning, key installation/removal, connection metadata and
-host-side recovery evidence. Callers own user identity, grants, stream lifetime
-and automatic-restart policy. No SAIR subjects, OMM builds, Web terminal or general
-guest RPC service belong here. Use OpenSSH and finite provisioning helpers.
+## One SSH contract for every VM engine
 
-## Existing behavior and gaps
+A caller supplies a public key at creation or through a proposed stopped-VM key
+update and receives usable
+SSH login metadata with the VM description. QEMU, Firecracker and future VM engines
+must support the same contract. Image preparation and key injection belong to the
+engine adapter. Use OpenSSH; an unsupported image reports a preparation error.
 
-`VmSpec` has `ssh_keys`, but `validate_vm_options` rejects nonempty keys for
-Firecracker and Docker. QEMU injects root keys through cloud-init. Firecracker
-uses a prepared rootfs and an opaque read-only configuration drive; it currently
-has no managed SSH. TCP mappings exist at creation, with no general retained-VM
-port-update endpoint.
+TTstack owns the VM, key provisioning, TCP mapping and observations. The caller
+owns user authentication and VM ownership checks. OMM developer roles, approval
+flows, temporary grants, application build adoption and Web terminals do not belong
+in this contract. Existing private TTstack API authentication remains unchanged;
+end users receive no host or TTstack administrator credentials.
 
-QEMU/Firecracker host-controlled stop already attempts graceful shutdown and then
-terminates the owned VMM. Stop/start retains disks. Reuse these primitives for
-recovery rather than requiring guest SSH or adding application-specific lifecycle
-APIs. Hung-guest behavior still needs dedicated acceptance.
+## Provisioning and VM metadata
 
-Docker/Podman are containers, not another VM bootstrap. Keep their unsupported
-result explicit until a prepared-container SSH adapter exists; injecting a key
-cannot start sshd in an arbitrary image. This does not exempt either VM engine
-from the common SSH requirement.
+- Accept the caller's public key and login user. Keep private login keys with the
+  caller; never return private material through VM metadata.
+- Start guest sshd independently of its application. QEMU can use cloud-init;
+  prepared Firecracker images consume generic SSH bootstrap data separately from
+  opaque application configuration. Both must work with ordinary SSH/SCP/SFTP.
+- Return guest SSH readiness, login user, externally reachable mapped address and
+  port, installed public-key fingerprint and the VM's public host key. A running
+  VMM alone is not proof that SSH is ready. Do not advertise an inaccessible guest
+  address as the remote endpoint.
+- Give each VM its own host key and preserve it with its retained disk. Never
+  clone one host private key into every guest image.
+- Retain the owner's public key across cold starts. Start with a persisted
+  stopped-VM key/bootstrap update applied at the next boot. Simply rewriting a
+  QEMU seed with the same instance ID does not prove cloud-init applied a new key.
+  Verify that path explicitly in each adapter. Live key rotation is not required
+  initially. Confirm installation before success and retry lost results without
+  duplicate keys/mappings. No temporary-key expiry subsystem is required.
 
-## Common contract
+Current Linux `net::add_port_forward` creates DNAT in the agent's network
+namespace; it does not publish a host-root-network endpoint. The inspected OMM
+agent runs in a private namespace. The mapping contract must therefore include a
+configured reachable ingress and its forwarding rules, not infer public access
+from `Host.addr`. Expose only the guest's SSH mapping, never the entire shared
+port pool (which also contains application ports). Keep management
+ports and other guests isolated. Mappings must follow VM stop/delete and must not
+be accidentally reused while the old runtime still owns them. A prepared retained
+VM can receive a key/mapping update without replacing its disk; otherwise report
+what preparation is missing. No application-specific installer or general guest
+command API is needed.
 
-An SSH-enabled VM has a login user, guest SSH port, unique stable host key and a
-managed public-key set. Each key record has an opaque ID, validated public key,
-login user and optional absolute expiry. Preserve existing create-time `ssh_keys`
-as the initial operator set; schema migration must not silently discard them.
+Authenticated SSH-session observation is an additional requirement: there is no
+current agent API for it. Establish a small guest-sshd observation mechanism
+independent of OMM and verify it before using it to prevent idle shutdown; packets to
+a public port or an SSH handshake are not proof of an authenticated session.
+Removing a public key blocks new logins, not existing sessions. Guest root owns
+its guest software; full runtime revocation uses the caller's VM stop/isolation
+policy rather than relying on guest cooperation.
 
-The private administrative API must support these proposed operations:
-
-| Operation | Contract |
-| --- | --- |
-| Provision SSH at creation | Prepare engine-specific seed, key files and TCP mapping; reject incompatible images explicitly |
-| Add/remove a key by ID | Idempotent persisted intent, distinguish requested revision from confirmed installation |
-| Read SSH status | VM identity, user, endpoint, pinned host key, applied key revision and SSH readiness |
-| Enable SSH on a retained stopped VM | Add SSH seed/mapping without replacing its root disk or identity |
-| Read diagnostic snapshot | Fresh host/VM observations and bounded evidence, independent of the workload |
-
-These are semantics, not shipped endpoint names. Existing TTstack administrator
-authentication remains required. Owner labels are not tenant authorization; callers
-check the actual user. Private provisioning keys never appear in VM lists, status,
-SSH descriptors or logs.
-
-## Bootstrap and key updates
-
-Keep initial provisioning in engine adapters: cloud-init for QEMU, a versioned SSH
-bootstrap in prepared Firecracker images. Firecracker SSH material is generic
-TTstack data, separate from opaque application `guest_config`; rotating SSH keys
-must not rewrite an application's `workspace.json`. sshd starts independently of
-the workload application.
-
-For live key updates, use ordinary agent-to-guest SSH with a per-VM provisioning
-identity held privately by the resource agent. Inject its public key separately
-from caller-managed login keys. A finite helper updates only the managed
-authorized-key file from validated records on stdin, with fixed ownership/modes
-and atomic publication. No public arbitrary-command API or resident management
-daemon is needed. Removing a caller key cannot remove the provisioning key used
-for later rotation and repair.
-
-Provision/pin a unique SSH host key through trusted bootstrap; do not clone a host
-private key from the shared image or accept a changed key on reconnect. Protect
-provisioning private material in agent state. Guest root can change its own sshd;
-managed SSH is not a containment boundary against guest root. The agent's private
-provisioning key remains outside that guest.
-
-Persist desired key revision before delivery and confirm the applied revision
-before success. Reconcile lost replies using the same revision; reject conflicting
-updates until resolved. Reconcile desired keys after cold start so expired keys
-cannot reappear. If sshd is broken, retain pending state and report installation
-unavailable; use host-side recovery or operator repair, not fabricated success.
-
-[OpenSSH authorized-key expiry](https://man.openbsd.org/sshd#expiry-time) rejects
-new authentication after the deadline. Expiry/removal does not terminate existing
-sessions or detached processes. A caller needing connection deadlines must own
-and close the transport; full workload termination requires VM stop. Do not label
-key deletion as complete workload revocation.
-
-## Retained VMs and networking
-
-A stopped-VM access update adds SSH bootstrap and a generic TCP mapping without
-deleting/recloning the root disk. Persist intent before network/seed changes,
-serialize with lifecycle/resources, and reconcile interrupted updates. Images
-without the bootstrap require explicit operator preparation. Do not rewrite opaque
-application settings or replace an existing rootfs merely to obtain SSH.
-
-The agent uses the host-local guest address. Remote callers use the actual host
-mapping; loopback DNAT must not be assumed. Preserve isolation and accounting.
-Published mappings are not automatically private: deployment must restrict ingress
-to the designated gateway/management network. TTstack's admin key is never an
-end user's SSH credential.
+Docker/Podman images need their own prepared-container SSH support. Do not claim
+that injecting a key into an arbitrary container starts sshd. This does not change
+the common requirement for supported VM engines.
 
 ## Recovery evidence
 
-Callers compose durable stop/start. Even when guest shutdown fails, the agent must
-stop the owned runtime within a bounded deadline. Verify process identity before
-termination and exit before starting another VMM. PID reuse or a missing control
-socket is not proof of exit. Retain disk, VM ID, allocation, network and SSH host
-identity. Agent unreachability is an unknown outcome, not successful shutdown.
+Reuse host-controlled stop/start: attempt graceful shutdown, then bounded
+termination of the owned VMM if the guest is hung. Confirm the old runtime has
+exited before starting another. Preserve disk, VM identity, allocation and SSH host
+key. Agent unreachability is an unknown outcome, not a successful stop.
 
-Provide a diagnostic snapshot independent of application readiness:
+Provide a bounded diagnostic snapshot with observation time, agent reachability,
+VM/VMM state, independent guest SSH reachability, last observed exit and matching
+OOM evidence when available. Distinguish host/VMM OOM from guest-kernel OOM. A
+network timeout alone establishes neither. Restrict raw host evidence to the
+management caller, which prepares the user-facing report.
 
-- Observation time and fresh/cached status; agent reachability, engine, persisted
-  VM state and observed VMM process identity/state.
-- Agent-to-guest SSH reachability, distinguishing guest failure from a remote
-  caller's broken network path. A stopped VM has no expected SSH response.
-- Last observed VMM exit, matching process/cgroup OOM evidence and operation
-  errors, with attribution to this VM and an evidence source.
-- Bounded VM-specific boot/runtime excerpts where available. Missing evidence
-  stays missing. Guest-kernel and host/VMM OOM are different findings; a timeout
-  alone establishes neither.
+TTstack supplies observations and lifecycle primitives. Workspace owns desired
+runtime state, automatic-recovery limits and account authority; there is no second
+automatic restart policy in TTstack.
 
-Diagnostic collection has deadlines and cannot indefinitely delay stop. Restrict
-raw reports to administrative callers, which sanitize user-facing summaries.
-Never expose arbitrary host files, global logs or other VMs' records. Structured
-logs carry VM and caller operation IDs for correlation without secrets or full
-environment dumps.
+## Acceptance
 
-TTstack supplies evidence/primitives, not a second automatic-reboot policy. Callers
-know desired runtime state, intentional maintenance and current user authority.
-
-## Delivery and acceptance
-
-Advertise managed-SSH/key-update/access-update and diagnostic capabilities only
-when implemented. Check image readiness separately. Historical `ssh_keys` and
-metadata rows are not proof of installed support.
-
-Implement the common model/adapters for both VM engines, live key updates and
-retained-VM onboarding, then independent diagnostics. Acceptance includes:
-
-1. QEMU and Firecracker on file/ZFS: inject, log in with real OpenSSH, rotate/remove/
-   expire a key and cold-reconnect with the same disk and host key, without OMM.
-2. Incompatible images, locked login accounts, invalid keys and unavailable sshd
-   produce preparation/install errors.
-3. Lost controller/agent replies reconcile persisted key/access updates without
-   duplicate mappings or reporting unapplied keys as usable.
-4. Host-controlled recovery of a hung guest has bounded escalation, no overlapping
-   VMMs and retained state. Host outage stays distinct from guest failure.
-5. Real exit/OOM evidence yields accurate attribution; absent evidence yields an
-   unknown cause. Verify bounded capture and redaction.
+On QEMU and Firecracker, verify real SSH/SCP with the published metadata, stable
+keys after restart, honest key-update results and SSH access with the application
+stopped. Check ownership isolation through the caller and authenticated-session
+activity with the App absent. Verify host-controlled restart with both guest HTTP
+and SSH unavailable, bounded diagnostics and correct exit/OOM/unknown-cause labels.
 
 Return to the [documentation index](../README.md).
