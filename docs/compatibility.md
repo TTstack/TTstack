@@ -5,33 +5,26 @@ requires Linux. QEMU/KVM, Firecracker and Docker/Podman are the available engine
 
 ## Implementation versus live verification
 
-| Workflow | Implementation | Current live evidence |
-|---|---|---|
-| Linux QEMU/KVM + file storage | Full VMs, cloud-init, TCP forwarding, offline resource updates | Alpine 3.21.7 and Debian 13 lifecycle; [Alpine resize and recovery](validation/qemu-resize-validation-2026-09-26.md) on two Ubuntu 24.04.4 hosts |
-| Linux Docker | Container lifecycle and native port publishing | Temporary HTTP workload on two Ubuntu 24.04.4 hosts |
-| Linux Firecracker + file storage | Jailer, config drive, orderly shutdown, opt-in network isolation | Alpine fixture: config/read-only access, retained data, isolation, restart and cleanup on Ubuntu 24.04 |
-| Linux Firecracker + zvol | Snapshot clones, jailed block device, ext4 growth, retained disks | [Dedicated ZFS host validation](validation/firecracker-zvol-validation-2026-09-24.md) |
-| Podman | Explicit or initial automatic selection, bound to the agent inventory | Not covered by the 2026-09-24 lifecycle run |
-| QEMU + zvol | Raw ZFS volumes, snapshot clones, offline resource updates | [Alpine resize and recovery](validation/qemu-resize-validation-2026-09-26.md) on two Ubuntu 24.04.4 hosts with dedicated NVMe pools |
-| Ubuntu cloud guest | Built-in QEMU recipe | Not covered by the 2026-09-24 lifecycle run |
-| Linux/systemd deployment | Local and distributed service generation | Temporary systemd services exercised; not every deploy configuration |
-| Linux/OpenRC, musl binaries | Distributed deployment support | Not covered by the 2026-09-24 lifecycle run |
+Evidence below is tied to each report's revision, fixture and limits. A later
+code change does not inherit a fresh live-validation claim from an older report.
+
+| Workflow | Implementation | Recorded live evidence |
+| --- | --- | --- |
+| Linux QEMU/KVM + file storage | Cloud-init, initial SSH accounts/keys, TCP forwarding and offline resource updates | [Two-host audit fixes, 2026-09-28](validation/audit-fixes-2026-09-28.md): Alpine 3.21.7 SSH, resize, restart recovery and cleanup; [initial SSH acceptance](validation/expert-ssh-2026-09-28.md) covers ordinary-user SSH/SCP and sudo |
+| Linux Docker | Container lifecycle, persisted runtime binding and native port publishing | [Two-host audit fixes, 2026-09-28](validation/audit-fixes-2026-09-28.md): retained-container lifecycle and binding; [2026-09-24 lifecycle](validation/live-validation-2026-09-24.md) covers a published HTTP workload |
+| Linux Firecracker + file storage | Jailer, configuration drive, prepared-image SSH, offline ext4 growth, shutdown and opt-in isolation | [Two-host audit fixes, 2026-09-28](validation/audit-fixes-2026-09-28.md): SSH-only configuration disks, resource accounting and recovery; [2026-09-24 follow-up](validation/firecracker-validation-2026-09-24.md) covers isolation and shutdown cases |
+| Linux Firecracker + zvol | Snapshot clones, jailed block devices, prepared-image SSH and ext4 growth | [Zvol lifecycle, 2026-09-24](validation/firecracker-zvol-validation-2026-09-24.md); [subsequent SSH deployment](validation/expert-ssh-2026-09-28.md#subsequent-firecrackerzfs-deployment) |
+| QEMU + zvol | Raw ZFS volumes, snapshot clones and offline resource updates | [Alpine resize and recovery, 2026-09-26](validation/qemu-resize-validation-2026-09-26.md) on file storage and dedicated ZFS pools |
+| Podman | Alternate container runtime bound to the agent inventory | [Native probes, 2026-09-26](validation/engine-capability-probes-2026-09-26.md); these did not validate the complete TTstack lifecycle or enable container resource/network-policy APIs |
+| Ubuntu cloud guest | Built-in QEMU recipe | Not covered by the listed guest lifecycle runs |
+| Linux/systemd deployment | Local/distributed service generation and isolated service restart | [Linux upgrade, 2026-09-24](validation/linux-host-upgrade-validation-2026-09-24.md) and later isolated runs; not every deploy configuration |
+| Agent database initialization | Current native schema, identity and runtime/network bindings | [Process-level checks, 2026-09-28](validation/native-agent-schema-2026-09-28.md): fresh initialization, reopen and non-mutating rejection of incompatible fixtures; no production data migration |
+| Linux/OpenRC, musl binaries | Distributed deployment support | No complete live deployment coverage in the listed reports |
 | Other host platforms | No validated agent deployment path | No support commitment |
 
-The [2026-09-24 validation record](validation/live-validation-2026-09-24.md) identifies the
-tested revision, load limits, corrections and results. Its evidence is limited to
-those combinations. Unit tests, engine detection and an image recipe's presence
-are not substitutes for guest boot and access tests.
-
-The [Firecracker follow-up record](validation/firecracker-validation-2026-09-24.md) covers
-configuration drives, jailed execution, shutdown fallback and isolation. Its stated
-limits include QEMU isolation and legacy unjailed-VMM upgrades, which remain untested
-in that run.
-
-The [Linux host upgrade record](validation/linux-host-upgrade-validation-2026-09-24.md)
-checks the retained engines across an agent/controller binary upgrade, new
-provisioning, stop/start, access, persistence and cleanup. Refer to that record
-for its exact fixture and validation limits.
+The [validation index](README.md#validation-evidence) retains earlier engine,
+storage, networking and caller evidence. Unit tests, prerequisite detection and
+a recipe's presence do not establish guest boot or application readiness.
 
 ## Build and CI
 
@@ -45,8 +38,9 @@ Linux tests also need `mkfs.ext4`, `debugfs`, `dumpe2fs`, `e2fsck` and `resize2f
 configuration disk without mounting it or requiring root. CI installs these tools.
 Tests cover local logic and mock-agent HTTP workflows: interrupted creation,
 partial deletion, expiry retry, failed stop, duplicate creation, input validation,
-resource accounting and port reuse. They do not boot guests or modify host firewall
-rules. `make doc` generates Rust API documentation, not the HTTP reference.
+resource accounting, configuration-disk overhead, runtime/network bindings,
+database-format rejection and port reuse. They do not boot guests or modify host
+firewall rules. `make doc` generates Rust API documentation, not the HTTP reference.
 
 For changes affecting live behavior, validate the affected engine's create/access,
 stop/start with retained data, agent/controller restart and final cleanup on a
@@ -57,37 +51,10 @@ has been performed by that run.
 
 ## SQLite engine assessment — 2026-09-24
 
-TTstack retains upstream SQLite through bundled `rusqlite`. The dependency refresh
-updates all 12 direct registry dependencies to the latest non-yanked stable releases
-and refreshes the lockfile within upstream constraints. In particular, Axum 0.8.9
-requires exactly `matchit = 0.8.4`; forcing a newer release would require changing
-that upstream dependency. `Cargo.toml` and `Cargo.lock` record the selected versions.
-
-[Turso 0.7.2](https://github.com/tursodatabase/turso/tree/v0.7.2) is a Rust SQLite
-reimplementation with reported production users, so it is a credible candidate.
-Its release documentation still marks multi-process WAL as experimental and excludes
-mixed SQLite/Turso multi-process access from its
-[compatibility guarantees](https://github.com/tursodatabase/turso/blob/v0.7.2/COMPAT.md).
-[prsqlite](https://github.com/kawasin73/prsqlite) describes itself as an unstable
-work-in-progress. [libSQL](https://github.com/tursodatabase/libsql) is a SQLite fork,
-not a pure Rust replacement for its engine.
-
-An isolated local probe of Turso 0.7.2's Rust API passed independent-reader isolation,
-dropped-transaction rollback and write rejection with `query_only=1`. It also found
-that `execute_batch("PRAGMA journal_mode=WAL")` returns an unexpected-row error and
-`PRAGMA query_only=ON` is rejected while `query_only=1` works. These are API/SQL
-compatibility differences, not evidence of data loss; a passing smoke test is also
-not a durability certification. The engine can be used with adaptations, but our
-assessment is that switching TTstack's recovery-critical state store now adds more
-compatibility and operational work than it removes. No alternate database backend
-or migration path is introduced by this dependency refresh.
-
-Validation of the retained backend passed 118 workspace tests, Clippy, Rust 1.88
-checks and a locked release build. A local process-level upgrade check used the
-previous controller binary to create state, killed it with an outstanding WAL,
-then verified recovery, authenticated API/CLI access, writes and another restart
-with the new binary. SQLite integrity checking and reopening with the previous
-binary also passed. This check did not boot guests or exercise the remote hosts.
+The historical database-engine comparison and dependency-refresh probes are
+archived in the [dated assessment](validation/sqlite-engine-assessment-2026-09-24.md).
+They describe that decision and its limits, not current dependency freshness or
+an upgrade policy for future data.
 
 ## Product boundaries
 
@@ -99,7 +66,7 @@ binary also passed. This check did not boot guests or exercise the remote hosts.
   network isolation; Firecracker also uses jailer and resource limits. The API key
   remains a shared administrator credential. User identity, entitlements, application
   installation, connection leases and idle-stop policy belong in callers.
-- No automatic guest restart after host reboot, migration, HA, distributed storage,
+- No automatic guest restart after host reboot, guest migration, HA, distributed storage,
   image distribution or application/database provisioning.
 - QEMU and Firecracker support stopped-VM CPU/RAM updates and disk growth on file
   and ZFS storage. QEMU requires `qemu_resources` and expands only the virtual disk;

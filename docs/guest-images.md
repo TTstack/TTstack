@@ -58,9 +58,10 @@ cold start. A writable clone must never resolve to a shared source disk.
 ```
 
 Port 22 is included automatically. From the agent host, connect directly to the
-guest IP on port 22. From another machine, connect to the **agent host** at the
-mapped host port shown by `env show`; do not assume the controller address or a
-fixed port. `running` does not imply SSH has finished starting.
+guest IP on port 22. For remote SSH, configure the client-reachable endpoint as
+described in the [SSH guide](ssh.md#reachable-endpoint), then use the address and
+port printed by `env show`. The CLI reports an unconfigured endpoint instead of
+substituting a management address. `running` does not imply SSH has finished starting.
 
 At boot TTstack attaches a private NoCloud seed ISO with initial SSH provisioning
 and static networking. Use `--ssh-key` repeatedly for multiple public keys;
@@ -102,6 +103,10 @@ Changing the binding requires an inventory without container or unreadable recor
 Use the bound runtime/store to prepare images; rootless and root-owned stores are
 distinct. Consult the [deployment guide](deployment.md#resource-update-schema-gate)
 for database compatibility and upgrade requirements.
+
+The local recipe command detects its own available runtime and does not read the
+agent database. When both runtimes are installed, prepare images explicitly in
+the agent's selected store; a `podman` CLI engine alias does not select that store.
 
 A minimal web-container workflow on a host with a working Docker runtime is:
 
@@ -184,7 +189,8 @@ the raw file or zvol and its ext4 filesystem with `resize2fs` before first boot.
 Only unpartitioned ext4 rootfs images are supported. Shrinking below the base
 image size is rejected before allocation; the base image is never modified.
 Disk space is reserved at the requested logical size, even for sparse files;
-configuration drives reserve another 4 MiB. Filesystem metadata and reserved
+configuration drives reserve another 4 MiB, including when only SSH bootstrap is
+configured. Filesystem metadata and reserved
 blocks reduce the capacity reported by guest tools such as `df`. Upgrade agents to one advertising
 `firecracker_disk_resize` before specifying a size. CPU/RAM still need to fit the
 host's configured capacity, including VMM overhead. TTstack has no application
@@ -219,6 +225,10 @@ letters, digits, `.`, `_`, `-`, with no leading dot or path separators. Binary
 files and directory trees are intentionally unsupported. The CLI input JSON has
 a 512 KiB encoded-size limit. Configuration is per VM; CLI duplicates receive the
 same contents, so submit separate requests when each VM needs a different secret.
+When using SSH bootstrap, the generated `ttstack-ssh.sh` also counts toward the
+configuration-drive file/byte limits, leaving at most 31 caller-provided files.
+Leave room for that seed and its public-key list in the byte budget; callers
+cannot supply the reserved filename.
 
 The agent builds a 4 MiB ext4 drive labelled `TTCONFIG`, exposed read-only as
 `/dev/vdb`. A custom guest init can mount it as root:
@@ -231,9 +241,11 @@ mount -t ext4 -o ro,nosuid,nodev,noexec /dev/vdb /run/ttstack-config
 
 New `fc-alpine` builds perform that mount when the drive exists. Files are readable
 by guest root; application init can copy selected values into its own protected
-configuration. TTstack does not execute these files, interpret keys, install an
-application or inject account credentials by itself. Do not include shared
-administrator secrets. Query responses contain only a digest. The disk is private
+configuration. Caller-provided files remain opaque; TTstack does not interpret
+their application settings or execute them. The optional managed SSH seed is a
+separate [image bootstrap contract](ssh.md#image-contract). Do not include shared
+administrator secrets. Query responses contain only a digest of caller-provided
+files. The disk is private
 to the VMM UID/root on the host and is deleted with the VM, not on stop.
 Configuration remains unchanged across boots; renewal inside a running guest is
 the application's responsibility.
@@ -246,7 +258,7 @@ the application's responsibility.
 | `zvol` | QEMU raw disk volume; Firecracker kernel dataset with an ext4 root volume | Per-VM snapshot clones |
 | Docker runtime | Container image | Managed by Docker/Podman, independently of agent storage |
 
-For QEMU and Firecracker, the controller prefers eligible **ZFS hosts** over file
+For QEMU and Firecracker, the controller prefers eligible **zvol hosts** over file
 hosts, then packs by free memory within that group. The host must be online, have
 the image and required capabilities, and have sufficient reservations. If no ZFS
 host qualifies, a file host can be selected. Docker placement is unchanged.
@@ -348,7 +360,9 @@ from allocated host ports to requested guest ports. Traffic routed to other
 destinations keeps its original destination, including matching port numbers.
 For QEMU/Firecracker access from the agent host itself, use the guest IP and guest
 port directly: published ports do not provide host-local/loopback DNAT. Remote
-clients use the agent's reachable address and mapped port. Docker/Podman publishing
+clients use a reachable resource-host address and mapped port. Managed SSH uses
+the [configured SSH endpoint](ssh.md#reachable-endpoint), which may require an
+additional outer-namespace forward. Docker/Podman publishing
 follows its runtime's local-access behavior.
 
 On both QEMU and Firecracker, `--deny-outgoing` blocks routed outbound
@@ -375,8 +389,12 @@ addresses on public networks are not covered by a private-address egress block.
 
 See [compatibility and validation](compatibility.md) for tested Linux workflows.
 
-Reserve host TCP ports 20000–65535 for TTstack; other host processes must not bind
-that pool. At most 256 port entries may be requested per VM. Existing conntrack
+Reserve the agent's configured host TCP port pool for TTstack; the default is
+20000–65535 and `--port-start` / `--port-end` set inclusive bounds. Other host
+processes must not bind that pool. Allocation checks the agent's records and local
+listeners, not other agents' reservations or an outer namespace. Keep ranges
+disjoint when agents share an ingress address. At most 256 port entries may be
+requested per VM. Existing conntrack
 sessions can outlive a guest; TTstack does not claim independent per-guest
 conntrack zones. The shared bridge/NAT infrastructure persists after the last VM.
 Host firewall policy is operator-owned: Docker/firewalld forward drops can still

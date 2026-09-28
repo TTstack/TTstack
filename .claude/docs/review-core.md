@@ -21,6 +21,7 @@ there are no `tests/` or `benches/` directories.
 | Subsystem | Files | Guides |
 |-----------|-------|--------|
 | Shared contracts | `crates/core/src/{api,model,auth,guest_config,command,lib}.rs` | `docs/rest-api.md`, `docs/compatibility.md` |
+| Initial SSH access | `crates/core/src/ssh.rs`, `crates/core/src/ssh_bootstrap.sh`, `crates/agent/src/ssh_ingress.rs` | `docs/ssh.md`, `lifecycle-patterns.md` |
 | Engines | `crates/core/src/engine/{mod,qemu,firecracker,docker}.rs`, `engine/firecracker/sandbox.rs` | `docs/guest-images.md`, `lifecycle-patterns.md` |
 | Storage and images | `crates/core/src/storage/{mod,file,zvol}.rs` | `docs/guest-images.md`, `lifecycle-patterns.md` |
 | Networking and isolation | `crates/core/src/net.rs`, `crates/core/src/net/isolation.rs` | `docs/guest-images.md`, `docs/deployment.md` |

@@ -4,15 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TTstack — Lightweight Private Cloud</title>
-<meta name="description" content="TTstack is a small VM and container manager: create temporary environments on Linux hosts you own, then stop, restart or delete them reliably.">
+<meta name="description" content="TTstack manages VMs and containers across small Linux fleets: create temporary or retained environments, access them, and stop, restart or delete them.">
 <meta property="og:type" content="website">
 <meta property="og:title" content="TTstack — Lightweight Private Cloud">
-<meta property="og:description" content="A tiny private cloud for developers and small teams, with QEMU/KVM, Firecracker and Docker/Podman behind one controller.">
+<meta property="og:description" content="A small VM and container manager for Linux fleets, with QEMU/KVM, Firecracker and Docker/Podman behind one controller.">
 <meta property="og:url" content="https://ttstack.github.io/TTstack/">
 <meta name="theme-color" content="#eef3fa">
 <link rel="icon" href="favicon.svg?v=3" type="image/svg+xml">
-<!-- Bump ?v= whenever style.css or favicon.svg changes; Pages caches for ten minutes. -->
-<link rel="stylesheet" href="style.css?v=3">
+<!-- Bump the asset query token when changing the corresponding cached file. -->
+<link rel="stylesheet" href="style.css?v=4">
 </head>
 <body id="top">
 
@@ -25,6 +25,7 @@
       <a href="#lifecycle">Lifecycle</a>
       <a href="#engines">Engines</a>
       <a href="#highlights">Highlights</a>
+      <a href="#scope">Scope</a>
       <a href="#docs">Docs</a>
       <a href="https://github.com/TTstack/TTstack">GitHub</a>
     </nav>
@@ -36,9 +37,9 @@
   <section class="hero">
     <h1>TTstack &mdash; Lightweight Private Cloud</h1>
     <p class="lede">
-      A tiny private cloud for developers and small teams. Create temporary VMs and
-      containers on hosts you own, reach them over SSH or published ports, and stop,
-      restart or delete them reliably.
+      A small VM and container manager for developers and small teams. Create
+      temporary or retained environments on your Linux hosts, reach them over SSH
+      or published ports, and manage their lifecycle from one controller.
     </p>
     <p class="cta">
       <a class="btn primary" href="https://github.com/TTstack/TTstack#quick-start-one-linuxsystemd-host">Get started</a>
@@ -59,7 +60,7 @@
     <figure class="figure figure--arch">
       <svg viewBox="0 0 640 616" role="img" aria-labelledby="archTitle archDesc">
         <title id="archTitle">TTstack component diagram</title>
-        <desc id="archDesc">The tt CLI and the browser dashboard talk HTTP to the tt-ctl controller, which keeps its state in SQLite. The controller drives one tt-agent per host; each agent runs QEMU/KVM, Firecracker or Docker/Podman containers and owns its host's disks, networking and guest state.</desc>
+        <desc id="archDesc">The tt CLI and browser dashboard talk HTTP to the tt-ctl controller. The controller and each host agent keep SQLite state. Agents manage QEMU/KVM or Firecracker VMs, or Docker/Podman containers, with host-local disks and networking.</desc>
         <defs>
           <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
             <path d="M0,0 L10,5 L0,10 z" fill="#6b6a66"></path>
@@ -96,12 +97,12 @@
 
         <rect x="64" y="302" width="248" height="84" rx="10" fill="#ffffff" stroke="#e1e0d9"></rect>
         <text x="188" y="332" text-anchor="middle" font-size="14" font-weight="600" fill="#0b0b0b">tt-agent</text>
-        <text x="188" y="352" text-anchor="middle" font-size="11" fill="#6b6a66">host A</text>
+        <text x="188" y="352" text-anchor="middle" font-size="11" fill="#6b6a66">host A · SQLite</text>
         <text x="188" y="370" text-anchor="middle" font-size="11" fill="#6b6a66">engines · disks · networking</text>
 
         <rect x="328" y="302" width="248" height="84" rx="10" fill="#ffffff" stroke="#e1e0d9"></rect>
         <text x="452" y="332" text-anchor="middle" font-size="14" font-weight="600" fill="#0b0b0b">tt-agent</text>
-        <text x="452" y="352" text-anchor="middle" font-size="11" fill="#6b6a66">host B</text>
+        <text x="452" y="352" text-anchor="middle" font-size="11" fill="#6b6a66">host B · SQLite</text>
         <text x="452" y="370" text-anchor="middle" font-size="11" fill="#6b6a66">engines · disks · networking</text>
 
         <path d="M132,400 V458" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow)"></path>
@@ -165,22 +166,26 @@
   <section id="usage">
     <h2>Create, use, tear down</h2>
     <p class="muted">
-      One CLI drives the whole fleet. Example session with illustrative values:
+      Start with a registered host and a prepared <code>alpine-cloud</code> image.
+      This example keeps the environment until explicit deletion. The SSH address
+      is illustrative: configure the agent's client-reachable address, then use
+      the endpoint reported by <code>env show</code>.
     </p>
     <div class="terms">
       <div class="term">
-<pre><code>$ tt env create demo --image alpine-cloud --engine qemu \
-    --cpu 1 --mem 256 --disk 2048 --ssh-key ~/.ssh/id_ed25519.pub
+<pre><code>$ tt env create demo --image alpine-cloud \
+    --engine qemu --cpu 1 --mem 256 --disk 2048 \
+    --ssh-key ~/.ssh/id_ed25519.pub --lifetime 0
 $ tt env show demo
+# Selected output; VM and access rows omitted:
 Environment: demo
   Owner:   dev
   State:   Active
   VMs:     1
+  Expiry:  never (retained until explicit deletion)
 
-  ID        IMAGE         ENGINE   STATE    IP           PORTS
-  vm-4f1a2c alpine-cloud  qemu     running  10.42.0.17   20000-&gt;22
-
-  Access vm-4f1a2c: 127.0.0.1:20000 -&gt; guest TCP 22</code></pre>
+# Use the reported SSH endpoint when ready:
+$ ssh -p 20000 root@192.0.2.10</code></pre>
       </div>
       <div class="term">
 <pre><code>$ tt status
@@ -194,6 +199,11 @@ Fleet Status
       </div>
     </div>
     <p class="muted">
+      Capacity figures are configured reservations, not measured host load; the CLI
+      labels memory and disk as MB, with values in MiB. On the agent host, use the
+      guest IP directly: VM port forwarding does not provide loopback access.
+      Initial SSH, public endpoints and readiness are described in the
+      <a href="https://github.com/TTstack/TTstack/blob/master/docs/ssh.md">SSH guide</a>.
       The full walkthrough, including host registration and image creation, is in the
       <a href="https://github.com/TTstack/TTstack#quick-start-one-linuxsystemd-host">README quick start</a>.
     </p>
@@ -206,8 +216,8 @@ Fleet Status
     </p>
     <figure class="figure figure--lifecycle">
       <svg viewBox="0 0 760 300" role="img" aria-labelledby="lifeTitle lifeDesc">
-        <title id="lifeTitle">Environment lifecycle states</title>
-        <desc id="lifeDesc">An environment is created, becomes active, and can be stopped and started again; stop keeps the disks but not VM memory. Deleting removes it. Creating, active or stopped environments can become failed, and a failed environment is deleted.</desc>
+        <title id="lifeTitle">Common environment lifecycle paths</title>
+        <desc id="lifeDesc">Creating leads to active when all VM processes are running without errors. Stop retains disks; start boots again. Active or stopped environments may be deleted or expire. Failed environments retain resources and may recover or be explicitly deleted. Completed deletion removes the record.</desc>
         <defs>
           <marker id="arrow2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
             <path d="M0,0 L10,5 L0,10 z" fill="#6b6a66"></path>
@@ -231,10 +241,15 @@ Fleet Status
         <text x="598" y="97" text-anchor="middle" font-size="13.5" font-weight="600" fill="#0b0b0b">deleting</text>
 
         <path d="M144,92 H186" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow2)"></path>
-        <text x="165" y="82" text-anchor="middle" font-size="10.5" fill="#6b6a66">ready</text>
+        <text x="165" y="82" text-anchor="middle" font-size="10.5" fill="#6b6a66">running</text>
 
         <path d="M316,92 H358" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow2)"></path>
         <text x="337" y="82" text-anchor="middle" font-size="10.5" fill="#6b6a66">stop</text>
+
+        <path d="M488,92 H530" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow2)"></path>
+        <text x="509" y="82" text-anchor="middle" font-size="10.5" fill="#6b6a66">delete</text>
+        <path d="M254,60 V28 H598 V54" fill="none" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow2)"></path>
+        <text x="426" y="19" text-anchor="middle" font-size="10.5" fill="#6b6a66">delete / expiry</text>
 
         <path d="M426,128 C426,170 254,170 254,128" fill="none" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow2)"></path>
         <text x="340" y="180" text-anchor="middle" font-size="10.5" fill="#6b6a66">start</text>
@@ -253,12 +268,13 @@ Fleet Status
         <text x="380" y="251" text-anchor="middle" font-size="13.5" font-weight="600" fill="#0b0b0b">failed</text>
 
         <path d="M450,246 H598 V134" fill="none" stroke="#d03b3b" stroke-width="1.3" stroke-dasharray="4 4" marker-end="url(#arrow2d)"></path>
-        <text x="524" y="238" text-anchor="middle" font-size="10.5" fill="#6b6a66">delete and recreate</text>
+        <text x="524" y="238" text-anchor="middle" font-size="10.5" fill="#6b6a66">delete</text>
       </svg>
       <figcaption class="figcaption">
-        Boxes carry the environment state name; colour is only a second cue. Mixed,
-        paused or failed VM states, and an offline agent, can move an environment to
-        <strong>failed</strong>. Recovery semantics, including retries and expiry, are in the
+        This shows common paths, not every transition. Mixed or failed VM states
+        and offline hosts can make an environment <strong>failed</strong>; it can
+        recover to active or stopped when the cause resolves. Process state does
+        not establish SSH or application readiness. Recovery, retries and expiry are in the
         <a href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md#lifecycle-and-recovery">API reference</a>.
       </figcaption>
     </figure>
@@ -294,9 +310,9 @@ Fleet Status
         </svg>
         <h3>QEMU/KVM</h3>
         <p>
-          Full VMs from cloud images, with root SSH key injection and virtual-disk
-          growth at creation and while stopped. The guest manages its own
-          partition and filesystem growth.
+          Full VMs from cloud images, with initial SSH accounts/public keys and
+          optional guest sudo. CPU/RAM updates and virtual-disk growth are supported
+          while stopped; the guest manages partition and filesystem growth.
         </p>
         <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md">Guest images and access &rarr;</a></p>
       </article>
@@ -308,9 +324,10 @@ Fleet Status
         <h3>Firecracker</h3>
         <p>
           MicroVMs under jailer with per-VM resource limits, a prepared kernel and
-          rootfs, and orderly shutdown before forced termination.
+          rootfs, prepared-image SSH and offline ext4 growth. Shutdown is requested
+          before forced termination; the built-in smoke image does not include SSH.
         </p>
-        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md#firecracker-guest-configuration">Firecracker setup &rarr;</a></p>
+        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md#firecracker-prepared-microvm-workloads">Firecracker setup &rarr;</a></p>
       </article>
       <article class="card">
         <svg class="icon" viewBox="0 0 26 26" role="img" aria-label="Docker or Podman containers" fill="none" stroke="#1baf7a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
@@ -320,7 +337,8 @@ Fleet Status
         <h3>Docker/Podman</h3>
         <p>
           Containers from images that provide a long-running default command,
-          publishing the application ports you ask for.
+          publishing the application ports you ask for. Runtime selection is bound
+          to the agent inventory; installing another runtime does not switch it.
         </p>
         <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md">Container images &rarr;</a></p>
       </article>
@@ -335,11 +353,11 @@ Fleet Status
     </p>
     <div class="grid">
       <article class="card">
-        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Automatic lifecycle management" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Expiry and deletion retries" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="13" cy="13" r="9"></circle>
           <path d="M13 7.5V13l3.5 3"></path>
         </svg>
-        <h3>Automatic lifecycle management</h3>
+        <h3>Expiry and deletion retries</h3>
         <p>
           Choose a lifetime or keep an environment until you delete it. When expiry
           is enabled, the controller cleans up expired environments and retries
@@ -354,22 +372,24 @@ Fleet Status
         </svg>
         <h3>Persisted before it runs</h3>
         <p>
-          A create request is saved before any work starts, so a timeout or an
-          interrupted client never loses it. Inspect the name before you retry.
+          Creation plans are saved before provisioning. A timeout or disconnected
+          client can leave running or partial resources; inspect the existing name
+          before retrying.
         </p>
       </article>
       <article class="card">
-        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Self-healing reconciliation" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Lifecycle reconciliation" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
           <path d="M4 13a9 9 0 0 1 15.4-6.4"></path>
           <path d="M4 4.5V9h4.5"></path>
           <path d="M22 13a9 9 0 0 1-15.4 6.4"></path>
           <path d="M22 21.5V17h-4.5"></path>
         </svg>
-        <h3>Self-healing reconciliation</h3>
+        <h3>Lifecycle reconciliation</h3>
         <p>
           Agent and controller reconcile on a loop: failed network restoration is
-          retried, late readiness clears stale errors, and process recovery uses its
-          own markers rather than deleting disks.
+          retried and confirmed process state clears obsolete recovery errors.
+          Uncertain resources remain available for inspection. Reconciliation yields
+          between VM checks so queued lifecycle operations can proceed.
         </p>
       </article>
       <article class="card">
@@ -380,7 +400,7 @@ Fleet Status
         </svg>
         <h3>Placement by reservation</h3>
         <p>
-          VM disks prefer eligible ZFS hosts and fall back to file storage. Scheduling
+          VM placement prefers eligible ZFS zvol hosts and falls back to file storage. Scheduling
           uses the CPU, memory and disk you reserved, not measured load, so placement
           stays predictable.
         </p>
@@ -438,7 +458,8 @@ Fleet Status
         <p>
           No message queue and no database server: the controller and each agent keep
           their state in SQLite, and you drive the fleet from the CLI, the REST API or
-          the web dashboard.
+          the web dashboard. Advanced SSH, guest configuration and resize options
+          are available through the CLI and API.
         </p>
       </article>
       <article class="card">
@@ -459,8 +480,29 @@ Fleet Status
       <a href="https://github.com/TTstack/TTstack/blob/master/docs/compatibility.md">compatibility</a>
       and the
       <a href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md#lifecycle-and-recovery">API reference</a>,
-      not on this page.
+      with the detailed contracts and limitations for each engine.
     </p>
+  </section>
+
+  <section id="scope">
+    <h2>Scope and access</h2>
+    <ul class="points">
+      <li><strong>Small Linux fleets.</strong> Linux x86_64 is the supported host
+        platform. The 50-host and 1000-VM limits are guardrails, not benchmarked capacity.</li>
+      <li><strong>One administrator boundary.</strong> Deployment configures a shared
+        API key. Owner labels are not authorization, and services use HTTP without
+        built-in TLS. Manual starts without a key leave the API unauthenticated.
+        Keep management access on a trusted network or protected proxy.</li>
+      <li><strong>Explicit operator responsibilities.</strong> Images are prepared on
+        each host. There is no image distribution, guest migration, HA, cross-host private
+        network or automatic guest restart after a host reboot. Identity and application
+        policy belong to callers.</li>
+      <li><strong>Evidence has a scope.</strong> Implemented options and native-engine
+        probes are not blanket live-validation claims. See the
+        <a href="https://github.com/TTstack/TTstack/blob/master/docs/compatibility.md">compatibility matrix</a>
+        and <a href="https://github.com/TTstack/TTstack/blob/master/docs/README.md#validation-evidence">dated reports</a>.
+      </li>
+    </ul>
   </section>
 
   <section id="docs">
@@ -473,6 +515,10 @@ Fleet Status
       <a class="card link-card" href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md">
         <h3>Guest images</h3>
         <p>Recipes, image formats, guest access, storage and networking.</p>
+      </a>
+      <a class="card link-card" href="https://github.com/TTstack/TTstack/blob/master/docs/ssh.md">
+        <h3>Initial SSH access</h3>
+        <p>Guest accounts, public keys, reachable endpoints and readiness.</p>
       </a>
       <a class="card link-card" href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md">
         <h3>REST API</h3>

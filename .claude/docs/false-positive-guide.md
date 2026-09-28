@@ -6,11 +6,12 @@ Refute every candidate finding against this list before reporting it.
 ## Not defects
 
 - **Documented product boundaries.** One controller; configured guardrails of 50 hosts
-  and 1000 tracked VMs; no HA, migration, distributed storage, image distribution, or
+  and 1000 tracked VMs; no HA, guest migration, distributed storage, image distribution, or
   automatic guest restart after a host reboot; Docker lacks managed SSH keys, disk
-  quotas, and outgoing restrictions; Firecracker lacks managed SSH keys, interactive
-  consoles, and resizing of a running VM. Stopped-VM resource updates and
-  creation-time disk sizing are implemented. See `docs/compatibility.md`.
+  quotas, and outgoing restrictions; Firecracker lacks interactive consoles and
+  resizing of a running VM. Initial SSH bootstrap on prepared Firecracker images,
+  stopped-VM resource updates and creation-time disk sizing are implemented.
+  See `docs/ssh.md` and `docs/compatibility.md`.
 - **Deliberate non-isolation.** A guest can reach a wildcard management listener; the
   deployment and guest guides document this as operator responsibility.
 - **Shared administrator credential.** The API key authenticates callers, not servers,
@@ -18,9 +19,11 @@ Refute every candidate finding against this list before reporting it.
   trusted address and protected transport.
 - **Caller-owned policy.** User identity, entitlements, application installation,
   connection leases, and idle-stop policy belong to callers, not to TTstack.
-- **Recorded coverage gaps.** OpenRC, Podman, QEMU+zvol, musl, and remote deployment
-  are implemented without fresh live evidence; `docs/compatibility.md` tracks that. A
-  gap becomes a finding only when code or docs contradict their own claim.
+- **Recorded coverage gaps.** Use `docs/compatibility.md` and the dated reports to
+  distinguish implementation, native-engine probes and complete TTstack lifecycle
+  evidence. QEMU+zvol has resize/lifecycle evidence; native Podman probes do not
+  establish full TTstack support. A gap becomes a finding only when code or docs
+  contradict their own claim.
 - **Dated reports.** A report describes the revision it tested and its limits, not
   current behavior. Age alone is not a defect.
 - **Tool output.** fmt, clippy, and compile errors are tools, not review findings.

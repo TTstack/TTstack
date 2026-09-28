@@ -51,6 +51,7 @@ establish. A new report belongs in `docs/validation/` and is linked here.
 | Firecracker restart on a dedicated ZFS file host | [Firecracker restart on a dedicated ZFS host, 2026-09-24](validation/firecracker-restart-validation-2026-09-24.md) |
 | Firecracker zvol lifecycle and file fallback | [Firecracker zvol, 2026-09-24](validation/firecracker-zvol-validation-2026-09-24.md) |
 | Linux engine upgrade and lifecycle regression | [Linux host upgrade, 2026-09-24](validation/linux-host-upgrade-validation-2026-09-24.md) |
+| Historical SQLite engine comparison and dependency-refresh probes | [SQLite assessment, 2026-09-24](validation/sqlite-engine-assessment-2026-09-24.md) |
 
 Guides describe maintained behavior. Reports describe only their recorded code,
 hosts, tests, and limits. The [audit registry](audit.md) records a point-in-time

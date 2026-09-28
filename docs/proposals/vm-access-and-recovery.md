@@ -3,17 +3,22 @@
 Status: Initial SSH implemented and [validated](../validation/expert-ssh-2026-09-28.md)
 on Linux QEMU and prepared Firecracker guests. The maintained [SSH contract](../ssh.md)
 owns current behavior. Additional recovery diagnostics remain proposed.
-The implementation-gap observations below describe the preimplementation baseline.
+This document retains the original rationale and outstanding proposals; it is not
+a second maintained behavior guide. The implementation-gap observations below
+describe the preimplementation baseline.
 
-## Existing implementation
+## Preimplementation baseline
 
-At `c8101e9`, VM creation/options already contain `ssh_keys` and TCP ports, but
-validation rejects SSH keys for Firecracker. QEMU injects root keys with cloud-init;
-Firecracker ignores its SSH-key argument. `port_map` does not supply an SSH user,
+At `c8101e9`, VM creation/options already contained `ssh_keys` and TCP ports, but
+validation rejected SSH keys for Firecracker. QEMU injected root keys with cloud-init;
+Firecracker ignored its SSH-key argument. `port_map` did not supply an SSH user,
 host identity or a verified public endpoint. See the caller's
 [source and network inspection](https://github.com/openmathmodel/omm-workspace/blob/main/docs/test-reports/2026-09-28-ssh-design-inspection.md).
 
-## Common provisioning contract
+## Provisioning decision, now implemented
+
+The following requirements record the original design decision; consult the
+[SSH guide](../ssh.md) for the implemented options and image requirements.
 
 Accept an initial public key and login account at creation, and return SSH
 connection information with VM metadata. Apply the same contract to QEMU,
@@ -35,12 +40,12 @@ or configuration still permits login. Report missing image support honestly.
 Container images need their own preparation; ordinary VM support must work on
 both QEMU and Firecracker.
 
-## Networking and lifecycle
+## Networking rationale and caller boundaries
 
-Current Linux DNAT runs in the agent's network namespace. The inspected OMM agent
-uses a private namespace, so `Host.addr` plus `port_map` is not a public endpoint.
-Add the configured resource-host ingress and forwarding for guest SSH only; do
-not expose the entire shared port pool, host management or other guests.
+The inspected Linux DNAT ran in the agent's network namespace. The caller's agent
+used a private namespace, so `Host.addr` plus `port_map` was not a public endpoint.
+Configured resource-host ingress and forwarding for guest SSH were subsequently
+implemented; current options and boundaries belong in the [SSH guide](../ssh.md#reachable-endpoint).
 
 Guest sudo does not confer host, agent or controller authority. Keep hypervisor,
 network and resource isolation outside the guest. Do not add in-guest OMM service
@@ -51,7 +56,10 @@ lifecycle requirements, with missing observations recorded in the inspection.
 Users with sudo can stop sshd, OMM or guest networking; TTstack does not promise
 to prevent or repair those changes.
 
-## Recovery and acceptance
+## Remaining recovery proposal and acceptance criteria
+
+Host-controlled stop/start and the SSH acceptance cases now have dated evidence.
+Additional exit/OOM diagnostic observations described here remain proposals.
 
 Reuse host-controlled stop/start, including bounded escalation for a hung guest.
 Confirm the owned VMM has exited before restarting it; preserve the disk and user

@@ -3,7 +3,7 @@
    reference palette and every status colour always ships with its text label,
    so colour never carries meaning alone. The controller dashboard keeps its own
    dark theme. When this file changes, bump the ?v= token on the stylesheet link
-   in index.html - GitHub Pages caches assets for ten minutes. */
+   in index.html so the deployed page references the new asset. */
 
 :root {
   color-scheme: light;
@@ -177,7 +177,7 @@ h3 { margin: 0 0 8px; font-size: 1.05rem; }
 
 .terms {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr));
   gap: 16px;
   margin: 20px 0;
 }

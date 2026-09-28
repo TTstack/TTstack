@@ -6,12 +6,28 @@ QEMU and prepared Firecracker guests accept initial OpenSSH public keys and
 `root` without an additional sudo grant. An explicit SSH configuration requires a
 key. Docker has no managed SSH bootstrap. The scheduler requires `ssh_bootstrap`.
 
+For example, with a prepared image named `fc-ssh` already available on a host:
+
+```sh
+tt env create work --image fc-ssh --engine firecracker \
+  --cpu 1 --mem 512 --lifetime 0 \
+  --ssh-key ~/.ssh/id_ed25519.pub --ssh-user user --ssh-sudo
+tt env show work
+```
+
+Use the displayed endpoint after SSH becomes ready. A remote endpoint also needs
+the agent's [public-address configuration](#reachable-endpoint). `ssh.user` is
+1–32 characters, starting with a lowercase letter and followed by lowercase
+letters, digits, `_` or `-`. CLI account/sudo options accompany `--ssh-key`.
+
 TTstack receives no login private key. The caller owns key generation, custody
 and download. Initial provisioning creates the account, installs its public keys,
 generates an independent Ed25519 host identity and, when requested, grants
 `USER ALL=(ALL:ALL) NOPASSWD: ALL`. This is unrestricted guest administration.
 TTstack does not protect guest applications/configuration from that account.
 Host credentials and other VMs remain outside its authority.
+Initial provisioning writes the guest's SSH daemon configuration for key-only
+login using that Ed25519 identity; prepared images must support this setup.
 
 ## Image contract
 

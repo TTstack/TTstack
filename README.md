@@ -5,8 +5,9 @@
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](Cargo.toml)
 
 TTstack manages VMs and containers across a small fleet of hosts for developers
-and small teams. Its focus is creating temporary environments, accessing them,
-and reliably stopping, restarting and deleting them.
+and small teams. Its focus is creating environments, accessing them, and reliably
+stopping, restarting and deleting them. Workloads can expire automatically or stay
+until explicitly deleted.
 
 Linux x86_64 is the supported host platform, with QEMU/KVM, Firecracker, and
 Docker/Podman engines.
@@ -30,6 +31,9 @@ tt CLI / Browser → HTTP → tt-ctl → HTTP → tt-agent (one per host)
 The Rust workspace uses Tokio/Axum for HTTP and asynchronous coordination, SQLite
 for persistent state, and installed hypervisor/container tools to run workloads.
 There is one controller; no separate message queue or database server is required.
+The dashboard covers fleet inventory and basic environment actions. The CLI and
+REST API also expose offline resizing, guest configuration and advanced initial
+SSH options.
 
 ## Quick start: one Linux/systemd host
 
@@ -65,9 +69,11 @@ From the agent host, use the guest IP printed by `env show`, for example
 `ssh -i ~/.ssh/id_ed25519 root@10.10.0.2` **if that is the assigned guest IP**.
 `running` means the VM process is running; SSH may need more time to start.
 The loopback management addresses above assume the CLI is on the same host.
-For remote access, register a host address reachable by the controller; clients
-on another machine use that host's reachable address and the assigned mapped port.
-See [networking](docs/guest-images.md#networking-and-platform-scope) for access paths.
+For remote management, register an agent address reachable by the controller.
+For remote guest SSH, configure the agent's client-reachable address as described
+in the [SSH guide](docs/ssh.md#reachable-endpoint). The CLI uses that SSH metadata;
+the management address is not necessarily a guest access endpoint. See
+[networking](docs/guest-images.md#networking-and-platform-scope) for other TCP ports.
 
 ```bash
 tt env stop demo
@@ -81,21 +87,27 @@ For multiple hosts, use [distributed deployment](docs/deployment.md#distributed-
 ## Core behavior and boundaries
 
 - Environments group one or more VMs/containers. They expire after six hours by
-  default; `--lifetime 0` disables expiry and longer lifetimes are allowed.
+  default; `--lifetime 0` disables expiry and longer lifetimes are allowed. CLI
+  create/list/show displays expiry; expiry uses the destructive deletion path.
 - Linux stop/start retains the disk but stops and boots the workload. It does not
   preserve VM memory. Deleting an environment removes its runtime disks/containers.
 - Creation is persisted before execution. The CLI waits up to ten minutes; after
   a timeout or interruption, inspect `tt env show NAME` before retrying. Incomplete
   deletion remains visible and is retried while the controller is running.
-- Scheduling prefers eligible ZFS hosts for VMs, falling back to file hosts.
+- Scheduling prefers eligible hosts using ZFS zvol storage for VMs, falling back
+  to file storage.
   It uses configured CPU, memory and disk reservations, not measured load.
   Limits of 50 hosts and 1000 tracked VMs are guardrails, not tested fleet capacity.
-- QEMU cloud images support root SSH key injection and virtual-disk growth;
+- QEMU cloud images and prepared Firecracker images support
+  [initial SSH accounts and public keys](docs/ssh.md), with optional guest sudo.
+  QEMU supports virtual-disk growth;
   guest partitions/filesystems must grow separately. Firecracker uses a prepared
   kernel/rootfs and supports ext4 growth; its built-in recipe only checks boot
   and networking. Both support explicit
   [stopped-VM resource updates](docs/rest-api.md#offline-resource-updates).
   Docker requires a long-running image default command.
+- Docker/Podman selection is persisted with the agent inventory, so installing
+  another runtime does not silently move container operations to a different store.
 - Firecracker uses jailer and per-VM resource limits, supports opaque read-only
   guest configuration, and requests orderly shutdown before forced termination.
 - Linux QEMU and Firecracker both support routed outgoing traffic restrictions
@@ -126,9 +138,11 @@ require the key when authentication is enabled. The browser keeps the entered ke
 in session storage. Services use HTTP without built-in TLS; keep their listeners
 on a trusted network or access them through a protected tunnel/proxy.
 
-Guest access is separate from API authentication: QEMU uses the SSH public keys
-supplied at creation; Docker publishes the requested application ports. TCP host
-ports are allocated dynamically, so always read the actual mappings from `env show`.
+Guest access is separate from API authentication: QEMU and prepared Firecracker
+guests use the SSH public keys supplied at creation; Docker publishes requested
+application ports. TCP host ports are allocated dynamically. Read the assigned
+mappings and configured SSH endpoint from `env show`; process state, SSH service
+readiness and application readiness are separate observations.
 
 ## Documentation
 
@@ -137,6 +151,7 @@ ports are allocated dynamically, so always read the actual mappings from `env sh
 | [Documentation index](docs/README.md) | Reading paths, maintained guides and dated evidence |
 | [Deployment](docs/deployment.md) | Dependencies, installation, fleet configuration, upgrades |
 | [Guest images](docs/guest-images.md) | Recipes, image formats, guest access, storage and networking |
+| [Initial SSH access](docs/ssh.md) | Guest accounts, public keys, reachable endpoints and readiness |
 | [REST API](docs/rest-api.md) | Endpoints, request defaults, response/state semantics and recovery |
 | [Compatibility](docs/compatibility.md) | Supported scope, CI and limits of live verification |
 | [Validation evidence](docs/README.md#validation-evidence) | Dated reports for specific tested revisions, with their limits |

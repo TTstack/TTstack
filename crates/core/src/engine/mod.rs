@@ -20,7 +20,7 @@ pub trait VmEngine: Send + Sync {
     /// Create and boot a new VM from the given disk path.
     ///
     /// - `disk_format`: image format (`"qcow2"` for file-based, `"raw"` for zvol).
-    /// - `ssh_keys`: root public keys for QEMU cloud-init.
+    /// - `ssh_keys`: initial public keys used by QEMU seed generation.
     fn create(
         &self,
         vm: &Vm,

@@ -21,6 +21,7 @@ Linux agents run as root. Install only the dependencies needed for your engine:
 | QEMU/KVM | Working `/dev/kvm`, `qemu-system-x86_64`, `qemu-img`, `genisoimage` or `mkisofs` |
 | QEMU and Firecracker networking | Full `iproute2`, `nftables`, kernel TUN/TAP support; QEMU also uses `vhost_net` |
 | Firecracker | Working `/dev/kvm`, matching `firecracker` and `jailer`, cgroup v2 with CPU/memory/PID controllers, `curl`, compatible kernel/rootfs; `mkfs.ext4` for config drives; `e2fsck` and `resize2fs` for rootfs growth (all from `e2fsprogs`) |
+| Initial VM SSH | Host `ssh-keygen` and `ssh-keyscan`; guest prerequisites in the [SSH image contract](ssh.md#image-contract) |
 | Docker | Working Docker daemon or Podman runtime; selection is bound to the agent inventory |
 | QEMU/Firecracker image recipes | `curl`; Firecracker additionally uses `dd`, `mkfs.ext4`, loop mount/unmount and `tar` |
 | Zvol storage | Existing ZFS pool/datasets and `zfs`; provision these manually |
@@ -51,7 +52,9 @@ and agents together before requesting the new capabilities.
 
 The controller must reach every registered agent address. Clients need access to
 the controller, and guest connections need access to each host's published TCP
-ports (allocated from 20000–65535). Arrange host/provider firewalls accordingly.
+ports (allocated from the configured range, 20000–65535 by default). Management
+addresses and client-reachable guest endpoints may differ; configure
+[SSH endpoints](ssh.md#reachable-endpoint) explicitly. Arrange host/provider firewalls accordingly.
 Service authentication does not encrypt HTTP; see [access and authentication](../README.md#access-and-authentication).
 
 ## Local deployment
@@ -170,6 +173,21 @@ binary with `--help` for the full options. Agent defaults are file storage,
 listens on `0.0.0.0:9200`. Unlike TOML, the agent's `--disk-total` takes an integer
 in MiB, without a `G` suffix. Distributed configuration does not expose an agent
 `data_dir` override; it uses `/home/USER/data`.
+
+Agent options for resource ownership and guest access include:
+
+| Option | Purpose |
+| --- | --- |
+| `--container-runtime docker\|podman` | Choose the persisted container runtime; also available as `TT_CONTAINER_RUNTIME` and TOML `container_runtime` |
+| `--ssh-public-address IPv4` | Advertise the client-reachable SSH address |
+| `--ssh-ingress-netns PATH` and `--ssh-ingress-target IPv4` | Add SSH-only forwarding through an outer network namespace; supply both together |
+| `--port-start PORT` and `--port-end PORT` | Set an agent's host TCP allocation range |
+
+The SSH/port options are agent startup flags, not fields in the distributed TOML
+configuration. Configure them through manual startup or a systemd drop-in that
+preserves the existing command's storage, identity and capacity arguments. See
+[SSH ingress](ssh.md#reachable-endpoint) for routing requirements and the guards
+against changing a bound configuration while VM records remain.
 
 ## Upgrades and recovery
 

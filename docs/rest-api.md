@@ -57,6 +57,12 @@ for the same environment return 409. GET of a missing host, environment or VM
 returns 404. Invalid environment parameters return 400, duplicate names 409, and
 unschedulable requests 422. Agent operation failures may surface as 502.
 
+Foreground operations refresh the hosts used by their environment; placement and
+background health checks still inspect the fleet. Agent mutations serialize per
+host, and reconciliation releases that lock between VM checks so queued lifecycle
+operations can proceed. Reads use database snapshots rather than waiting for an
+entire recovery scan.
+
 ## Offline resource updates
 
 `POST /api/vms/{id}/resources` takes `{"cpu": 4, "mem": 8192, "disk": 16384}`.
@@ -125,14 +131,14 @@ Each `VmSpec` accepts:
 | `cpu` | integer | Positive vCPU count; default 2 |
 | `mem` | integer | Positive memory in MiB; default 1024 |
 | `disk` | integer | Disk size in MiB. QEMU defaults to 40960; Firecracker defaults to the base rootfs size and allows creation-time ext4 growth. Omit for other engines |
-| `ports` | integer[] | Up to 256 TCP guest-port entries; default empty; port 22 is added for QEMU |
+| `ports` | integer[] | Up to 256 TCP guest-port entries; default empty; port 22 is added for QEMU and for guests with SSH bootstrap |
 | `deny_outgoing` | boolean | Default false; block routed outgoing initiation, not host/guest isolation; rejected for Docker |
 | `isolated_network` | boolean | Default false; Linux QEMU/Firecracker only; block peers, guest-initiated host access, private/link-local destinations and IPv6; allow public IPv4 egress and replies to inbound connections |
-| `guest_config` | object | Default `{}`; Firecracker only; up to 32 simple file names mapped to UTF-8 strings, 64 KiB total names/content; attached as a read-only config drive |
+| `guest_config` | object | Default `{}`; Firecracker only; simple file names mapped to UTF-8 strings on a read-only drive; [file/byte limits](guest-images.md#firecracker-guest-configuration) also apply to the managed SSH seed |
 | `ssh_keys` | string[] | Empty; merged with environment keys; QEMU or prepared Firecracker |
+| `ssh` | object | Optional initial account settings: `{"user":"user","sudo":true}`; requires public keys; keys without this object select `root` with no extra sudo grant |
 
 CLI engine aliases such as `kvm`, `fc` and `podman` are not JSON enum values.
-`ssh` optionally selects `{ "user": "user", "sudo": true }` for initial provisioning.
 VM responses include optional `ssh` endpoint/readiness metadata; see the
 [SSH contract](ssh.md) for keys, images, ingress and schema compatibility.
 
@@ -164,12 +170,20 @@ endpoint until `env.state` leaves `creating`, then inspect the state and errors.
 `EnvDetail` contains `env`, `vms` and optional `warnings`. `Env` contains `id`,
 `owner`, `vm_ids`, `created_at`, `expires_at`, `state` and nullable `error`.
 Timestamps are Unix seconds; `expires_at: 0` means no expiry.
+CLI create/list/show includes an expiry summary; expiration deletes retained disks
+through the environment cleanup path.
 
 Each `Vm` includes its `id`, `env_id`, `host_id`, image/engine, `cpu`, `mem`, `disk`,
 internal `ip`, `port_map`, saved creation `options`, `state`, nullable `error` and
-`created_at`. For example, `"port_map":{"22":20000}` means host TCP port 20000
+`created_at`, optional `pending_resources` and optional `ssh` metadata.
+`Vm.disk` is the total disk reservation; Firecracker includes its configuration
+drive when present. Resource-update request `disk` is the root disk only.
+For example, `"port_map":{"22":20000}` means host TCP port 20000
 forwards to guest port 22. JSON object keys are strings. Always use the assigned
 port on the relevant agent host; guest IPs need not be reachable from the client.
+For managed SSH, use the configured `ssh.host` and `ssh.port`. An empty `ssh.host`
+means no client-reachable SSH address is configured; the management URL may use a
+different network.
 
 Resource `*_total` fields are configured scheduling capacities; `*_used` fields
 are **reservations**, not measured CPU load, RAM use or physical filesystem usage.
@@ -177,7 +191,8 @@ Stopped guests release CPU/memory reservations and retain disk reservations. Fai
 or incomplete operations conservatively retain resources until cleanup. `vm_count`
 includes stopped/failed/deleting records. Docker disk usage is not accounted or
 quota-enforced; Firecracker reserves its requested rootfs size (or the image size when omitted) plus 4 MiB when a
-configuration drive is present. Firecracker memory reservations include 128 MiB
+configuration drive is present, including an SSH-only configuration drive.
+Firecracker memory reservations include 128 MiB
 of VMM headroom in addition to the guest's `mem`; stopped guests release both.
 The scheduler uses reported base-image sizes and includes configuration disks in
 creation plans. An omitted Firecracker disk requires an agent that reports that
@@ -209,10 +224,13 @@ reads report malformed state rather than silently discarding it.
 VM placement prefers eligible ZFS hosts, then file hosts; see the
 [storage policy](guest-images.md#storage). This does not migrate existing VMs.
 
-`Vm.options` contains `isolated_network` and optional `guest_config_digest` (SHA-256),
-never configuration contents. Configuration is immutable for that VM and retained
-across stop/start. TTstack treats it as opaque data, not shell commands or a
-cloud-init document. Use a guest application protocol for live credential renewal.
+`Vm.options` retains requested ports, outgoing/isolation flags, requested root disk
+size, SSH public keys/account options and optional `guest_config_digest` (SHA-256).
+It does not expose guest-configuration contents or generated SSH private keys.
+Caller-supplied configuration is immutable and retained across stop/start. TTstack
+treats that content as opaque data. Its separately generated SSH seed is described
+in the [SSH image contract](ssh.md#image-contract).
+Use a guest application protocol for live credential renewal.
 Protect create requests with a private network or TLS because they can carry secrets.
 The [guest configuration contract](guest-images.md#firecracker-guest-configuration)
 describes mounting, limits and ownership.
@@ -230,7 +248,7 @@ an environment `failed`. VM states are `creating`, `running`, `stopped`, `paused
 application readiness. An offline agent makes the environment failed while its VM
 states remain the last observed snapshots; it does not prove the guests stopped.
 
-Agent reconciliation and controller refresh each normally run on a 15-second loop.
+Agent reconciliation and controller refresh each normally pause 15 seconds between scans.
 Busy operations and unreachable hosts can delay them; reads are snapshots, not
 immediate engine probes, and end-to-end freshness is not guaranteed within 15 seconds.
 
@@ -261,7 +279,9 @@ immediate engine probes, and end-to-end freshness is not guaranteed within 15 se
   reservations and removes the host. It does not stop guests or delete disks.
   Save the report and reclaim resources on that host separately before reuse.
 - **Recovery:** failed network restoration is retried; late VMM readiness can clear
-  stale errors without restarting the guest. A missing live TAP cannot be attached
+  stale errors without restarting the guest. Confirming a stopped VM clears an
+  obsolete network-recovery error while retaining unresolved operation errors.
+  A missing live TAP cannot be attached
   to a running VMM by recreating its name; stop/start is required. Missing jailed
   Firecracker metadata fails safely until restored. Missing/corrupt PID files use
   VM-specific process markers for recovery, never unconditional disk deletion.
@@ -287,11 +307,14 @@ normal fleet operations to avoid untracked resources.
 | POST | `/api/vms/{id}/start` | No payload |
 
 `CreateVmReq` requires `vm_id`, `env_id`, `image`, `engine`, `cpu`, `mem`, `disk`,
-`ports` and `deny_outgoing`; `ssh_keys` and `guest_config` default to empty and
+`ports` and `deny_outgoing`; optional `ssh` has the same initial-account meaning
+as in a VM specification. `ssh_keys` and `guest_config` default to empty and
 `isolated_network` defaults to false. Unlike controller
 requests, QEMU requires a positive `disk`; Firecracker accepts 0 for the image
 size or a positive creation-time size in MiB. Other engines require 0. Agent
-mutation errors currently return HTTP 500, including validation failures.
+create/start/stop/delete errors currently return HTTP 500, including validation
+failures. Resource-update validation/state errors use 400/409 as described above;
+other resource-update failures use 500.
 
 Repeated creation with the same VM ID and parameters reuses the record rather
 than allocating a second VM. A stopped VM stays stopped; use start explicitly.
