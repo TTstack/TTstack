@@ -119,7 +119,7 @@ enum EnvCmd {
         /// Owner label, not an access control (defaults to $USER).
         #[arg(long)]
         owner: Option<String>,
-        /// Root SSH public key or .pub path (repeatable; QEMU only).
+        /// Initial SSH public key or .pub path (repeatable; QEMU or prepared Firecracker).
         #[arg(long)]
         ssh_key: Vec<String>,
         /// Initial SSH account (defaults to root for generic VMs).
@@ -490,6 +490,7 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
             let mut detail: EnvDetail = c.post("/api/envs", &req).await?;
             eprintln!("Creating environment {name}; you can inspect it with 'tt env show {name}'.");
+            eprintln!("Expiry: {}", expiry_label(detail.env.expires_at));
             while detail.env.state == EnvState::Creating {
                 if tokio::time::Instant::now() >= deadline {
                     return Err(eg!(
@@ -529,14 +530,18 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
                 println!("No environments.");
                 return Ok(());
             }
-            println!("{:<16} {:<12} {:<8} {:>4}", "NAME", "OWNER", "STATE", "VMs");
+            println!(
+                "{:<16} {:<12} {:<8} {:>4}  EXPIRES",
+                "NAME", "OWNER", "STATE", "VMs"
+            );
             for e in envs {
                 println!(
-                    "{:<16} {:<12} {:<8} {:>4}",
+                    "{:<16} {:<12} {:<8} {:>4}  {}",
                     e.id,
                     e.owner,
                     format!("{:?}", e.state).to_lowercase(),
                     e.vm_ids.len(),
+                    expiry_label(e.expires_at),
                 );
             }
         }
@@ -546,6 +551,7 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
             println!("  Owner:   {}", detail.env.owner);
             println!("  State:   {:?}", detail.env.state);
             println!("  VMs:     {}", detail.vms.len());
+            println!("  Expiry:  {}", expiry_label(detail.env.expires_at));
             for warning in &detail.warnings {
                 eprintln!("  warning: {warning}");
             }
@@ -629,15 +635,61 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
     Ok(())
 }
 
+fn expiry_label(expires_at: u64) -> String {
+    if expires_at == 0 {
+        return "never (retained until explicit deletion)".into();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if expires_at <= now {
+        return "expired; deletion pending".into();
+    }
+    let remaining = expires_at - now;
+    format!(
+        "in {}h {}m {}s (deletes disks)",
+        remaining / 3600,
+        remaining % 3600 / 60,
+        remaining % 60
+    )
+}
+
 async fn print_access(client: &Client, vms: &[Vm]) {
     let hosts: Vec<Host> = match client.get("/api/hosts").await {
         Ok(hosts) => hosts,
         Err(e) => {
             eprintln!("  Cannot resolve host access addresses: {e}");
-            return;
+            vec![]
         }
     };
     for vm in vms {
+        if let Some(ssh) = &vm.ssh {
+            if ssh.host.is_empty() {
+                println!(
+                    "  SSH {}: public endpoint not configured; user {}",
+                    vm.id, ssh.user
+                );
+            } else {
+                println!(
+                    "  SSH {}: ssh -p {} {}@{} ({})",
+                    vm.id,
+                    ssh.port,
+                    ssh.user,
+                    ssh.host,
+                    if ssh.ready {
+                        "SSH ready from agent; external routing must be reachable"
+                    } else {
+                        "SSH not yet ready from agent"
+                    }
+                );
+            }
+        } else if vm.options.ssh.is_some() {
+            println!(
+                "  SSH {}: initial provisioning incomplete; inspect the VM error",
+                vm.id
+            );
+        }
         if vm.engine != Engine::Docker && !vm.ip.is_empty() {
             for &guest in vm.port_map.keys() {
                 println!(
@@ -651,6 +703,9 @@ async fn print_access(client: &Client, vms: &[Vm]) {
             && let Some(addr) = url.host_str()
         {
             for (&guest, &port) in &vm.port_map {
+                if guest == 22 && (vm.ssh.is_some() || vm.options.ssh.is_some()) {
+                    continue;
+                }
                 if vm.engine == Engine::Docker {
                     println!("  Access {}: {addr}:{port} -> guest TCP {guest}", vm.id);
                 } else if !addr.eq_ignore_ascii_case("localhost")
