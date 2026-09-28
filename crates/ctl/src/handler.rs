@@ -843,7 +843,9 @@ async fn resize_virtual_machine(
             "insufficient resources on the workspace host".into(),
         ));
     }
+    let previous = vm.clone();
     vm.pending_resources = Some(target);
+    vm.error = Some("resource update pending; retry the recorded target if interrupted".into());
     {
         let db = state.lock_db();
         db.put_vm(&vm).map_err(internal)?;
@@ -869,6 +871,13 @@ async fn resize_virtual_machine(
             )
         })?;
         if !status.is_success() || !body.ok {
+            // A fresh request explicitly rejected before mutation has no outstanding
+            // intent. A retry cannot cancel an earlier request with an unknown outcome.
+            if previous.pending_resources.is_none()
+                && matches!(status, StatusCode::BAD_REQUEST | StatusCode::CONFLICT)
+            {
+                state.lock_db().put_vm(&previous).map_err(internal)?;
+            }
             return Err((
                 if status.is_client_error() {
                     status
@@ -1236,8 +1245,9 @@ fn apply_snapshot(
                     .iter()
                     .find(|vm| vm.id == known.id && vm.env_id == known.env_id && vm.host_id == id)
                 {
-                    host.resource.account(vm);
-                    db.put_vm(vm)?;
+                    let vm = merge_vm_snapshot(&known, vm);
+                    host.resource.account(&vm);
+                    db.put_vm(&vm)?;
                 } else {
                     // Never discard a resource merely because one snapshot is missing it.
                     known.state = VmState::Failed;
@@ -1263,6 +1273,31 @@ fn apply_snapshot(
     db.put_host(&host)
 }
 
+/// A request can still be queued at the agent after the controller times out.
+/// An older observed row is not evidence that the recorded intent was cancelled.
+fn merge_vm_snapshot(known: &Vm, actual: &Vm) -> Vm {
+    let mut vm = actual.clone();
+    if let Some(target) = known.pending_resources {
+        let overhead = if vm.options.guest_config_digest.is_some() {
+            ttcore::guest_config::CONFIG_DISK_MIB
+        } else {
+            0
+        };
+        let completed = vm.pending_resources.is_none()
+            && vm.cpu == target.cpu
+            && vm.mem == target.mem
+            && target.disk.checked_add(overhead) == Some(vm.disk)
+            && vm.options.requested_disk == target.disk;
+        if vm.pending_resources.is_none() && !completed {
+            vm.pending_resources = Some(target);
+            vm.error.get_or_insert_with(|| {
+                "resource update outcome unknown; retry the recorded target".into()
+            });
+        }
+    }
+    vm
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1272,6 +1307,7 @@ mod tests {
     };
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     struct MockAgent {
+        reject_resize: AtomicBool,
         resources_supported: AtomicBool,
         qemu_resources_supported: AtomicBool,
         vms: Mutex<Vec<Vm>>,
@@ -1412,6 +1448,14 @@ mod tests {
         Path(id): Path<String>,
         Json(target): Json<VmResources>,
     ) -> impl IntoResponse {
+        if mock.reject_resize.load(Ordering::SeqCst) {
+            return (
+                StatusCode::CONFLICT,
+                Json(ApiResp::<Vm>::err(
+                    "insufficient resources for resource update",
+                )),
+            );
+        }
         let mut rows = mock.vms.lock().unwrap();
         let vm = rows.iter_mut().find(|v| v.id == id).unwrap();
         vm.cpu = target.cpu;
@@ -1515,6 +1559,7 @@ mod tests {
     }
     async fn fixture() -> (CtlState, Arc<MockAgent>, tokio::task::JoinHandle<()>) {
         let mock = Arc::new(MockAgent {
+            reject_resize: AtomicBool::new(false),
             resources_supported: AtomicBool::new(false),
             qemu_resources_supported: AtomicBool::new(false),
             vms: Mutex::new(vec![]),
@@ -1879,6 +1924,163 @@ mod tests {
         assert_eq!(detail.env.state, EnvState::Failed);
         assert!(detail.env.error.unwrap().contains("offline"));
         assert_eq!(detail.vms.len(), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn pending_resize_survives_old_snapshots_until_the_target_is_confirmed() {
+        for engine in [Engine::Qemu, Engine::Firecracker] {
+            let (state, mock, server) = fixture().await;
+            seed(&state, &mock);
+            mock.resources_supported.store(true, Ordering::SeqCst);
+            mock.qemu_resources_supported.store(true, Ordering::SeqCst);
+            let overhead = if engine == Engine::Firecracker { 4 } else { 0 };
+            for vm in mock.vms.lock().unwrap().iter_mut() {
+                vm.engine = engine;
+                vm.state = VmState::Stopped;
+                vm.disk = 64 + overhead;
+                vm.options.requested_disk = 64;
+                vm.options.guest_config_digest = (overhead > 0).then(|| "retained-config".into());
+            }
+            let client = agent_client(None, 5).unwrap();
+            refresh_all_hosts(&state, &client).await;
+            let target = VmResources {
+                cpu: 2,
+                mem: 512,
+                disk: 128,
+            };
+            let mut pending = state.lock_db().get_vm("good").unwrap().unwrap();
+            pending.pending_resources = Some(target);
+            state.lock_db().put_vm(&pending).unwrap();
+            // Models timeout/restart while the original request is still queued.
+            for _ in 0..2 {
+                refresh_all_hosts(&state, &client).await;
+                let saved = state.lock_db().get_vm("good").unwrap().unwrap();
+                assert_eq!(saved.pending_resources, Some(target));
+                assert_eq!(saved.disk, 64 + overhead);
+                assert!(saved.error.is_some());
+                assert_eq!(
+                    state
+                        .lock_db()
+                        .get_host("host")
+                        .unwrap()
+                        .unwrap()
+                        .resource
+                        .disk_used,
+                    192 + 2 * overhead
+                );
+            }
+            assert_eq!(
+                change_environment(&state, "env", "start")
+                    .await
+                    .unwrap_err()
+                    .0,
+                StatusCode::CONFLICT
+            );
+            assert_eq!(
+                resize_virtual_machine(
+                    &state,
+                    "good",
+                    VmResources {
+                        disk: 256,
+                        ..target
+                    }
+                )
+                .await
+                .unwrap_err()
+                .0,
+                StatusCode::CONFLICT
+            );
+            // Rejection of a retry cannot revoke an earlier request's intent.
+            mock.reject_resize.store(true, Ordering::SeqCst);
+            assert!(
+                resize_virtual_machine(&state, "good", target)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                state
+                    .lock_db()
+                    .get_vm("good")
+                    .unwrap()
+                    .unwrap()
+                    .pending_resources,
+                Some(target)
+            );
+            {
+                let mut rows = mock.vms.lock().unwrap();
+                let vm = rows.iter_mut().find(|v| v.id == "good").unwrap();
+                vm.pending_resources = Some(target);
+                vm.error = Some("unfinished filesystem growth".into());
+            }
+            refresh_all_hosts(&state, &client).await;
+            assert_eq!(
+                state
+                    .lock_db()
+                    .get_vm("good")
+                    .unwrap()
+                    .unwrap()
+                    .pending_resources,
+                Some(target)
+            );
+            {
+                let mut rows = mock.vms.lock().unwrap();
+                let vm = rows.iter_mut().find(|v| v.id == "good").unwrap();
+                vm.cpu = target.cpu;
+                vm.mem = target.mem;
+                vm.disk = target.disk + overhead;
+                vm.options.requested_disk = target.disk;
+                vm.pending_resources = None;
+                vm.error = None;
+            }
+            refresh_all_hosts(&state, &client).await;
+            let saved = state.lock_db().get_vm("good").unwrap().unwrap();
+            assert!(saved.pending_resources.is_none());
+            assert!(saved.error.is_none());
+            assert_eq!(saved.disk, 128 + overhead);
+            assert!(change_environment(&state, "env", "start").await.is_ok());
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_resize_rejection_releases_only_its_new_intent() {
+        let (state, mock, server) = fixture().await;
+        seed(&state, &mock);
+        mock.qemu_resources_supported.store(true, Ordering::SeqCst);
+        mock.reject_resize.store(true, Ordering::SeqCst);
+        for vm in mock.vms.lock().unwrap().iter_mut() {
+            vm.engine = Engine::Qemu;
+            vm.state = VmState::Stopped;
+            vm.disk = 64;
+            vm.options.requested_disk = 64;
+        }
+        let result = resize_virtual_machine(
+            &state,
+            "good",
+            VmResources {
+                cpu: 2,
+                mem: 512,
+                disk: 128,
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap_err().0, StatusCode::CONFLICT);
+        let saved = state.lock_db().get_vm("good").unwrap().unwrap();
+        assert!(saved.pending_resources.is_none());
+        assert!(saved.error.is_none());
+        assert_eq!(saved.disk, 64);
+        assert_eq!(
+            state
+                .lock_db()
+                .get_host("host")
+                .unwrap()
+                .unwrap()
+                .resource
+                .disk_used,
+            128
+        );
+        assert!(change_environment(&state, "env", "start").await.is_ok());
         server.abort();
     }
 }

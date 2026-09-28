@@ -21,6 +21,9 @@ Review of `bff24fb` identified the following boundary failures and corrections.
 
 - Docker deletion could remain stuck after a failed pull created no container.
   Stop now accepts confirmed absence and still propagates query/stop failures.
+- An old agent snapshot could erase unresolved controller resize intent. Snapshot
+  merging now retains the target and disk reservation until confirmation; a fresh
+  request explicitly rejected before mutation can release only its new intent.
 
 ## Disposition, 2026-09-25
 

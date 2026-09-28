@@ -86,7 +86,11 @@ checked again on start. No migration is attempted when its host has no capacity.
 
 Intent is persisted as `Vm.pending_resources` before storage changes. While set,
 the larger disk remains reserved and start is refused. Retry the **same target**
-to complete an interrupted operation: equal device capacity still runs filesystem
+after an unknown outcome even when an agent snapshot still shows the old resources:
+the original request may be queued. Snapshots clear controller intent only after
+confirming the target resources; a fresh request explicitly rejected before mutation
+also clears its new intent. `tt env show` prints the pending target.
+A retry completes an interrupted operation: equal device capacity still runs filesystem
 growth for Firecracker, covering interruption between device growth and `resize2fs`.
 QEMU retries recheck virtual disk capacity and finish an already-applied growth
 without replacing the disk. A successful response clears intent and updates

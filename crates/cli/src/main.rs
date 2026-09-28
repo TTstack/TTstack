@@ -573,6 +573,12 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
                         vm.ip,
                         ports
                     );
+                    if let Some(target) = vm.pending_resources {
+                        println!(
+                            "    Pending resources: {} vCPU, {} MiB memory, {} MiB root disk; retry this target before starting",
+                            target.cpu, target.mem, target.disk
+                        );
+                    }
                 }
             }
             print_access(c, &detail.vms).await;
