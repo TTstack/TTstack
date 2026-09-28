@@ -5,7 +5,7 @@
 > rather than kept as backlog; resolved history belongs in Git and the dated
 > validation reports. Entry shape and severity: `.claude/docs/review-core.md` §5.
 >
-> The disposition below is this registry's initial record.
+> Dated dispositions identify the reviewed revisions and their evidence.
 
 ## Open
 
@@ -14,6 +14,13 @@ None.
 ## Won't Fix
 
 None.
+
+## Disposition, 2026-09-28
+
+Review of `bff24fb` identified the following boundary failures and corrections.
+
+- Docker deletion could remain stuck after a failed pull created no container.
+  Stop now accepts confirmed absence and still propagates query/stop failures.
 
 ## Disposition, 2026-09-25
 

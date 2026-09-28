@@ -147,6 +147,11 @@ impl VmEngine for DockerEngine {
     }
 
     fn stop(&self, vm: &Vm) -> Result<()> {
+        // A failed pull can leave a durable VM record without a container.
+        // Only confirmed absence is success; daemon/query failures still propagate.
+        if self.inspect(vm)?.is_none() {
+            return Ok(());
+        }
         let name = Self::container_name(vm);
         let output = Command::new(Self::runtime())
             .args(["stop", "-t", "10", &name])
@@ -154,7 +159,14 @@ impl VmEngine for DockerEngine {
             .c(d!())?;
 
         if !output.status.success() {
-            return Err(eg!("container stop failed"));
+            // The container may also disappear between inspect and stop.
+            if self.inspect(vm)?.is_none() {
+                return Ok(());
+            }
+            return Err(eg!(
+                "container stop failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
         }
         Ok(())
     }
@@ -182,5 +194,67 @@ impl VmEngine for DockerEngine {
 
     fn name(&self) -> &'static str {
         "docker"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_container_cleanup_does_not_hide_daemon_or_stop_errors() {
+        const CHILD: &str = "TT_DOCKER_CLEANUP_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let mut vm: Vm = serde_json::from_value(serde_json::json!({
+                "id": "missing", "env_id": "test", "host_id": "test",
+                "image": "missing:latest", "engine": "docker",
+                "cpu": 1, "mem": 128, "disk": 0, "ip": "",
+                "port_map": {}, "state": "failed", "created_at": 0
+            }))
+            .unwrap();
+            let engine = DockerEngine::new();
+            for _ in 0..2 {
+                engine.stop(&vm).unwrap();
+                engine.destroy(&vm).unwrap();
+            }
+            vm.id = "unavailable".into();
+            assert!(engine.stop(&vm).is_err());
+            assert!(engine.destroy(&vm).is_err());
+            vm.id = "running".into();
+            assert!(engine.stop(&vm).is_err());
+            return;
+        }
+
+        // Run the real command boundary in a child, without changing process-wide PATH.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let docker = dir.path().join("docker");
+        std::fs::write(
+            &docker,
+            r#"#!/bin/sh
+if [ "$1" = --version ]; then exit 0; fi
+for arg; do name="$arg"; done
+case "$1:$name" in
+  inspect:tt-missing) echo 'No such container: tt-missing' >&2; exit 1 ;;
+  inspect:tt-unavailable) echo 'Cannot connect to the Docker daemon' >&2; exit 1 ;;
+  inspect:tt-running) echo running; exit 0 ;;
+  stop:tt-running) echo 'permission denied' >&2; exit 1 ;;
+  *) echo 'unexpected mutating command' >&2; exit 2 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "engine::docker::tests::missing_container_cleanup_does_not_hide_daemon_or_stop_errors", "--nocapture"])
+            .env(CHILD, "1")
+            .env("PATH", dir.path())
+            .output_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
