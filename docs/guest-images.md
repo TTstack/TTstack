@@ -46,6 +46,11 @@ use cloud-init. A custom image needs a BIOS bootloader, kernel, virtio disk/netw
 drivers and a compatible userspace; merely formatting an empty qcow2 disk is not
 a bootable image.
 
+For existing directory layouts, file storage accepts one unambiguous disk: a
+single `.qcow2` file, or a single file whose format is checked. Empty or ambiguous
+directories and symbolic links used as QEMU disks are rejected, including during
+cold start. A writable clone must never resolve to a shared source disk.
+
 ```bash
 /opt/ttstack/bin/tt env create demo --image alpine-cloud --engine qemu \
   --cpu 1 --mem 256 --disk 2048 --ssh-key ~/.ssh/id_ed25519.pub

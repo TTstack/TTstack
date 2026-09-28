@@ -148,32 +148,44 @@ impl ImageStore for FileStore {
         Ok(Path::new(path).exists())
     }
 
-    fn resolve_disk(&self, clone_path: &str) -> String {
+    fn resolve_disk(&self, clone_path: &str) -> Result<String> {
         let p = Path::new(clone_path);
-        if p.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(p) {
-                let mut files: Vec<_> = entries
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.path().is_file())
-                    .collect();
-                files.sort_by_key(|f| f.file_name());
-                // Deterministic selection is preserved across cold starts.
-                // Prefer .qcow2 file
-                if let Some(qcow2) = files
-                    .iter()
-                    .find(|f| f.path().extension().is_some_and(|ext| ext == "qcow2"))
-                {
-                    return qcow2.path().to_string_lossy().into_owned();
-                }
-                // Single file — use it directly
-                if files.len() == 1 {
-                    return files[0].path().to_string_lossy().into_owned();
+        let metadata = std::fs::symlink_metadata(p).c(d!("inspect QEMU disk path"))?;
+        let disk = if metadata.is_dir() {
+            let mut files = Vec::new();
+            for entry in std::fs::read_dir(p).c(d!("read QEMU image directory"))? {
+                let entry = entry.c(d!("read QEMU image entry"))?;
+                let kind = entry.file_type().c(d!("inspect QEMU image entry"))?;
+                // Keep symlinks as candidates so they are rejected, never silently skipped.
+                if kind.is_file() || kind.is_symlink() {
+                    files.push(entry.path());
                 }
             }
-            format!("{clone_path}/disk.qcow2")
+            let qcow2: Vec<_> = files
+                .iter()
+                .filter(|f| f.extension().is_some_and(|ext| ext == "qcow2"))
+                .collect();
+            match qcow2.as_slice() {
+                [disk] => (*disk).clone(),
+                [] if files.len() == 1 => files.remove(0),
+                _ => {
+                    return Err(eg!(
+                        "QEMU image directory must contain one unambiguous disk"
+                    ));
+                }
+            }
+        } else if metadata.is_file() {
+            p.to_path_buf()
         } else {
-            clone_path.to_string()
+            return Err(eg!("QEMU disk must be a regular file, not a symbolic link"));
+        };
+        if !std::fs::symlink_metadata(&disk)
+            .c(d!("inspect QEMU disk"))?
+            .is_file()
+        {
+            return Err(eg!("QEMU disk must be a regular file, not a symbolic link"));
         }
+        Ok(disk.to_string_lossy().into_owned())
     }
 
     fn disk_format(&self) -> &'static str {
@@ -181,7 +193,7 @@ impl ImageStore for FileStore {
     }
 
     fn resize_disk(&self, clone_path: &str, size_mib: u32) -> Result<()> {
-        let path = self.resolve_disk(clone_path);
+        let path = self.resolve_disk(clone_path)?;
         let info = std::process::Command::new("qemu-img")
             .args(["info", "--output=json", &path])
             .bounded_output()
@@ -457,7 +469,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("image.qcow2");
         std::fs::write(&file, b"fake").unwrap();
-        let resolved = FileStore.resolve_disk(file.to_str().unwrap());
+        let resolved = FileStore.resolve_disk(file.to_str().unwrap()).unwrap();
         assert_eq!(resolved, file.to_str().unwrap());
     }
 
@@ -466,7 +478,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("disk.qcow2"), b"fake").unwrap();
         std::fs::write(dir.path().join("other.txt"), b"other").unwrap();
-        let resolved = FileStore.resolve_disk(dir.path().to_str().unwrap());
+        let resolved = FileStore
+            .resolve_disk(dir.path().to_str().unwrap())
+            .unwrap();
         assert!(resolved.ends_with("disk.qcow2"));
     }
 
@@ -474,23 +488,76 @@ mod tests {
     fn resolve_disk_dir_single_file() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("myimage"), b"fake").unwrap();
-        let resolved = FileStore.resolve_disk(dir.path().to_str().unwrap());
+        let resolved = FileStore
+            .resolve_disk(dir.path().to_str().unwrap())
+            .unwrap();
         assert!(resolved.ends_with("myimage"));
     }
 
     #[test]
-    fn resolve_disk_dir_fallback() {
+    fn resolve_disk_rejects_ambiguous_directories() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a"), b"fake").unwrap();
         std::fs::write(dir.path().join("b"), b"fake").unwrap();
-        let resolved = FileStore.resolve_disk(dir.path().to_str().unwrap());
-        assert!(resolved.ends_with("disk.qcow2"));
+        assert!(
+            FileStore
+                .resolve_disk(dir.path().to_str().unwrap())
+                .is_err()
+        );
+        std::fs::write(dir.path().join("a.qcow2"), b"fake").unwrap();
+        std::fs::write(dir.path().join("b.qcow2"), b"fake").unwrap();
+        assert!(
+            FileStore
+                .resolve_disk(dir.path().to_str().unwrap())
+                .is_err()
+        );
     }
 
     #[test]
-    fn resolve_disk_empty_dir_fallback() {
+    fn resolve_disk_rejects_empty_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let resolved = FileStore.resolve_disk(dir.path().to_str().unwrap());
-        assert!(resolved.ends_with("disk.qcow2"));
+        assert!(
+            FileStore
+                .resolve_disk(dir.path().to_str().unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn qemu_clones_reject_linked_disks_and_keep_regular_copies_independent() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared.qcow2");
+        std::fs::write(&shared, b"original").unwrap();
+        let base = dir.path().join("base");
+        std::fs::create_dir(&base).unwrap();
+        for (index, target) in [shared.clone(), std::path::PathBuf::from("../shared.qcow2")]
+            .into_iter()
+            .enumerate()
+        {
+            symlink(&target, base.join("disk.qcow2")).unwrap();
+            let clone = dir.path().join(format!("clone-{index}"));
+            FileStore
+                .clone_image(base.to_str().unwrap(), clone.to_str().unwrap())
+                .unwrap();
+            assert!(FileStore.resolve_disk(base.to_str().unwrap()).is_err());
+            assert!(FileStore.resolve_disk(clone.to_str().unwrap()).is_err());
+            std::fs::remove_file(base.join("disk.qcow2")).unwrap();
+        }
+        let linked = dir.path().join("linked.qcow2");
+        symlink(&shared, &linked).unwrap();
+        assert!(FileStore.resolve_disk(linked.to_str().unwrap()).is_err());
+        std::fs::write(base.join("disk.qcow2"), b"original").unwrap();
+        let clone = dir.path().join("regular-clone");
+        FileStore
+            .clone_image(base.to_str().unwrap(), clone.to_str().unwrap())
+            .unwrap();
+        let disk = FileStore.resolve_disk(clone.to_str().unwrap()).unwrap();
+        std::fs::write(&disk, b"guest write").unwrap();
+        assert_eq!(std::fs::read(base.join("disk.qcow2")).unwrap(), b"original");
+        std::fs::remove_file(&disk).unwrap();
+        symlink(&shared, &disk).unwrap();
+        assert!(FileStore.resolve_disk(clone.to_str().unwrap()).is_err());
+        assert_eq!(std::fs::read(shared).unwrap(), b"original");
     }
 }

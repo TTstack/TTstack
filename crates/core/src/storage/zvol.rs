@@ -190,8 +190,8 @@ impl ImageStore for ZvolStore {
         Ok(zfs_ok(&["list", "-H", path]))
     }
 
-    fn resolve_disk(&self, clone_path: &str) -> String {
-        format!("/dev/zvol/{clone_path}")
+    fn resolve_disk(&self, clone_path: &str) -> Result<String> {
+        Ok(format!("/dev/zvol/{clone_path}"))
     }
 
     fn disk_format(&self) -> &'static str {

@@ -32,7 +32,7 @@ pub trait ImageStore: Send + Sync {
     ///
     /// - `FileStore`: searches the directory for a qcow2 file.
     /// - `ZvolStore`: returns `/dev/zvol/{dataset}`.
-    fn resolve_disk(&self, clone_path: &str) -> String;
+    fn resolve_disk(&self, clone_path: &str) -> Result<String>;
 
     /// Disk format string for the engine (e.g. `"qcow2"` or `"raw"`).
     fn disk_format(&self) -> &'static str;
@@ -41,7 +41,7 @@ pub trait ImageStore: Send + Sync {
     fn qemu_size(&self, path: &str) -> Result<u64> {
         use crate::command::CommandExt;
         let output = std::process::Command::new("qemu-img")
-            .args(["info", "--output=json", &self.resolve_disk(path)])
+            .args(["info", "--output=json", &self.resolve_disk(path)?])
             .bounded_output()
             .c(d!("inspect QEMU disk"))?;
         if !output.status.success() {

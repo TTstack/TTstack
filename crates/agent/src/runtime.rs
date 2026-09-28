@@ -311,10 +311,10 @@ impl Runtime {
     }
     fn image_path(&self, vm: &Vm) -> Result<String> {
         let path = self.clone_path(vm);
-        if vm.engine == Engine::Firecracker {
-            self.store.firecracker_dir(&path)
-        } else {
-            Ok(self.store.resolve_disk(&path))
+        match vm.engine {
+            Engine::Firecracker => self.store.firecracker_dir(&path),
+            Engine::Qemu => self.store.resolve_disk(&path),
+            Engine::Docker => Ok(vm.image.clone()),
         }
     }
     fn restore_network(&self, vm: &Vm) -> Result<()> {
@@ -1246,8 +1246,8 @@ mod lifecycle_tests {
         fn image_exists(&self, _: &str) -> Result<bool> {
             unreachable!()
         }
-        fn resolve_disk(&self, path: &str) -> String {
-            path.into()
+        fn resolve_disk(&self, path: &str) -> Result<String> {
+            Ok(path.into())
         }
         fn disk_format(&self) -> &'static str {
             "qcow2"
