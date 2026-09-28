@@ -7,6 +7,9 @@ use ttcore::model::Storage;
 #[derive(Parser, Debug)]
 #[command(name = "tt-agent", version)]
 pub struct Config {
+    /// Container runtime for this inventory; persisted after the first selection.
+    #[arg(long, env = "TT_CONTAINER_RUNTIME")]
+    pub container_runtime: Option<ttcore::engine::docker::ContainerRuntime>,
     /// Client-reachable IPv4 address advertised for VM SSH.
     #[arg(long)]
     pub ssh_public_address: Option<std::net::Ipv4Addr>,
@@ -16,6 +19,13 @@ pub struct Config {
     /// This agent namespace's address reachable from the outer namespace.
     #[arg(long, requires = "ssh_ingress_netns")]
     pub ssh_ingress_target: Option<std::net::Ipv4Addr>,
+
+    /// First TCP host port; use disjoint ranges when sharing public SSH ingress.
+    #[arg(long, default_value_t = 20000)]
+    pub port_start: u16,
+    /// Last TCP host port (inclusive).
+    #[arg(long, default_value_t = 65535)]
+    pub port_end: u16,
 
     /// Listen address for the HTTP API.
     #[arg(long, default_value = "0.0.0.0:9100")]

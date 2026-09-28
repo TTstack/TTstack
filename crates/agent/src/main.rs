@@ -72,18 +72,24 @@ async fn main() {
         std::process::exit(1);
     });
 
-    if let Some(public_address) = cfg.ssh_public_address {
-        let ingress = ssh_ingress::SshIngress {
+    rt.configure_container_runtime(cfg.container_runtime)
+        .unwrap_or_else(|e| {
+            eprintln!("Cannot bind container runtime: {e}");
+            std::process::exit(1);
+        });
+
+    let ingress = cfg
+        .ssh_public_address
+        .map(|public_address| ssh_ingress::SshIngress {
             public_address,
             namespace: cfg.ssh_ingress_netns.clone(),
             target: cfg.ssh_ingress_target,
-        };
-        ingress.validate().unwrap_or_else(|e| {
-            eprintln!("Invalid SSH ingress: {e}");
-            std::process::exit(1)
         });
-        rt.ssh_ingress = Some(ingress);
-    }
+    rt.configure_network(ingress, cfg.port_start, cfg.port_end)
+        .unwrap_or_else(|e| {
+            eprintln!("Invalid agent network configuration: {e}");
+            std::process::exit(1);
+        });
 
     let info = rt.agent_info().unwrap_or_else(|e| {
         eprintln!("Failed to read agent info: {e}");

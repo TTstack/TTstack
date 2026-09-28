@@ -6,6 +6,7 @@ use std::process::Command;
 use ttcore::command::CommandExt;
 use ttcore::model::Vm;
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SshIngress {
     pub public_address: Ipv4Addr,
     pub namespace: Option<PathBuf>,

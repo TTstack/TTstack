@@ -48,13 +48,18 @@ pub trait VmEngine: Send + Sync {
 /// Create an engine instance for the given [`Engine`] kind.
 ///
 /// Returns an error for unsupported platforms.
-pub fn create_engine(kind: Engine) -> Result<Box<dyn VmEngine>> {
+pub fn create_engine(
+    kind: Engine,
+    container_runtime: Option<docker::ContainerRuntime>,
+) -> Result<Box<dyn VmEngine>> {
     Ok(match kind {
         #[cfg(target_os = "linux")]
         Engine::Qemu => Box::new(qemu::QemuEngine::new()),
         #[cfg(target_os = "linux")]
         Engine::Firecracker => Box::new(firecracker::FirecrackerEngine::new()),
-        Engine::Docker => Box::new(docker::DockerEngine::new()),
+        Engine::Docker => Box::new(docker::DockerEngine::new(
+            container_runtime.ok_or_else(|| eg!("container runtime is not bound"))?,
+        )),
         #[allow(unreachable_patterns)]
         other => {
             return Err(eg!(format!(

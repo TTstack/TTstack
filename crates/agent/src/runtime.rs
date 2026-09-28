@@ -1,9 +1,10 @@
 //! Durable VM lifecycle management for one host.
 use ruc::*;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::collections::{BTreeMap, HashSet};
 use ttcore::api::{AgentInfo, CreateVmReq};
 use ttcore::engine;
+use ttcore::engine::docker::ContainerRuntime;
 use ttcore::model::*;
 use ttcore::net;
 use ttcore::storage::{self, ImageStore};
@@ -18,8 +19,11 @@ pub struct Runtime {
     image_dir: String,
     runtime_dir: String,
     network_ready: bool,
+    container_runtime: Option<ContainerRuntime>,
+    port_range: std::ops::RangeInclusive<u16>,
+    network_binding_error: Option<String>,
     pub resource: Resource,
-    engine_factory: fn(Engine) -> Result<Box<dyn engine::VmEngine>>,
+    engine_factory: fn(Engine, Option<ContainerRuntime>) -> Result<Box<dyn engine::VmEngine>>,
 }
 
 impl Runtime {
@@ -44,7 +48,7 @@ impl Runtime {
             ssh_ingress: None,
             host_id,
             db,
-            engines: detect_engines(),
+            engines: detect_engines(None),
             store: storage::create_store(storage),
             storage,
             image_dir,
@@ -52,6 +56,9 @@ impl Runtime {
             resource,
             engine_factory: engine::create_engine,
             network_ready: false,
+            container_runtime: None,
+            port_range: 20000..=65535,
+            network_binding_error: None,
         };
         // Reconcile retries network recovery; a transient firewall error must not
         // prevent the management listener from starting.
@@ -68,7 +75,100 @@ impl Runtime {
         Ok(rt)
     }
 
+    pub fn configure_container_runtime(
+        &mut self,
+        requested: Option<ContainerRuntime>,
+    ) -> Result<()> {
+        self.container_runtime = bind_container_runtime(&self.db, requested, || {
+            [ContainerRuntime::Docker, ContainerRuntime::Podman]
+                .into_iter()
+                .find(|runtime| runtime.available())
+        })?;
+        self.engines.retain(|engine| *engine != Engine::Docker);
+        if self
+            .container_runtime
+            .is_some_and(ContainerRuntime::available)
+        {
+            self.engines.push(Engine::Docker);
+        }
+        Ok(())
+    }
+
+    pub fn configure_network(
+        &mut self,
+        ingress: Option<crate::ssh_ingress::SshIngress>,
+        start: u16,
+        end: u16,
+    ) -> Result<()> {
+        if start == 0 || start > end {
+            return Err(eg!(
+                "host port range must satisfy 1 <= port-start <= port-end <= 65535"
+            ));
+        }
+        if let Some(settings) = &ingress {
+            settings.validate()?;
+        }
+        let requested =
+            serde_json::json!({"ingress": ingress, "port_start": start, "port_end": end});
+        let stored: Option<String> = self
+            .db
+            .query_row(
+                "SELECT value FROM _meta WHERE key='network_config'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .c(d!("read network binding"))?;
+        let occupied: bool = self
+            .db
+            .query_row("SELECT EXISTS(SELECT 1 FROM vms)", [], |row| row.get(0))
+            .c(d!("check network inventory"))?;
+        if let Some(saved) = stored {
+            let saved: serde_json::Value =
+                serde_json::from_str(&saved).c(d!("decode network binding"))?;
+            if occupied && saved != requested {
+                return Err(eg!(
+                    "cannot change SSH ingress or host port range while VM records remain; restore the saved configuration and delete those VMs first"
+                ));
+            }
+        } else if occupied {
+            let (vms, corrupt) = load_recoverable_vms(&self.db)?;
+            if corrupt {
+                self.network_binding_error = Some("network binding deferred: inspect unreadable VM records and restart with the original ingress configuration; creation, start and SSH VM deletion remain disabled".into());
+                return Ok(());
+            }
+            let public = ingress
+                .as_ref()
+                .map(|i| i.public_address.to_string())
+                .unwrap_or_default();
+            if vms.iter().any(|vm| {
+                vm.ssh.as_ref().is_some_and(|ssh| ssh.host != public)
+                    || vm
+                        .port_map
+                        .values()
+                        .any(|port| !(start..=end).contains(port))
+            }) {
+                return Err(eg!(
+                    "cannot adopt network configuration; restore the original SSH ingress and a range containing existing ports, and inspect unreadable records"
+                ));
+            }
+        }
+        self.db
+            .execute(
+                "INSERT OR REPLACE INTO _meta (key,value) VALUES ('network_config',?1)",
+                [requested.to_string()],
+            )
+            .c(d!("persist network binding"))?;
+        self.ssh_ingress = ingress;
+        self.port_range = start..=end;
+        self.network_binding_error = None;
+        Ok(())
+    }
+
     pub fn create_vm(&mut self, req: &CreateVmReq) -> Result<Vm> {
+        if let Some(error) = &self.network_binding_error {
+            return Err(eg!(error.clone()));
+        }
         validate_name(&req.vm_id, "vm_id").map_err(|e| eg!(e))?;
         validate_name(&req.env_id, "env_id").map_err(|e| eg!(e))?;
         validate_image(&req.image, req.engine).map_err(|e| eg!(e))?;
@@ -197,7 +297,7 @@ impl Runtime {
         if (req.engine == Engine::Qemu || options.ssh.is_some()) && !ports.contains(&22) {
             ports.push(22);
         }
-        let port_map = allocate_ports(&vms, &ports, |p| {
+        let port_map = allocate_ports(&vms, &ports, self.port_range.clone(), |p| {
             std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, p)).is_ok()
         })?;
         let mut vm = Vm {
@@ -278,7 +378,7 @@ impl Runtime {
                 self.restore_network(&vm)?;
             }
             let path = self.image_path(&vm)?;
-            (self.engine_factory)(vm.engine)?.create(
+            (self.engine_factory)(vm.engine, self.container_runtime)?.create(
                 &vm,
                 &path,
                 self.store.disk_format(),
@@ -299,6 +399,9 @@ impl Runtime {
     }
 
     fn ensure_network(&mut self) -> Result<()> {
+        if let Some(error) = &self.network_binding_error {
+            return Err(eg!(error.clone()));
+        }
         #[cfg(target_os = "linux")]
         if !self.network_ready {
             net::setup_bridge()?;
@@ -320,6 +423,9 @@ impl Runtime {
         }
     }
     fn restore_network(&self, vm: &Vm) -> Result<()> {
+        if let Some(error) = &self.network_binding_error {
+            return Err(eg!(error.clone()));
+        }
         #[cfg(target_os = "linux")]
         if vm.engine != Engine::Docker {
             #[cfg(target_os = "linux")]
@@ -356,7 +462,7 @@ impl Runtime {
         if matches!(vm.state, VmState::Creating | VmState::Deleting) {
             return Err(eg!("VM is {}", vm.state));
         }
-        match (self.engine_factory)(vm.engine)?.stop(&vm) {
+        match (self.engine_factory)(vm.engine, self.container_runtime)?.stop(&vm) {
             Ok(()) => {
                 vm.state = VmState::Stopped;
                 if let Some(ssh) = &mut vm.ssh {
@@ -376,6 +482,9 @@ impl Runtime {
     }
 
     pub fn start_vm(&mut self, id: &str) -> Result<()> {
+        if let Some(error) = &self.network_binding_error {
+            return Err(eg!(error.clone()));
+        }
         let mut vm = load_vm(&self.db, id)?.ok_or_else(|| eg!(format!("VM not found: {id}")))?;
         if vm.pending_resources.is_some() {
             return Err(eg!(
@@ -404,7 +513,7 @@ impl Runtime {
                 self.ensure_network()?;
             }
             self.restore_network(&vm)?;
-            let eng = (self.engine_factory)(vm.engine)?;
+            let eng = (self.engine_factory)(vm.engine, self.container_runtime)?;
             if previous == VmState::Stopped
                 && matches!(vm.engine, Engine::Qemu | Engine::Firecracker)
             {
@@ -445,7 +554,8 @@ impl Runtime {
             return Err(eg!("cpu, memory and root disk must be > 0"));
         }
         if vm.state != VmState::Stopped
-            || (self.engine_factory)(vm.engine)?.state(&vm)? != VmState::Stopped
+            || (self.engine_factory)(vm.engine, self.container_runtime)?.state(&vm)?
+                != VmState::Stopped
         {
             return Err(eg!("resource updates require a confirmed stopped VM"));
         }
@@ -526,10 +636,15 @@ impl Runtime {
         let Some(mut vm) = load_vm(&self.db, id)? else {
             return Ok(());
         };
+        if vm.ssh.is_some()
+            && let Some(error) = &self.network_binding_error
+        {
+            return Err(eg!(error.clone()));
+        }
         vm.state = VmState::Deleting;
         save_vm(&self.db, &vm)?;
         // Disk deletion is safe only after process termination is confirmed.
-        let engine = (self.engine_factory)(vm.engine)?;
+        let engine = (self.engine_factory)(vm.engine, self.container_runtime)?;
         if let Err(e) = engine.stop(&vm) {
             vm.error = Some(e.to_string());
             save_vm(&self.db, &vm)?;
@@ -581,7 +696,9 @@ impl Runtime {
         }
         let needs_recovery = vm.error.is_some();
         let was_running = matches!(vm.state, VmState::Running | VmState::Paused);
-        match (self.engine_factory)(vm.engine).and_then(|eng| eng.state(&vm)) {
+        match (self.engine_factory)(vm.engine, self.container_runtime)
+            .and_then(|eng| eng.state(&vm))
+        {
             Ok(actual) => {
                 if vm
                     .error
@@ -634,11 +751,13 @@ impl Runtime {
             }
         }
         if let Some(ssh) = &mut vm.ssh {
-            ssh.host = self
-                .ssh_ingress
-                .as_ref()
-                .map(|c| c.public_address.to_string())
-                .unwrap_or_default();
+            if self.network_binding_error.is_none() {
+                ssh.host = self
+                    .ssh_ingress
+                    .as_ref()
+                    .map(|c| c.public_address.to_string())
+                    .unwrap_or_default();
+            }
             let reachable = vm.state == VmState::Running && ttcore::ssh::ready(&vm.ip);
             if reachable && !ssh.initialized {
                 ssh.initialized = ttcore::ssh::initial_identity_ready(&vm.ip, &ssh.host_key);
@@ -674,9 +793,16 @@ impl Runtime {
         load_all_vms(&self.db)
     }
     pub fn agent_info(&self) -> Result<AgentInfo> {
+        let mut warnings: Vec<_> = self.network_binding_error.iter().cloned().collect();
+        let (vms, corrupt) = load_recoverable_vms(&self.db)?;
+        if self.container_runtime.is_none()
+            && (corrupt || vms.iter().any(|vm| vm.engine == Engine::Docker))
+        {
+            warnings.push("container runtime is unbound; verify the original runtime and set --container-runtime docker or podman (or TT_CONTAINER_RUNTIME), then restart; container mutations are disabled".into());
+        }
         Ok(AgentInfo {
             vms: None,
-            warnings: vec![],
+            warnings,
             image_sizes: Default::default(),
             capabilities: detect_capabilities(&self.engines, self.storage),
             host_id: self.host_id.clone(),
@@ -729,13 +855,14 @@ pub fn read_recovery_snapshot(db_path: &str) -> Result<(Vec<Vm>, bool)> {
 fn allocate_ports(
     vms: &[Vm],
     ports: &[u16],
+    range: std::ops::RangeInclusive<u16>,
     available: impl Fn(u16) -> bool,
 ) -> Result<BTreeMap<u16, u16>> {
     let used: HashSet<u16> = vms
         .iter()
         .flat_map(|v| v.port_map.values().copied())
         .collect();
-    let mut free = (20000..=65535u16).filter(|p| !used.contains(p) && available(*p));
+    let mut free = range.filter(|p| !used.contains(p) && available(*p));
     let mut result = BTreeMap::new();
     for &guest in ports {
         if result.contains_key(&guest) {
@@ -751,8 +878,49 @@ fn allocate_ports(
 
 // ── SQLite Schema & Operations ──────────────────────────────────────
 
+fn bind_container_runtime(
+    db: &Connection,
+    requested: Option<ContainerRuntime>,
+    detect: impl FnOnce() -> Option<ContainerRuntime>,
+) -> Result<Option<ContainerRuntime>> {
+    let stored: Option<String> = db
+        .query_row(
+            "SELECT value FROM _meta WHERE key='container_runtime'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .c(d!("read container runtime binding"))?;
+    let bound = stored
+        .as_deref()
+        .map(str::parse::<ContainerRuntime>)
+        .transpose()
+        .map_err(|e| eg!(e))?;
+    let (vms, corrupt) = load_recoverable_vms(db)?;
+    let occupied = corrupt || vms.iter().any(|vm| vm.engine == Engine::Docker);
+    let selected = match (bound, requested) {
+        (Some(old), Some(new)) if old != new && occupied => {
+            return Err(eg!(
+                "cannot change the container runtime while container or unreadable records remain; retain {} and drain them first",
+                old.command()
+            ));
+        }
+        (_, Some(runtime)) | (Some(runtime), None) => Some(runtime),
+        (None, None) if occupied => None,
+        (None, None) => detect(),
+    };
+    if let Some(runtime) = selected {
+        db.execute(
+            "INSERT OR REPLACE INTO _meta (key,value) VALUES ('container_runtime',?1)",
+            [runtime.command()],
+        )
+        .c(d!("persist container runtime binding"))?;
+    }
+    Ok(selected)
+}
+
 /// Current agent schema version.
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 
 fn init_db(db: &Connection) -> Result<()> {
     db.execute_batch(
@@ -786,6 +954,7 @@ fn init_db(db: &Connection) -> Result<()> {
     }
 
     // v3 adds durable pending resource updates; older binaries must not ignore them.
+    // v5 binds the container runtime and network configuration to this inventory.
     // v2 adds lifecycle fields in serialized records, decoded with serde defaults.
     // The version guard prevents older binaries from opening this state.
 
@@ -954,7 +1123,7 @@ fn probe(cmd: &str, args: &[&str]) -> bool {
         .output_timeout(std::time::Duration::from_secs(5))
         .is_ok_and(|o| o.status.success())
 }
-fn detect_engines() -> Vec<Engine> {
+fn detect_engines(container_runtime: Option<ContainerRuntime>) -> Vec<Engine> {
     let mut engines = Vec::new();
     #[cfg(target_os = "linux")]
     {
@@ -970,7 +1139,7 @@ fn detect_engines() -> Vec<Engine> {
             engines.push(Engine::Firecracker);
         }
     }
-    if probe("docker", &["--version"]) || probe("podman", &["--version"]) {
+    if container_runtime.is_some_and(ContainerRuntime::available) {
         engines.push(Engine::Docker);
     }
     engines
@@ -1157,6 +1326,56 @@ mod tests {
         assert_eq!(ver, SCHEMA_VERSION);
     }
 
+    #[test]
+    fn container_runtime_binding_survives_reopen_and_refuses_implicit_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.db");
+        let db = Connection::open(&path).unwrap();
+        init_db(&db).unwrap();
+        let mut vm = make_vm("container", VmState::Running);
+        vm.engine = Engine::Docker;
+        save_vm(&db, &vm).unwrap();
+        assert_eq!(
+            bind_container_runtime(&db, None, || panic!("must not guess legacy ownership"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            bind_container_runtime(&db, Some(ContainerRuntime::Podman), || panic!(
+                "must not detect"
+            ))
+            .unwrap(),
+            Some(ContainerRuntime::Podman)
+        );
+        drop(db);
+        let db = Connection::open(path).unwrap();
+        init_db(&db).unwrap();
+        assert_eq!(
+            bind_container_runtime(&db, None, || Some(ContainerRuntime::Docker)).unwrap(),
+            Some(ContainerRuntime::Podman)
+        );
+        assert!(bind_container_runtime(&db, Some(ContainerRuntime::Docker), || None).is_err());
+        assert!(load_vm(&db, &vm.id).unwrap().is_some());
+        assert_eq!(
+            bind_container_runtime(&db, None, || None).unwrap(),
+            Some(ContainerRuntime::Podman)
+        );
+        delete_vm(&db, &vm.id).unwrap();
+        assert_eq!(
+            bind_container_runtime(&db, Some(ContainerRuntime::Docker), || None).unwrap(),
+            Some(ContainerRuntime::Docker)
+        );
+        db.execute("DELETE FROM _meta WHERE key='container_runtime'", [])
+            .unwrap();
+        assert_eq!(
+            bind_container_runtime(&db, None, || Some(ContainerRuntime::Podman)).unwrap(),
+            Some(ContainerRuntime::Podman)
+        );
+        db.execute("INSERT INTO vms VALUES ('broken','not-json')", [])
+            .unwrap();
+        assert!(bind_container_runtime(&db, Some(ContainerRuntime::Docker), || None).is_err());
+    }
+
     // ── resolve_host_id ────────────────────────────────────────────
 
     #[test]
@@ -1244,7 +1463,10 @@ mod lifecycle_tests {
                 disk_total: 100000,
                 ..Default::default()
             },
-            engine_factory: |_| Ok(Box::new(FakeEngine)),
+            engine_factory: |_, _| Ok(Box::new(FakeEngine)),
+            container_runtime: None,
+            port_range: 20000..=65535,
+            network_binding_error: None,
             network_ready: false,
         }
     }
@@ -1585,6 +1807,102 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn network_binding_prevents_losing_owned_ingress_during_reconfiguration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.db");
+        let ingress = crate::ssh_ingress::SshIngress {
+            public_address: "192.0.2.1".parse().unwrap(),
+            namespace: Some("/proc/self/ns/net".into()),
+            target: Some("192.0.2.2".parse().unwrap()),
+        };
+        let mut rt = runtime(Connection::open(&path).unwrap());
+        rt.configure_network(Some(ingress.clone()), 21000, 21999)
+            .unwrap();
+        save_vm(&rt.db, &vm("retained", "offline", VmState::Stopped)).unwrap();
+        drop(rt);
+        let mut rt = runtime(Connection::open(&path).unwrap());
+        rt.configure_network(Some(ingress.clone()), 21000, 21999)
+            .unwrap();
+        assert!(rt.configure_network(None, 21000, 21999).is_err());
+        assert!(
+            rt.configure_network(Some(ingress.clone()), 22000, 22999)
+                .is_err()
+        );
+        let changed = crate::ssh_ingress::SshIngress {
+            target: Some("192.0.2.3".parse().unwrap()),
+            ..ingress.clone()
+        };
+        assert!(rt.configure_network(Some(changed), 21000, 21999).is_err());
+        assert_eq!(rt.ssh_ingress, Some(ingress.clone()));
+        delete_vm(&rt.db, "retained").unwrap();
+        rt.db
+            .execute("INSERT INTO vms VALUES ('broken','not-json')", [])
+            .unwrap();
+        assert!(rt.configure_network(None, 21000, 21999).is_err());
+        delete_vm(&rt.db, "broken").unwrap();
+        rt.configure_network(None, 22000, 22999).unwrap();
+        assert!(rt.configure_network(None, 0, 10).is_err());
+        assert!(rt.configure_network(None, 22000, 21999).is_err());
+        let first = allocate_ports(&[], &[22, 80], 21000..=21001, |_| true).unwrap();
+        let second = allocate_ports(&[], &[22, 80], 22000..=22001, |_| true).unwrap();
+        assert_eq!(
+            first.values().copied().collect::<Vec<_>>(),
+            vec![21000, 21001]
+        );
+        assert_eq!(
+            second.values().copied().collect::<Vec<_>>(),
+            vec![22000, 22001]
+        );
+        assert!(allocate_ports(&[], &[22, 80, 443], 21000..=21001, |_| true).is_err());
+    }
+
+    #[test]
+    fn corrupt_legacy_inventory_defers_bindings_without_blocking_healthy_stop() {
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        rt.db
+            .execute("INSERT INTO vms VALUES ('broken','not-json')", [])
+            .unwrap();
+        let mut healthy = vm("healthy", "offline", VmState::Running);
+        healthy.engine = Engine::Qemu;
+        save_vm(&rt.db, &healthy).unwrap();
+        assert_eq!(
+            bind_container_runtime(&rt.db, None, || panic!("must not detect")).unwrap(),
+            None
+        );
+        rt.configure_network(None, 20000, 65535).unwrap();
+        assert!(rt.network_binding_error.is_some());
+        assert!(rt.ensure_network().is_err());
+        assert_eq!(rt.db.query_row("SELECT COUNT(*) FROM _meta WHERE key IN ('network_config','container_runtime')", [], |r| r.get::<_, u32>(0)).unwrap(), 0);
+        rt.stop_vm(&healthy.id).unwrap();
+        assert_eq!(
+            load_vm(&rt.db, &healthy.id).unwrap().unwrap().state,
+            VmState::Stopped
+        );
+        assert!(rt.start_vm(&healthy.id).is_err());
+        healthy.ssh = Some(ttcore::ssh::SshInfo {
+            user: "root".into(),
+            sudo: false,
+            host: String::new(),
+            port: 20000,
+            host_key: "public".into(),
+            ready: false,
+            checked_at: 0,
+            initialized: false,
+        });
+        save_vm(&rt.db, &healthy).unwrap();
+        assert!(rt.destroy_vm(&healthy.id).is_err());
+        assert!(load_vm(&rt.db, &healthy.id).unwrap().is_some());
+        delete_vm(&rt.db, "broken").unwrap();
+        rt.configure_network(None, 20000, 65535).unwrap();
+        assert!(rt.network_binding_error.is_none());
+        rt.db
+            .execute("INSERT INTO vms VALUES ('broken','not-json')", [])
+            .unwrap();
+        rt.configure_network(None, 20000, 65535).unwrap();
+        assert!(rt.network_binding_error.is_none());
+    }
+
+    #[test]
     fn late_readiness_clears_errors_without_a_restart() {
         let mut rt = runtime(Connection::open_in_memory().unwrap());
         let mut record = vm("late", "live", VmState::Failed);
@@ -1670,13 +1988,21 @@ mod lifecycle_tests {
     fn ports_reuse_holes_skip_conflicts_and_fail_explicitly_when_exhausted() {
         let mut first = vm("first", "live", VmState::Running);
         first.port_map.insert(22, 20000);
-        let next = allocate_ports(&[first], &[22, 80, 22], |p| p != 20001).unwrap();
+        let next = allocate_ports(&[first], &[22, 80, 22], 20000..=65535, |p| p != 20001).unwrap();
         assert_eq!(next[&22], 20002);
         assert_eq!(next[&80], 20003);
-        assert_eq!(allocate_ports(&[], &[22], |_| true).unwrap()[&22], 20000);
-        assert!(allocate_ports(&[], &[22], |_| false).is_err());
+        assert_eq!(
+            allocate_ports(&[], &[22], 20000..=65535, |_| true).unwrap()[&22],
+            20000
+        );
+        assert!(allocate_ports(&[], &[22], 20000..=65535, |_| false).is_err());
         let many = (1..=1000).collect::<Vec<_>>();
-        assert_eq!(allocate_ports(&[], &many, |_| true).unwrap().len(), 1000);
+        assert_eq!(
+            allocate_ports(&[], &many, 20000..=65535, |_| true)
+                .unwrap()
+                .len(),
+            1000
+        );
     }
     #[test]
     fn snapshot_is_readable_while_mutation_lock_is_held() {
@@ -1725,7 +2051,7 @@ mod lifecycle_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agent.db");
         let mut rt = runtime(Connection::open(&path).unwrap());
-        rt.engine_factory = |_| Ok(Box::new(GatedEngine));
+        rt.engine_factory = |_, _| Ok(Box::new(GatedEngine));
         for id in ["first", "second"] {
             save_vm(
                 &rt.db,

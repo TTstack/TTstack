@@ -21,14 +21,14 @@ Linux agents run as root. Install only the dependencies needed for your engine:
 | QEMU/KVM | Working `/dev/kvm`, `qemu-system-x86_64`, `qemu-img`, `genisoimage` or `mkisofs` |
 | QEMU and Firecracker networking | Full `iproute2`, `nftables`, kernel TUN/TAP support; QEMU also uses `vhost_net` |
 | Firecracker | Working `/dev/kvm`, matching `firecracker` and `jailer`, cgroup v2 with CPU/memory/PID controllers, `curl`, compatible kernel/rootfs; `mkfs.ext4` for config drives; `e2fsck` and `resize2fs` for rootfs growth (all from `e2fsprogs`) |
-| Docker | Working Docker daemon or Podman runtime; the agent selects Docker when `docker --version` succeeds |
+| Docker | Working Docker daemon or Podman runtime; selection is bound to the agent inventory |
 | QEMU/Firecracker image recipes | `curl`; Firecracker additionally uses `dd`, `mkfs.ext4`, loop mount/unmount and `tar` |
 | Zvol storage | Existing ZFS pool/datasets and `zfs`; provision these manually |
 
 Docker uses its own networking and does not need TTstack's TAP/nftables setup.
 Engine detection is not a complete health check: permissions, daemon availability
-and guest compatibility still matter. A successful `docker --version` selects
-Docker even if its daemon is unavailable; it does not then fall back to Podman.
+and guest compatibility still matter. Initial automatic selection checks the
+executable, not daemon health. A bound runtime never falls back to another store.
 
 New Firecracker processes always run through jailer; there is no silent unjailed
 fallback. Existing unjailed processes remain queryable/stoppable during upgrade;
@@ -213,8 +213,31 @@ its address exactly matches the configured one.
 
 ### Resource-update schema gate
 
-Controller and agent schema v4 retain interrupted offline resource updates and
-initial SSH state. See [SSH deployment requirements](ssh.md#reachable-endpoint). Back
-up both databases before upgrade and deploy matching binaries. File rollback to
-an older binary cannot open migrated state; do not restore stale metadata over disks
-that have grown. See [offline resource recovery](rest-api.md#offline-resource-updates).
+Controller schema v4 and agent schema v5 retain interrupted offline resource
+updates and initial SSH state. Agent v5 also binds the container runtime and
+[SSH ingress/port range](ssh.md#reachable-endpoint) to the inventory, so older
+agents cannot silently ignore resource ownership. Back up both databases before
+upgrade and deploy matching binaries. Older binaries cannot open newer state;
+do not restore stale metadata over disks that have grown.
+
+An older inventory with container records but no runtime binding requires one
+explicit selection of its **original** runtime: `--container-runtime docker` or
+`--container-runtime podman`, or the environment variable `TT_CONTAINER_RUNTIME`.
+Distributed deployment accepts `container_runtime = "docker"` or `"podman"` in
+each agent section. Verify the original store before selecting it; installation
+order is not evidence of ownership. Until selected, the API remains available
+with a warning and container mutations are disabled. The selection is then
+persisted. A failed or missing runtime retains records and never falls back to
+another store.
+
+On the first v5 upgrade, retain the original SSH ingress namespace/target and a
+port range containing existing mappings. Older records lack namespace/target
+metadata, so adoption cannot reconstruct a previously changed configuration.
+Once bound, configuration changes require draining the agent inventory. See
+[offline resource recovery](rest-api.md#offline-resource-updates).
+
+Unreadable legacy VM records defer initial network binding without hiding healthy
+records. Inspection and stop remain available; creation, start, network restoration
+and deletion of SSH-enabled VMs wait until the records are repaired and the agent
+restarts with its original configuration. An existing valid binding continues to
+protect healthy VM operations when an unrelated record becomes unreadable.

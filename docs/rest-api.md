@@ -101,8 +101,8 @@ can have an unknown outcome: inspect the VM, including pending resources and err
 before retrying. Do not delete the environment to recover a resource update.
 
 Disk growth is not a promise of zero storage risk or a backup facility. Maintain
-backups independently. Controller and agent use schema v4 so older binaries cannot
-ignore pending reservations; upgrade both together.
+backups independently. Controller schema v4 and agent schema v5 prevent older
+binaries from ignoring newer persistent contracts; upgrade both together.
 
 ## Environment requests
 
@@ -134,7 +134,7 @@ Each `VmSpec` accepts:
 CLI engine aliases such as `kvm`, `fc` and `podman` are not JSON enum values.
 `ssh` optionally selects `{ "user": "user", "sudo": true }` for initial provisioning.
 VM responses include optional `ssh` endpoint/readiness metadata; see the
-[SSH contract](ssh.md) for keys, images, ingress and schema v4.
+[SSH contract](ssh.md) for keys, images, ingress and schema compatibility.
 
 SSH keys are complete public-key strings in JSON,
 not local file paths. If an environment mixes engines, use per-VM keys only for

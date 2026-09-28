@@ -94,9 +94,14 @@ verification or a reproducible version lock for rolling images.
 
 ## Docker / Podman: application containers
 
-Container images live in the runtime's own image store. The agent uses Docker if
-`docker --version` succeeds, otherwise Podman; use that same runtime/store to prepare
-images. Rootless and root-owned image stores are distinct.
+Container images live in the runtime's own image store. An empty inventory selects
+Docker when available, otherwise Podman, and persists that selection. Set
+`--container-runtime docker|podman` or `TT_CONTAINER_RUNTIME` to choose explicitly.
+Installing another runtime or losing the selected executable never switches stores.
+Changing the binding requires an inventory without container or unreadable records.
+Use the bound runtime/store to prepare images; rootless and root-owned stores are
+distinct. See [upgrade migration](deployment.md#resource-update-schema-gate) for
+older inventories without a recorded binding.
 
 A minimal web-container workflow on a host with a working Docker runtime is:
 

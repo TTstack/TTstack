@@ -45,7 +45,18 @@ identified by its VM UUID, and removes that rule on VM deletion. It does not exp
 the full mapped-port pool or application/management ports. Operators must provide
 routing, forwarding and firewall permission for that path, reserve a nonoverlapping
 mapped-port range per agent sharing a public address, and test it from an external
-client. Public ingress currently supports IPv4. Caddy HTTP routes do not carry SSH.
+client. Configure that range with `--port-start` and `--port-end` (inclusive;
+defaults 20000 and 65535). Port allocation still checks only the agent's own
+inventory and local namespace, so disjoint ranges must be assigned by the operator.
+Public ingress currently supports IPv4. Caddy HTTP routes do not carry SSH.
+
+The agent persists the ingress configuration and port range before creating any
+VM. Changing or removing that configuration while VM records remain is rejected:
+restore the original settings, delete the owned VMs and then reconfigure. This
+keeps the location needed to remove each VM's outer rule. For an upgrade from
+older state, retain the original namespace/target on first start. Historical orphan
+rules cannot be reliably attributed from old metadata; inspect and remove only
+the exact VM UUID rules in their original namespace, never flush the shared table.
 
 VM `ssh` metadata contains `user`, boolean `sudo`, `host`, `port`, initial public
 `host_key`, `ready`, Unix-seconds `checked_at`, and `initialized`. Missing public
@@ -57,9 +68,10 @@ reachability from the agent, not external routing or initial-key validity foreve
 The advertised host key is the initial identity, not a key-rotation registry.
 
 Agents require ssh-keygen and ssh-keyscan to advertise `ssh_bootstrap`.
-Controller and agent schema v4 preserve SSH options, host identity and bootstrap
-observation. Upgrade them together and back up state first; older binaries reject
-v4 state. Existing VMs without SSH options are not rekeyed or reimaged.
+Controller schema v4 and agent schema v5 preserve SSH options, host identity and
+bootstrap observation; v5 additionally protects agent runtime/network bindings.
+Upgrade them together and back up state first; older agents reject v5 state.
+Existing VMs without SSH options are not rekeyed or reimaged.
 
 See [live validation](validation/expert-ssh-2026-09-28.md) and the
 [API reference](rest-api.md). Restart diagnostics and automatic recovery policy

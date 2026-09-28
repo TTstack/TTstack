@@ -27,6 +27,7 @@ host = "10.0.0.2"
 # ssh_port = 22
 # listen = "0.0.0.0:9100"
 # host_id = "node-02"            # Omit to generate/persist an ID on first start
+# container_runtime = "docker"  # Or "podman"; required once for legacy container records
 # release_dir = "./target/release-musl" # LOCAL override; build for this host
 
 # Scheduling budgets, not measured usage. Leave capacity for the host OS.

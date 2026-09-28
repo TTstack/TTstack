@@ -147,6 +147,8 @@ pub struct AgentConfig {
     #[serde(default = "default_disk_total")]
     pub disk_total: String,
     pub host_id: Option<String>,
+    /// Bind this agent's inventory to docker or podman, including legacy migration.
+    pub container_runtime: Option<String>,
     /// Override release_dir for this agent (e.g. for musl/cross-compiled binaries).
     pub release_dir: Option<String>,
 }
@@ -253,6 +255,11 @@ fn validate_config(cfg: &DeployConfig) -> Result<()> {
         }
         if let Some(id) = &agent.host_id {
             ttcore::model::validate_name(id, "host_id").map_err(|e| eg!(e))?;
+        }
+        if let Some(runtime) = &agent.container_runtime {
+            runtime
+                .parse::<ttcore::engine::docker::ContainerRuntime>()
+                .map_err(|e| eg!(e))?;
         }
     }
     Ok(())
@@ -1037,6 +1044,9 @@ pub async fn deploy_distributed(config_path: &str) -> Result<()> {
         );
         if let Some(hid) = &agent.host_id {
             exec_cmd.push_str(&format!(" --host-id {hid}"));
+        }
+        if let Some(runtime) = &agent.container_runtime {
+            exec_cmd.push_str(&format!(" --container-runtime {runtime}"));
         }
         let env_path = format!("{prefix}/etc/tt-agent.env");
 
