@@ -66,6 +66,7 @@ pub fn place_vm(
         (!spec.isolated_network || has("isolated_network"))
             && (spec.ssh.is_none() || has("ssh_bootstrap"))
             && (spec.guest_config.is_empty() || has("guest_config"))
+            && (spec.engine != Engine::Bhyve || !spec.deny_outgoing || has("bhyve_deny_outgoing"))
             && (spec.engine != Engine::Firecracker || has("firecracker_jailer"))
             && (spec.engine != Engine::Firecracker
                 || spec.disk.is_none()
@@ -253,6 +254,21 @@ mod tests {
             deny_outgoing: false,
             ssh_keys: vec![],
         }
+    }
+
+    #[test]
+    fn bhyve_egress_restriction_requires_the_agent_capability() {
+        let mut host = make_host("freebsd", 4, 4096, vec![Engine::Bhyve]);
+        let mut spec = make_spec();
+        spec.engine = Engine::Bhyve;
+        spec.disk = None;
+        spec.deny_outgoing = true;
+        assert!(place_vm(std::slice::from_ref(&host), &spec, &HashMap::new()).is_err());
+        host.capabilities.push("bhyve_deny_outgoing".into());
+        assert!(place_vm(std::slice::from_ref(&host), &spec, &HashMap::new()).is_ok());
+        spec.deny_outgoing = false;
+        host.capabilities.clear();
+        assert!(place_vm(&[host], &spec, &HashMap::new()).is_ok());
     }
 
     #[test]

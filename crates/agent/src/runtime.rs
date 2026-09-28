@@ -404,9 +404,9 @@ impl Runtime {
     fn restore_network(&self, vm: &Vm) -> Result<()> {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if vm.engine != Engine::Docker {
-            if matches!(vm.engine, Engine::Bhyve | Engine::Jail) && vm.options.deny_outgoing {
+            if vm.engine == Engine::Jail && vm.options.deny_outgoing {
                 return Err(eg!(
-                    "FreeBSD engines do not support deny_outgoing; retained guest requires operator review"
+                    "Jail does not support deny_outgoing; retained guest requires operator review"
                 ));
             }
             #[cfg(target_os = "linux")]
@@ -1150,6 +1150,9 @@ fn detect_engines(container_runtime: Option<ContainerRuntime>) -> Vec<Engine> {
 fn detect_capabilities(engines: &[Engine], storage: Storage) -> Vec<String> {
     use ttcore::command::CommandExt;
     let mut caps = Vec::new();
+    if cfg!(target_os = "freebsd") && engines.contains(&Engine::Bhyve) {
+        caps.push("bhyve_deny_outgoing".into());
+    }
     if cfg!(target_os = "linux") {
         if (engines.contains(&Engine::Qemu) || engines.contains(&Engine::Firecracker))
             && ["ssh-keygen", "ssh-keyscan"].iter().all(|tool| {

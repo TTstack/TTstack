@@ -32,7 +32,8 @@ a recipe's presence do not establish guest boot or application readiness.
 
 The `bhyve` and `jail` engines remain experimental. Native binaries and manual
 service/network setup are required; automated deployment and primary CI remain
-Linux-only. The [dated FreeBSD report](validation/freebsd-validation-2026-09-28.md)
+Linux-only. Live FreeBSD validation covers **FreeBSD 15.1-RELEASE-p3 (amd64) only**;
+other FreeBSD versions have not been live-tested. The [dated FreeBSD report](validation/freebsd-validation-2026-09-28.md)
 records the exact tested revision and scope.
 
 - Bhyve uses `bhyveload`, `bhyve`, `bhyvectl` and `/dev/vmmctl`. Supply a raw disk
@@ -50,9 +51,10 @@ records the exact tested revision and scope.
   paths must be UTF-8 without whitespace.
 - Jails share the agent's IP stack, receive an alias on `tt0`, and run their rc
   scripts. Public keys enable root key authentication; the built-in recipe starts
-  sshd. This is not VNET isolation. `deny_outgoing` is rejected for both FreeBSD engines: the inherited PF
-  implementation does not provide a validated guarantee of blocked initiation
-  with working inbound replies. Existing records with that option report a recovery error.
+  sshd. This is not VNET isolation. Jail rejects `deny_outgoing`; retained Jail
+  records with that option report a recovery error. Bhyve supports this option
+  through PF, gated by the agent's `bhyve_deny_outgoing` capability. Upgrade both
+  controller and agent before requesting it.
 - Stop/start cold-boots a retained bhyve disk or Jail root. Jail stop invokes
   `rc.shutdown`; bhyve stop requests ACPI shutdown with SIGTERM and can fall back
   to SIGKILL. Deletion waits for confirmed termination, and a failed devfs
@@ -60,7 +62,8 @@ records the exact tested revision and scope.
 - Jail CPU/memory and both engines' disk usage are not enforced host limits;
   FreeBSD disk accounting is currently zero. CPU/memory reservations are used
   for placement. Jail zvol storage is rejected. Bhyve zvols accept FreeBSD
-  character devices, but this run does not validate their lifecycle.
+  character devices; see the [native zvol follow-up](validation/freebsd-zvol-validation-2026-09-28.md)
+  for clone lifecycle and retry coverage.
 - Both FreeBSD engines reject Linux guest configuration and `isolated_network`.
   Keep mutually untrusted tenants on a separately validated isolation setup.
 
@@ -70,14 +73,21 @@ in the active root ruleset, with the filter hook before broader pass rules:
 ```pf
 # Place any operator-owned outbound NAT here, before rdr rules.
 rdr-anchor "ttstack/*"
-anchor "ttstack/*" quick
+anchor "ttstack/*"
 ```
 
-Outbound NAT and external firewall policy remain operator-owned. TTstack refuses
-missing hooks and does not enable PF or replace the root ruleset. It maintains
-one child anchor per forward and a separate deny anchor per guest, preserving
-other guests' mappings on create/restart/delete. Forwarding matches destinations
-on the agent itself. Guest egress restrictions on FreeBSD remain operator-owned.
+Use the wildcard filter hook **without `quick`**; the native PF implementation
+otherwise stops visiting subsequent child anchors. TTstack checks this prerequisite
+and does not change the root ruleset. Individual guest rules use `quick`.
+Outbound NAT and the remaining firewall policy stay operator-owned.
+
+Each published TCP port has an independent translation/filter anchor. Separate
+interface-bound states cover the external and guest-facing legs, preserving
+replies to mapped connections when bhyve's deny anchor blocks new routed IPv4
+initiation before source NAT. Host-local access remains allowed. This is an
+IPv4 egress restriction, not anti-spoofing, peer or IPv6 isolation. Existing
+connections can retain their PF states. Create/restart/delete preserve sibling
+anchors; deletion removes both translation and filter rules.
 
 When the agent itself runs in a VNET jail, its parent must delegate child-jail
 creation and devfs mounting (`children.max`, `allow.mount`, `allow.mount.devfs`,

@@ -32,7 +32,8 @@ the review lens over them.
 - A stale snapshot must not place a VM; recheck between planning and mutation.
 - Host capability strings gate engine features: `isolated_network`,
   `firecracker_jailer`, `guest_config`, `firecracker_disk_resize`,
-  `firecracker_resources`, `firecracker_zvol`, `qemu_resources`, `ssh_bootstrap`. A shared API change
+  `firecracker_resources`, `firecracker_zvol`, `qemu_resources`, `ssh_bootstrap`,
+  `bhyve_deny_outgoing`. A shared API change
   that needs an agent capability requires the capability check, not an assumption.
 
 ## Networking
@@ -52,7 +53,7 @@ the review lens over them.
 - SQLite holds runtime state, and a lifetime lock keeps one writer per state directory.
   A second writer is refused, not merged.
 - `SCHEMA_VERSION` in `crates/ctl/src/db.rs` and `crates/agent/src/runtime.rs` and the
-  stored engine values (`qemu`, `firecracker`, `docker`) are compatibility gates: older
+  stored engine values (`qemu`, `firecracker`, `docker`, `bhyve`, `jail`) are compatibility gates: older
   binaries reject newer schemas, unknown stored values are rejected rather than
   remapped or deleted, and controller and agent upgrade together.
 - One corrupt row must not block unrelated recovery; strict inspection paths still

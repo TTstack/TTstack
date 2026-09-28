@@ -127,19 +127,25 @@ pub fn setup_nat() -> Result<()> {
     let info = run(&["pfctl", "-s", "info"])?;
     let nat = run(&["pfctl", "-sn"])?;
     let filter = run(&["pfctl", "-sr"])?;
-    if !info.contains("Status: Enabled")
-        || !nat
-            .lines()
-            .any(|l| l.starts_with("rdr-anchor \"ttstack/*\""))
-        || !filter
-            .lines()
-            .any(|l| l.starts_with("anchor \"ttstack/*\"") && l.contains(" quick"))
-    {
+    if !pf_hooks_ready(&info, &nat, &filter) {
         return Err(eg!(
-            "enable PF and configure rdr-anchor \"ttstack/*\" and anchor \"ttstack/*\" quick before starting guests; provision outbound NAT separately"
+            "enable PF and configure rdr-anchor \"ttstack/*\" and anchor \"ttstack/*\" without quick before starting guests; provision outbound NAT separately"
         ));
     }
     Ok(())
+}
+
+fn pf_hooks_ready(info: &str, nat: &str, filter: &str) -> bool {
+    let mut hooks = filter
+        .lines()
+        .filter(|line| line.starts_with("anchor \"ttstack/*\""))
+        .peekable();
+    info.contains("Status: Enabled")
+        && nat
+            .lines()
+            .any(|line| line.starts_with("rdr-anchor \"ttstack/*\""))
+        && hooks.peek().is_some()
+        && hooks.all(|line| !line.split_whitespace().any(|word| word == "quick"))
 }
 
 fn address_key(ip: &str) -> Result<String> {
@@ -173,7 +179,9 @@ pub fn add_port_forward(host_port: u16, ip: &str, guest_port: u16) -> Result<()>
     load_anchor(
         &format!("ttstack/forward-{key}-{host_port}"),
         &format!(
-            "rdr pass inet proto tcp from any to self port {host_port} -> {ip} port {guest_port}\n"
+            "rdr inet proto tcp from any to self port {host_port} -> {ip} port {guest_port}\n\
+             pass in quick inet proto tcp from any to {ip} port {guest_port} flags S/SA keep state (if-bound)\n\
+             pass out quick inet proto tcp from any to {ip} port {guest_port} flags S/SA keep state (if-bound)\n"
         ),
     )
 }
@@ -185,7 +193,9 @@ pub fn remove_port_forwards(ip: &str) -> Result<()> {
         .lines()
         .filter_map(|name| owned_forward_anchor(name, &prefix))
     {
-        run(&["pfctl", "-a", &format!("ttstack/{name}"), "-F", "nat"])?;
+        for kind in ["nat", "rules"] {
+            run(&["pfctl", "-a", &format!("ttstack/{name}"), "-F", kind])?;
+        }
     }
     Ok(())
 }
@@ -197,10 +207,17 @@ fn owned_forward_anchor<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
     Some(name)
 }
 
-pub fn deny_outgoing(_ip: &str) -> Result<()> {
-    Err(eg!(
-        "deny_outgoing is not supported by the FreeBSD network backend"
-    ))
+pub fn deny_outgoing(ip: &str) -> Result<()> {
+    let key = address_key(ip)?;
+    // Filter guest initiation before source NAT. Interface-bound forwarding states
+    // admit replies on the guest bridge and then on the external interface.
+    load_anchor(
+        &format!("ttstack/deny-{key}"),
+        &format!(
+            "pass in quick inet from {ip} to self keep state (if-bound)\n\
+         block return in quick inet from {ip} to any\n"
+        ),
+    )
 }
 
 pub fn allow_outgoing(ip: &str) -> Result<()> {
@@ -214,6 +231,19 @@ pub fn allow_outgoing(ip: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pf_preflight_rejects_the_quick_wildcard_that_skips_sibling_anchors() {
+        let info = "Status: Enabled for 0 days";
+        let nat = "rdr-anchor \"ttstack/*\" all";
+        let good = "anchor \"ttstack/*\" all\npass all flags S/SA keep state";
+        let old = "anchor \"ttstack/*\" quick all";
+        assert!(pf_hooks_ready(info, nat, good));
+        assert!(!pf_hooks_ready(info, nat, old));
+        assert!(!pf_hooks_ready(info, nat, &format!("{old}\n{good}")));
+        assert!(!pf_hooks_ready("Status: Disabled", nat, good));
+        assert!(!pf_hooks_ready(info, "", good));
+    }
+
     #[test]
     fn cleanup_accepts_native_qualified_names_without_matching_other_guests() {
         let prefix = "forward-10-10-0-2-";

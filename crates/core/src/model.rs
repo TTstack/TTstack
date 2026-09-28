@@ -533,7 +533,7 @@ pub fn validate_vm_options(
             "--disk is supported only by QEMU and Firecracker (Docker has no disk quota)".into(),
         );
     }
-    if deny_outgoing && matches!(engine, Engine::Docker | Engine::Bhyve | Engine::Jail) {
+    if deny_outgoing && matches!(engine, Engine::Docker | Engine::Jail) {
         return Err(format!("--deny-outgoing is not supported by {engine}"));
     }
     if !ssh_keys.is_empty() && matches!(engine, Engine::Docker | Engine::Bhyve) {
@@ -608,7 +608,7 @@ mod option_tests {
         let keys = vec!["ssh-ed25519 AAAA user".into()];
         assert!(validate_vm_options(Engine::Jail, None, false, &keys, &[22]).is_ok());
         assert!(validate_vm_options(Engine::Jail, None, true, &[], &[]).is_err());
-        assert!(validate_vm_options(Engine::Bhyve, None, true, &[], &[]).is_err());
+        assert!(validate_vm_options(Engine::Bhyve, None, true, &[], &[]).is_ok());
         assert!(validate_vm_options(Engine::Bhyve, None, false, &keys, &[22]).is_err());
         for engine in [Engine::Bhyve, Engine::Jail] {
             assert!(validate_vm_options(engine, Some(512), false, &[], &[]).is_err());
