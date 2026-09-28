@@ -107,8 +107,9 @@ binary also passed. This check did not boot guests or exercise the remote hosts.
   [offline resource API](rest-api.md#offline-resource-updates).
 - Docker does not support managed SSH keys, disk quotas or outgoing restrictions.
   Firecracker supports creation-time ext4 growth and explicit stopped-VM resource
-  updates (`firecracker_resources`), but not managed SSH keys, interactive consoles
-  or resizing a running VM; CPU/RAM changes need a cold boot.
+  updates (`firecracker_resources`) and initial SSH bootstrap on prepared images
+  (`ssh_bootstrap`), but not interactive consoles or resizing a running VM;
+  CPU/RAM changes need a cold boot. See [SSH support and limits](ssh.md).
 - Runtime and guest dependencies remain the operator's responsibility. Prefer
   QEMU cloud images for full VMs and prepared long-running Docker images for services.
 

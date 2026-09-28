@@ -26,6 +26,9 @@ pub struct CreateVmReq {
     /// Root SSH public keys for QEMU cloud-init.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ssh_keys: Vec<String>,
+    /// Optional initial SSH account/sudo setup; public keys remain in ssh_keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<crate::ssh::SshOptions>,
 }
 
 /// Response from agent after creating a VM.
@@ -76,6 +79,9 @@ pub struct VmSpec {
     /// Per-VM SSH keys (merged with env-level keys).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ssh_keys: Vec<String>,
+    /// Optional initial SSH account/sudo setup; public keys remain in ssh_keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<crate::ssh::SshOptions>,
 }
 
 fn default_engine() -> Engine {

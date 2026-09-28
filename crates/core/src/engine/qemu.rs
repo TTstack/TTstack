@@ -98,7 +98,10 @@ config:
     /// on first boot: configure networking, inject SSH keys, enable sshd.
     fn generate_seed_iso(&self, vm: &Vm, ssh_keys: &[String]) -> Result<()> {
         let seed_dir = format!("{RUN_DIR}/seed-{}", vm.id);
+        use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(&seed_dir).c(d!("create seed dir"))?;
+        std::fs::set_permissions(&seed_dir, std::fs::Permissions::from_mode(0o700))
+            .c(d!("private SSH seed directory"))?;
 
         // meta-data
         let meta_data = format!("instance-id: {}\nlocal-hostname: {}\n", vm.id, vm.id);
@@ -110,36 +113,46 @@ config:
         std::fs::write(format!("{seed_dir}/network-config"), network_config)
             .c(d!("write network-config"))?;
 
-        // user-data — inject SSH keys, disable password login
-        let mut user_data = String::from(
-            "#cloud-config\n\
-             disable_root: false\n\
-             ssh_pwauth: false\n",
-        );
-
-        if !ssh_keys.is_empty() {
-            // Alpine's non-PAM sshd rejects locked accounts even with a valid key.
-            // An impossible password hash permits key login without a usable password.
-            user_data.push_str(
-                "users:\n  - name: root\n    lock_passwd: false\n    hashed_passwd: '*'\n    ssh_authorized_keys:\n",
+        let user_data = if vm.options.ssh.is_some() {
+            let script = std::fs::read_to_string(crate::ssh::seed_path(&vm.id))
+                .c(d!("read initial SSH seed"))?;
+            let content = serde_json::to_string(&script).c(d!("encode initial SSH seed"))?;
+            format!(
+                "#cloud-config\nssh_pwauth: false\nwrite_files:\n  - path: /var/lib/ttstack-initial-ssh.sh\n    permissions: '0600'\n    content: {content}\nruncmd:\n  - sh /var/lib/ttstack-initial-ssh.sh && (systemctl restart sshd 2>/dev/null || service sshd restart 2>/dev/null || rc-service sshd restart 2>/dev/null)\n"
+            )
+        } else {
+            // user-data — inject SSH keys, disable password login
+            let mut user_data = String::from(
+                "#cloud-config\n\
+                 disable_root: false\n\
+                 ssh_pwauth: false\n",
             );
-            for key in ssh_keys {
-                let quoted = serde_json::to_string(key).c(d!("quote SSH key"))?;
-                user_data.push_str(&format!("      - {quoted}\n"));
+
+            if !ssh_keys.is_empty() {
+                // Alpine's non-PAM sshd rejects locked accounts even with a valid key.
+                // An impossible password hash permits key login without a usable password.
+                user_data.push_str(
+                        "users:\n  - name: root\n    lock_passwd: false\n    hashed_passwd: '*'\n    ssh_authorized_keys:\n",
+                );
+                for key in ssh_keys {
+                    let quoted = serde_json::to_string(key).c(d!("quote SSH key"))?;
+                    user_data.push_str(&format!("      - {quoted}\n"));
+                }
             }
-        }
 
-        user_data.push_str(
-            "runcmd:\n  \
-             - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config\n  \
-             - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config\n  \
-             - systemctl restart sshd 2>/dev/null || service sshd restart 2>/dev/null || rc-service sshd restart 2>/dev/null || true\n",
-        );
+            user_data.push_str(
+                "runcmd:\n  \
+                 - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config\n  \
+                 - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config\n  \
+                 - systemctl restart sshd 2>/dev/null || service sshd restart 2>/dev/null || rc-service sshd restart 2>/dev/null || true\n",
+            );
 
+            user_data
+        };
         std::fs::write(format!("{seed_dir}/user-data"), user_data).c(d!("write user-data"))?;
 
         // Generate ISO using genisoimage or mkisofs
-        let seed_iso = self.seed_path(vm);
+        let seed_iso = format!("{seed_dir}/seed.iso");
         let meta = format!("{seed_dir}/meta-data");
         let user = format!("{seed_dir}/user-data");
         let netcfg = format!("{seed_dir}/network-config");
@@ -160,14 +173,16 @@ config:
                 .c(d!("generate seed ISO"))?
         };
 
-        // Clean up temp dir
-        let _ = std::fs::remove_dir_all(&seed_dir);
-
         if !output.status.success() {
+            let _ = std::fs::remove_dir_all(&seed_dir);
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(eg!("seed ISO creation failed: {}", stderr));
         }
 
+        std::fs::set_permissions(&seed_iso, std::fs::Permissions::from_mode(0o600))
+            .c(d!("private seed ISO"))?;
+        std::fs::rename(&seed_iso, self.seed_path(vm)).c(d!("publish seed ISO"))?;
+        let _ = std::fs::remove_dir_all(&seed_dir);
         Ok(())
     }
 
@@ -331,6 +346,7 @@ mod tests {
         // Smoke test: ensure disk_format ends up in the -drive arg
         let eng = QemuEngine::new();
         let vm = Vm {
+            ssh: None,
             pending_resources: None,
             id: "test-vm".into(),
             env_id: "e1".into(),

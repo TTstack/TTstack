@@ -9,6 +9,7 @@ use ttcore::net;
 use ttcore::storage::{self, ImageStore};
 
 pub struct Runtime {
+    pub ssh_ingress: Option<crate::ssh_ingress::SshIngress>,
     pub host_id: String,
     db: Connection,
     engines: Vec<Engine>,
@@ -40,6 +41,7 @@ impl Runtime {
             .c(d!("agent DB timeout"))?;
         init_db(&db)?;
         let mut rt = Self {
+            ssh_ingress: None,
             host_id,
             db,
             engines: detect_engines(),
@@ -87,7 +89,22 @@ impl Runtime {
         if req.cpu == 0 || req.mem == 0 {
             return Err(eg!("cpu and memory must be > 0"));
         }
+        let ssh = if req.ssh_keys.is_empty() {
+            req.ssh.clone()
+        } else {
+            Some(req.ssh.clone().unwrap_or_default())
+        };
+        if let Some(settings) = &ssh {
+            settings.validate().map_err(|e| eg!(e))?;
+            if req.ssh_keys.is_empty() {
+                return Err(eg!("SSH bootstrap requires a public key"));
+            }
+        }
+        if req.guest_config.contains_key(ttcore::ssh::SEED_FILE) {
+            return Err(eg!("reserved guest configuration filename"));
+        }
         let mut options = VmOptions {
+            ssh,
             ports: req.ports.clone(),
             ssh_keys: req.ssh_keys.clone(),
             deny_outgoing: req.deny_outgoing,
@@ -142,7 +159,7 @@ impl Runtime {
                 }
                 req.disk
                     .max(base_mib)
-                    .checked_add(if req.guest_config.is_empty() {
+                    .checked_add(if req.guest_config.is_empty() && options.ssh.is_none() {
                         0
                     } else {
                         ttcore::guest_config::CONFIG_DISK_MIB
@@ -179,13 +196,14 @@ impl Runtime {
                 .ok_or_else(|| eg!("IP address space exhausted"))?
         };
         let mut ports = req.ports.clone();
-        if req.engine == Engine::Qemu && !ports.contains(&22) {
+        if (req.engine == Engine::Qemu || options.ssh.is_some()) && !ports.contains(&22) {
             ports.push(22);
         }
         let port_map = allocate_ports(&vms, &ports, |p| {
             std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, p)).is_ok()
         })?;
         let mut vm = Vm {
+            ssh: None,
             pending_resources: None,
             id: req.vm_id.clone(),
             env_id: req.env_id.clone(),
@@ -206,6 +224,36 @@ impl Runtime {
         save_vm(&self.db, &vm)?;
         self.recount()?;
         let result = (|| -> Result<()> {
+            let mut guest_config = req.guest_config.clone();
+            if let Some(settings) = &vm.options.ssh {
+                let (script, host_key) = ttcore::ssh::bootstrap(settings, &vm.options.ssh_keys)?;
+                use std::io::Write;
+                let mut file =
+                    tempfile::NamedTempFile::new_in(RUN_DIR).c(d!("SSH seed staging"))?;
+                file.write_all(script.as_bytes())
+                    .c(d!("write initial SSH seed"))?;
+                file.as_file().sync_all().c(d!("sync initial SSH seed"))?;
+                file.persist(ttcore::ssh::seed_path(&vm.id))
+                    .map_err(|e| eg!(e.error.to_string()))?;
+                vm.ssh = Some(ttcore::ssh::SshInfo {
+                    user: settings.user.clone(),
+                    sudo: settings.sudo,
+                    host: self
+                        .ssh_ingress
+                        .as_ref()
+                        .map(|c| c.public_address.to_string())
+                        .unwrap_or_default(),
+                    port: vm.port_map[&22],
+                    host_key,
+                    checked_at: 0,
+                    initialized: false,
+                    ready: false,
+                });
+                save_vm(&self.db, &vm)?;
+                if req.engine == Engine::Firecracker {
+                    guest_config.insert(ttcore::ssh::SEED_FILE.into(), script);
+                }
+            }
             if req.engine != Engine::Docker {
                 self.ensure_network()?;
                 let clone_path = self.clone_path(&vm);
@@ -215,9 +263,15 @@ impl Runtime {
                     if req.disk > 0 {
                         self.store.resize_firecracker(&clone_path, req.disk)?;
                     }
+                    let directory = self.store.firecracker_dir(&clone_path)?;
+                    if vm.options.ssh.is_some() {
+                        ttcore::ssh::prepared_rootfs(
+                            &std::path::Path::new(&directory).join("rootfs.ext4"),
+                        )?;
+                    }
                     ttcore::guest_config::write_disk(
-                        std::path::Path::new(&self.store.firecracker_dir(&clone_path)?),
-                        &req.guest_config,
+                        std::path::Path::new(&directory),
+                        &guest_config,
                     )?;
                 }
                 if vm.engine == Engine::Qemu {
@@ -290,6 +344,9 @@ impl Runtime {
                 net::allow_outgoing(&vm.ip)?;
             }
         }
+        if let Some(ingress) = &self.ssh_ingress {
+            ingress.apply(vm)?;
+        }
         Ok(())
     }
 
@@ -304,6 +361,10 @@ impl Runtime {
         match (self.engine_factory)(vm.engine)?.stop(&vm) {
             Ok(()) => {
                 vm.state = VmState::Stopped;
+                if let Some(ssh) = &mut vm.ssh {
+                    ssh.ready = false;
+                    ssh.checked_at = now();
+                }
                 vm.error = None;
             }
             Err(e) => {
@@ -405,7 +466,9 @@ impl Runtime {
             self.store.firecracker_size(&path)?
         }
         .div_ceil(1024 * 1024);
-        let overhead = if vm.options.guest_config_digest.is_some() {
+        let overhead = if vm.engine == Engine::Firecracker
+            && (vm.options.guest_config_digest.is_some() || vm.options.ssh.is_some())
+        {
             ttcore::guest_config::CONFIG_DISK_MIB
         } else {
             0
@@ -487,6 +550,9 @@ impl Runtime {
             }
         };
         collect(engine.destroy(&vm));
+        if let Some(ingress) = &self.ssh_ingress {
+            collect(ingress.remove(id));
+        }
         #[cfg(target_os = "linux")]
         if vm.engine != Engine::Docker {
             collect(net::remove_port_forwards(&vm.ip));
@@ -503,6 +569,11 @@ impl Runtime {
             vm.error = Some(errors.join("; "));
             save_vm(&self.db, &vm)?;
             return Err(eg!(errors.join("; ")));
+        }
+        match std::fs::remove_file(ttcore::ssh::seed_path(id)) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(eg!(e.to_string())),
         }
         delete_vm(&self.db, id)?;
         self.recount()
@@ -560,6 +631,19 @@ impl Runtime {
                 Err(e) => {
                     vm.error = Some(format!("cannot query engine: {e}"));
                 }
+            }
+            if let Some(ssh) = &mut vm.ssh {
+                ssh.host = self
+                    .ssh_ingress
+                    .as_ref()
+                    .map(|c| c.public_address.to_string())
+                    .unwrap_or_default();
+                let reachable = vm.state == VmState::Running && ttcore::ssh::ready(&vm.ip);
+                if reachable && !ssh.initialized {
+                    ssh.initialized = ttcore::ssh::initial_identity_ready(&vm.ip, &ssh.host_key);
+                }
+                ssh.ready = reachable && ssh.initialized;
+                ssh.checked_at = now();
             }
             save_vm(&self.db, &vm)?;
         }
@@ -659,7 +743,7 @@ fn allocate_ports(
 // ── SQLite Schema & Operations ──────────────────────────────────────
 
 /// Current agent schema version.
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 fn init_db(db: &Connection) -> Result<()> {
     db.execute_batch(
@@ -883,8 +967,20 @@ fn detect_engines() -> Vec<Engine> {
     engines
 }
 fn detect_capabilities(engines: &[Engine], storage: Storage) -> Vec<String> {
+    use ttcore::command::CommandExt;
     let mut caps = Vec::new();
     if cfg!(target_os = "linux") {
+        if (engines.contains(&Engine::Qemu) || engines.contains(&Engine::Firecracker))
+            && ["ssh-keygen", "ssh-keyscan"].iter().all(|tool| {
+                std::process::Command::new(tool)
+                    .arg("-?")
+                    .output_timeout(std::time::Duration::from_secs(5))
+                    .is_ok()
+            })
+        {
+            caps.push("ssh_bootstrap".into());
+        }
+
         if engines.contains(&Engine::Qemu)
             && (storage == Storage::File || probe("zfs", &["version"]))
         {
@@ -929,6 +1025,7 @@ mod tests {
 
     fn make_vm(id: &str, state: VmState) -> Vm {
         Vm {
+            ssh: None,
             pending_resources: None,
             id: id.into(),
             env_id: "env1".into(),
@@ -1124,6 +1221,7 @@ mod lifecycle_tests {
     fn runtime(db: Connection) -> Runtime {
         init_db(&db).unwrap();
         Runtime {
+            ssh_ingress: None,
             host_id: "h1".into(),
             db,
             engines: vec![Engine::Docker],
@@ -1398,6 +1496,7 @@ mod lifecycle_tests {
     }
     fn vm(id: &str, image: &str, state: VmState) -> Vm {
         Vm {
+            ssh: None,
             pending_resources: None,
             id: id.into(),
             env_id: "env".into(),
@@ -1464,6 +1563,7 @@ mod lifecycle_tests {
     fn repeated_create_is_idempotent_and_changed_request_is_rejected() {
         let mut rt = runtime(Connection::open_in_memory().unwrap());
         let req = CreateVmReq {
+            ssh: None,
             vm_id: "idempotent".into(),
             isolated_network: false,
             guest_config: Default::default(),

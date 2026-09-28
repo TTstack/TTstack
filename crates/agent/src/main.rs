@@ -13,6 +13,7 @@ mod auth;
 mod config;
 mod handler;
 mod runtime;
+mod ssh_ingress;
 
 use axum::Router;
 use axum::routing::{get, post};
@@ -58,7 +59,7 @@ async fn main() {
         ..Default::default()
     };
 
-    let rt = Runtime::new(
+    let mut rt = Runtime::new(
         host_id.clone(),
         cfg.storage_kind(),
         cfg.image_dir.clone(),
@@ -70,6 +71,19 @@ async fn main() {
         eprintln!("Failed to initialize runtime: {e}");
         std::process::exit(1);
     });
+
+    if let Some(public_address) = cfg.ssh_public_address {
+        let ingress = ssh_ingress::SshIngress {
+            public_address,
+            namespace: cfg.ssh_ingress_netns.clone(),
+            target: cfg.ssh_ingress_target,
+        };
+        ingress.validate().unwrap_or_else(|e| {
+            eprintln!("Invalid SSH ingress: {e}");
+            std::process::exit(1)
+        });
+        rt.ssh_ingress = Some(ingress);
+    }
 
     let info = rt.agent_info().unwrap_or_else(|e| {
         eprintln!("Failed to read agent info: {e}");

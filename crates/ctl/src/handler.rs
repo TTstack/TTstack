@@ -369,7 +369,10 @@ pub async fn create_env(
     )
 }
 
-async fn create_environment(state: &CtlState, req: CreateEnvReq) -> Result<EnvDetail, ApiError> {
+async fn create_environment(
+    state: &CtlState,
+    mut req: CreateEnvReq,
+) -> Result<EnvDetail, ApiError> {
     validate_name(&req.id, "environment").map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     if req.vms.is_empty() || req.vms.len() > MAX_VMS {
         return Err((
@@ -377,7 +380,28 @@ async fn create_environment(state: &CtlState, req: CreateEnvReq) -> Result<EnvDe
             format!("an environment must contain 1..={MAX_VMS} VMs"),
         ));
     }
-    for spec in &req.vms {
+    for spec in &mut req.vms {
+        spec.ssh_keys.extend(req.ssh_keys.iter().cloned());
+        spec.ssh_keys.sort();
+        spec.ssh_keys.dedup();
+        if !spec.ssh_keys.is_empty() && spec.ssh.is_none() {
+            spec.ssh = Some(Default::default());
+        }
+        if let Some(ssh) = &spec.ssh {
+            ssh.validate().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            if spec.ssh_keys.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "SSH bootstrap requires a public key".into(),
+                ));
+            }
+        }
+        if spec.guest_config.contains_key(ttcore::ssh::SEED_FILE) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "reserved guest configuration filename".into(),
+            ));
+        }
         ttcore::guest_config::validate(spec.engine, &spec.guest_config, spec.isolated_network)
             .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         validate_image(&spec.image, spec.engine).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
@@ -397,6 +421,7 @@ async fn create_environment(state: &CtlState, req: CreateEnvReq) -> Result<EnvDe
             ));
         }
     }
+    req.ssh_keys.clear();
     let created_at = now();
     let expires_at = match req.lifetime.unwrap_or(DEFAULT_LIFETIME) {
         0 => 0,
@@ -463,6 +488,7 @@ async fn create_environment(state: &CtlState, req: CreateEnvReq) -> Result<EnvDe
         let requested_disk = spec.disk.unwrap_or(spec.engine.default_disk());
         let disk = placement.disk;
         planned.push(Vm {
+            ssh: None,
             pending_resources: None,
             id: vm_id.clone(),
             env_id: req.id.clone(),
@@ -477,6 +503,7 @@ async fn create_environment(state: &CtlState, req: CreateEnvReq) -> Result<EnvDe
             state: VmState::Creating,
             created_at,
             options: VmOptions {
+                ssh: spec.ssh.clone(),
                 ports: spec.ports.clone(),
                 ssh_keys: ssh_keys.clone(),
                 deny_outgoing: spec.deny_outgoing,
@@ -489,6 +516,7 @@ async fn create_environment(state: &CtlState, req: CreateEnvReq) -> Result<EnvDe
         requests.push((
             placement.host_addr,
             CreateVmReq {
+                ssh: spec.ssh,
                 vm_id,
                 env_id: req.id.clone(),
                 image: spec.image,
@@ -1324,6 +1352,7 @@ mod tests {
     }
     fn record(id: &str, env: &str) -> Vm {
         Vm {
+            ssh: None,
             pending_resources: None,
             id: id.into(),
             env_id: env.into(),
@@ -1386,6 +1415,7 @@ mod tests {
         mock.creates.fetch_add(1, Ordering::SeqCst);
         let mut vm = record(&req.vm_id, &req.env_id);
         vm.options = VmOptions {
+            ssh: None,
             isolated_network: req.isolated_network,
             guest_config_digest: ttcore::guest_config::digest(&req.guest_config),
             ports: req.ports,
@@ -1627,6 +1657,7 @@ mod tests {
             lifetime: Some(0),
             ssh_keys: vec![],
             vms: vec![VmSpec {
+                ssh: None,
                 isolated_network: false,
                 guest_config: Default::default(),
                 image: "alpine:3.21".into(),

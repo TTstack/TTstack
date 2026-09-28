@@ -22,5 +22,4 @@ axum = { workspace = true }
 clap = { workspace = true }
 uuid = { workspace = true }
 
-[dev-dependencies]
 tempfile = { workspace = true }

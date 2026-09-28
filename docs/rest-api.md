@@ -101,7 +101,7 @@ can have an unknown outcome: inspect the VM, including pending resources and err
 before retrying. Do not delete the environment to recover a resource update.
 
 Disk growth is not a promise of zero storage risk or a backup facility. Maintain
-backups independently. Controller and agent use schema v3 so older binaries cannot
+backups independently. Controller and agent use schema v4 so older binaries cannot
 ignore pending reservations; upgrade both together.
 
 ## Environment requests
@@ -129,9 +129,13 @@ Each `VmSpec` accepts:
 | `deny_outgoing` | boolean | Default false; block routed outgoing initiation, not host/guest isolation; rejected for Docker |
 | `isolated_network` | boolean | Default false; Linux QEMU/Firecracker only; block peers, guest-initiated host access, private/link-local destinations and IPv6; allow public IPv4 egress and replies to inbound connections |
 | `guest_config` | object | Default `{}`; Firecracker only; up to 32 simple file names mapped to UTF-8 strings, 64 KiB total names/content; attached as a read-only config drive |
-| `ssh_keys` | string[] | Empty; merged with environment keys; QEMU cloud-init only |
+| `ssh_keys` | string[] | Empty; merged with environment keys; QEMU or prepared Firecracker |
 
 CLI engine aliases such as `kvm`, `fc` and `podman` are not JSON enum values.
+`ssh` optionally selects `{ "user": "user", "sudo": true }` for initial provisioning.
+VM responses include optional `ssh` endpoint/readiness metadata; see the
+[SSH contract](ssh.md) for keys, images, ingress and schema v4.
+
 SSH keys are complete public-key strings in JSON,
 not local file paths. If an environment mixes engines, use per-VM keys only for
 engines that support injection. Other engine-specific requirements are in the

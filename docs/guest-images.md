@@ -57,11 +57,11 @@ guest IP on port 22. From another machine, connect to the **agent host** at the
 mapped host port shown by `env show`; do not assume the controller address or a
 fixed port. `running` does not imply SSH has finished starting.
 
-At boot TTstack attaches a NoCloud seed ISO containing root SSH public keys,
-password-login-disabled SSH configuration, and static network settings. Use
-`--ssh-key` repeatedly for multiple public keys. The seed is regenerated on boot,
-but cloud-init modules generally apply initial configuration once per instance;
-this is not a key rotation interface. TTstack does not generate a login password.
+At boot TTstack attaches a private NoCloud seed ISO with initial SSH provisioning
+and static networking. Use `--ssh-key` repeatedly for multiple public keys;
+`--ssh-user user --ssh-sudo` selects an ordinary account with full guest sudo.
+Provisioning runs once and normal restart preserves user key/configuration edits.
+See the [common SSH contract](ssh.md), including public endpoint configuration.
 
 Custom images without cloud-init must configure their own credentials **and**
 use TTstack's allocated IP/gateway. A seed ISO alone cannot configure such a guest.
@@ -157,8 +157,9 @@ sudo /opt/ttstack/bin/tt image create fc-alpine
 
 The built-in rootfs configures networking and runs BusyBox init. It does not start
 an application or sshd. Read boot output on the agent at
-`/home/ttstack/run/fc-VM_ID.log`. There is no managed SSH key injection or
-interactive console. Build a suitable rootfs for application workloads; old images
+`/home/ttstack/run/fc-VM_ID.log`. This smoke image has no interactive console or SSH support.
+[Prepared Firecracker images](ssh.md#image-contract) support initial SSH injection.
+Build a suitable rootfs for application workloads; old images
 with a hard-coded IP need replacement, not just a TTstack binary upgrade.
 
 Omit `--disk` to retain the base rootfs size, or specify a size in MiB at creation:

@@ -7,6 +7,16 @@ use ttcore::model::Storage;
 #[derive(Parser, Debug)]
 #[command(name = "tt-agent", version)]
 pub struct Config {
+    /// Client-reachable IPv4 address advertised for VM SSH.
+    #[arg(long)]
+    pub ssh_public_address: Option<std::net::Ipv4Addr>,
+    /// Optional outer network namespace containing that address.
+    #[arg(long, requires = "ssh_public_address", requires = "ssh_ingress_target")]
+    pub ssh_ingress_netns: Option<std::path::PathBuf>,
+    /// This agent namespace's address reachable from the outer namespace.
+    #[arg(long, requires = "ssh_ingress_netns")]
+    pub ssh_ingress_target: Option<std::net::Ipv4Addr>,
+
     /// Listen address for the HTTP API.
     #[arg(long, default_value = "0.0.0.0:9100")]
     pub listen: String,

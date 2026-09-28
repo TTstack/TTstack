@@ -1,7 +1,9 @@
 # Native VM SSH and recovery evidence
 
-Status: Proposed additions; not implemented or validated. Current [API](../rest-api.md)
-and [guest image](../guest-images.md) guides describe shipped behavior.
+Status: Initial SSH implemented and [validated](../validation/expert-ssh-2026-09-28.md)
+on Linux QEMU and prepared Firecracker guests. The maintained [SSH contract](../ssh.md)
+owns current behavior. Additional recovery diagnostics remain proposed.
+The implementation-gap observations below describe the preimplementation baseline.
 
 ## Existing implementation
 

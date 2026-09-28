@@ -122,6 +122,12 @@ enum EnvCmd {
         /// Root SSH public key or .pub path (repeatable; QEMU only).
         #[arg(long)]
         ssh_key: Vec<String>,
+        /// Initial SSH account (defaults to root for generic VMs).
+        #[arg(long, default_value = "root")]
+        ssh_user: Box<str>,
+        /// Grant unrestricted passwordless guest sudo to the initial SSH account.
+        #[arg(long)]
+        ssh_sudo: bool,
     },
     /// List all environments.
     List,
@@ -394,6 +400,8 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
             guest_config,
             owner,
             ssh_key,
+            ssh_user,
+            ssh_sudo,
         } => {
             let engine: Engine = engine.parse().map_err(|e: String| eg!(e))?;
             let guest_config: ttcore::guest_config::GuestConfig = match guest_config {
@@ -453,6 +461,10 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
             for img in &image {
                 for _ in 0..dup {
                     vms.push(VmSpec {
+                        ssh: (!ssh_keys.is_empty()).then(|| ttcore::ssh::SshOptions {
+                            user: ssh_user.to_string(),
+                            sudo: ssh_sudo,
+                        }),
                         image: img.clone(),
                         engine,
                         cpu,

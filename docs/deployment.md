@@ -213,7 +213,8 @@ its address exactly matches the configured one.
 
 ### Resource-update schema gate
 
-Controller and agent schema v3 retain interrupted offline resource updates. Back
+Controller and agent schema v4 retain interrupted offline resource updates and
+initial SSH state. See [SSH deployment requirements](ssh.md#reachable-endpoint). Back
 up both databases before upgrade and deploy matching binaries. File rollback to
-a v2 binary cannot open migrated state; do not restore stale metadata over disks
+an older binary cannot open migrated state; do not restore stale metadata over disks
 that have grown. See [offline resource recovery](rest-api.md#offline-resource-updates).

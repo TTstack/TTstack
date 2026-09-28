@@ -186,6 +186,8 @@ pub struct Host {
 /// A VM or container instance managed by an agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vm {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<crate::ssh::SshInfo>,
     /// Durable intent for an unfinished offline resource update. Retry the same target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_resources: Option<VmResources>,
@@ -224,14 +226,15 @@ pub struct VmResources {
 impl Vm {
     pub fn reserved_disk(&self) -> u32 {
         self.pending_resources.map_or(self.disk, |r| {
-            self.disk.max(
-                r.disk
-                    .saturating_add(if self.options.guest_config_digest.is_some() {
-                        crate::guest_config::CONFIG_DISK_MIB
-                    } else {
-                        0
-                    }),
-            )
+            self.disk.max(r.disk.saturating_add(
+                if self.engine == Engine::Firecracker
+                    && (self.options.guest_config_digest.is_some() || self.options.ssh.is_some())
+                {
+                    crate::guest_config::CONFIG_DISK_MIB
+                } else {
+                    0
+                },
+            ))
         })
     }
 }
@@ -239,6 +242,8 @@ impl Vm {
 /// Creation options retained for idempotency, restart and firewall recovery.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VmOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<crate::ssh::SshOptions>,
     pub ports: Vec<u16>,
     pub ssh_keys: Vec<String>,
     pub deny_outgoing: bool,
@@ -507,7 +512,7 @@ pub fn validate_vm_options(
     if deny_outgoing && engine == Engine::Docker {
         return Err("--deny-outgoing is not supported by Docker".into());
     }
-    if !ssh_keys.is_empty() && matches!(engine, Engine::Docker | Engine::Firecracker) {
+    if !ssh_keys.is_empty() && engine == Engine::Docker {
         return Err(format!("SSH key injection is not supported by {engine}"));
     }
     if ports.len() > 256 {

@@ -30,7 +30,9 @@ fn disk_reservation(spec: &VmSpec, host: &Host) -> Option<u32> {
         return None;
     }
     disk.checked_add(
-        if spec.engine == Engine::Firecracker && !spec.guest_config.is_empty() {
+        if spec.engine == Engine::Firecracker
+            && (!spec.guest_config.is_empty() || spec.ssh.is_some())
+        {
             ttcore::guest_config::CONFIG_DISK_MIB
         } else {
             0
@@ -62,6 +64,7 @@ pub fn place_vm(
     let supports = |h: &Host| {
         let has = |cap: &str| h.capabilities.iter().any(|c| c == cap);
         (!spec.isolated_network || has("isolated_network"))
+            && (spec.ssh.is_none() || has("ssh_bootstrap"))
             && (spec.guest_config.is_empty() || has("guest_config"))
             && (spec.engine != Engine::Firecracker || has("firecracker_jailer"))
             && (spec.engine != Engine::Firecracker
@@ -236,6 +239,7 @@ mod tests {
 
     fn make_spec() -> VmSpec {
         VmSpec {
+            ssh: None,
             isolated_network: false,
             guest_config: Default::default(),
             image: "ubuntu".into(),

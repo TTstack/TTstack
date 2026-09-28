@@ -9,7 +9,7 @@ use ttcore::api::FleetStatus;
 use ttcore::model::*;
 
 /// Current schema version. Bump this when schema changes.
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 /// Fleet database — the single source of truth for the controller.
 pub struct Db {
@@ -423,6 +423,7 @@ mod tests {
 
     fn make_vm(id: &str, env_id: &str, host_id: &str) -> Vm {
         Vm {
+            ssh: None,
             pending_resources: None,
             id: id.into(),
             env_id: env_id.into(),
