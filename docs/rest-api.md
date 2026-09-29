@@ -44,6 +44,7 @@ for every failure. A transport timeout does not mean an operation was cancelled.
 | GET | `/api/vms/{id}` | `Vm` |
 | POST | `/api/vms/{id}/resources` | Updated stopped `Vm`; see [offline resources](#offline-resource-updates) |
 | GET | `/api/images` | `ImageInfo[]`: `name`, `host_id`; cached file/zvol images on online hosts |
+| GET | `/api/capabilities` | Versioned technical capability matrix; see [capabilities](capabilities.md) |
 | GET | `/api/status` | `FleetStatus`: host/environment/VM counts and resource reservations |
 
 Host addresses must be `host:port`, without a URL scheme or path. Registration
@@ -216,7 +217,9 @@ headroom for the OS, QEMU overhead and other services. Fleet capacity totals
 include only online hosts; tracked VM counts also include offline allocations.
 
 Agent `/api/info` returns `host_id`, `resource`, `engines`, `storage`, `images`,
-`image_sizes`, `capabilities`, `vms` and optional `warnings`. VM rows and resources
+`image_sizes`, `capabilities`, `capability_report`, `vms` and optional `warnings`.
+The optional scoped report and legacy fallback are described in
+[technical capabilities](capabilities.md). VM rows and resources
 come from the same snapshot; older agents without `vms` use the legacy list read.
 Image names and sizes use a separate background cache, refreshed after startup and
 15 seconds after each completed scan. Slow image inspection does not block host

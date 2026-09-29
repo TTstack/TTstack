@@ -7,12 +7,23 @@ pub const MAX_CONFIG_BYTES: usize = 64 * 1024;
 pub const CONFIG_DISK_MIB: u32 = 4;
 pub const CONFIG_DISK: &str = "guest-config.ext4";
 
-pub fn validate(engine: Engine, files: &GuestConfig, isolated: bool) -> Result<(), String> {
-    if !files.is_empty() && engine != Engine::Firecracker {
-        return Err("guest_config currently requires Firecracker".into());
+/// One configuration disk carries both caller files and the managed SSH seed.
+pub fn disk_mib(engine: Engine, caller_files: bool, ssh_seed: bool) -> u32 {
+    if engine == Engine::Firecracker && (caller_files || ssh_seed) {
+        CONFIG_DISK_MIB
+    } else {
+        0
     }
-    if isolated && !matches!(engine, Engine::Firecracker | Engine::Qemu) {
-        return Err("isolated_network requires Linux QEMU or Firecracker".into());
+}
+
+pub fn validate(engine: Engine, files: &GuestConfig, isolated: bool) -> Result<(), String> {
+    use crate::capability::Feature;
+    use crate::model::Storage;
+    if !files.is_empty() {
+        Feature::GuestConfig.require_design(engine, Storage::File)?;
+    }
+    if isolated {
+        Feature::Isolation.require_design(engine, Storage::File)?;
     }
     if files.len() > 32
         || files.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>() > MAX_CONFIG_BYTES

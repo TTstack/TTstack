@@ -48,7 +48,6 @@ pub fn resolve_options(
     requested: Option<&SshOptions>,
     keys: &[String],
 ) -> std::result::Result<Option<SshOptions>, String> {
-    use crate::model::Engine;
     if requested.is_none() && keys.is_empty() {
         return Ok(None);
     }
@@ -57,15 +56,18 @@ pub fn resolve_options(
     if keys.is_empty() {
         return Err("SSH bootstrap requires a public key".into());
     }
-    match engine {
-        Engine::Qemu | Engine::Firecracker => Ok(Some(options)),
-        Engine::Jail if options == SshOptions::default() => Ok(None),
-        Engine::Jail => {
+    use crate::capability::Feature;
+    use crate::model::Storage;
+    if Feature::SshBootstrap.supported(engine, Storage::File) {
+        Ok(Some(options))
+    } else if Feature::RootKeys.supported(engine, Storage::File) {
+        if options == SshOptions::default() {
+            Ok(None)
+        } else {
             Err("Jail supports only root SSH keys without SSH bootstrap options".into())
         }
-        Engine::Docker | Engine::Bhyve => {
-            Err(format!("SSH bootstrap is not supported by {engine}"))
-        }
+    } else {
+        Err(format!("SSH bootstrap is not supported by {engine}"))
     }
 }
 

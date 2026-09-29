@@ -215,6 +215,12 @@ tested combinations.
 
 ## Upgrade compatibility
 
+Scoped [capability reports](capabilities.md) are additive host metadata and do not
+change these schema versions. New controllers accept the documented legacy gates
+when an agent omits the report. A present report is authoritative; unknown report
+versions reject new feature-dependent work. Restart agents after changing host
+prerequisites to refresh their startup observations.
+
 Before upgrading, back up controller and agent SQLite state together with retained
 VM disks. All tracked engines must be among the current `qemu`, `firecracker`,
 `docker`, `bhyve` and `jail` values, including cached host engine lists. Unknown

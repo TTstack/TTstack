@@ -70,7 +70,11 @@ dirty images are not accepted by this implementation. Zvols must be writable and
 must not use `sync=disabled`. Admission checks storage headroom as well as the
 configured logical disk budget.
 
-Host capabilities are `disk_backup_v1` for the protocol and, when qualified,
+The [scoped host report](capabilities.md) exposes `disk.backup.point` qualification
+and separate `backup_admission` state. It does not gate recovery of already
+accepted work on the current admission flag.
+
+Legacy host capabilities remain `disk_backup_v1` for the protocol and, when qualified,
 `disk_backup_zvol_v1` or `disk_backup_reflink_v1`. Inspection's `supported` flag
 describes engine and host-mechanism eligibility; the particular disk is revalidated
 on admission.

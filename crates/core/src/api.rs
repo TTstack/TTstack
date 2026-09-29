@@ -40,6 +40,8 @@ pub struct CreateVmResp {
 /// Information reported by an agent about itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_report: Option<crate::capability::Report>,
     /// VM rows from the same resource snapshot; old agents omit this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vms: Option<Vec<Vm>>,

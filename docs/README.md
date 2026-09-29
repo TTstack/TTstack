@@ -14,6 +14,7 @@ behavior and are updated together with the code.
 | Prepare guests and understand storage/network boundaries | [Guest images](guest-images.md) |
 | Call the API or understand lifecycle recovery | [REST API](rest-api.md) |
 | Create or restore an opt-in local disk recovery point | [VM disk backup](disk-backup.md) |
+| Inspect engine/storage capabilities and host denial reasons | [Technical capabilities](capabilities.md) |
 | Check supported platforms and validation limits | [Compatibility](compatibility.md) |
 | Configure initial VM SSH and public ingress | [SSH](ssh.md) |
 | Inspect the experimental FreeBSD restoration and its limits | [FreeBSD scope](compatibility.md#experimental-freebsd-restoration) |
@@ -32,8 +33,8 @@ It is not the [defect registry](audit.md).
 - [VM SSH access and recovery evidence](proposals/vm-access-and-recovery.md):
   initial SSH implemented for QEMU/prepared Firecracker; host-side diagnostic
   additions remain proposed.
-- [Unified capability tags](proposals/capability-tags.md): proposed vocabulary and
-  design matrix for engine, storage and request support; nothing implemented.
+- [Unified capability tags](proposals/capability-tags.md): design rationale and
+  corrections for the implemented scoped reports and shared requirement checks.
 
 ## Validation evidence
 
