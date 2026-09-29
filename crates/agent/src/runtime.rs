@@ -427,7 +427,12 @@ impl Runtime {
 
     pub fn stop_vm(&mut self, id: &str) -> Result<()> {
         let mut vm = load_vm(&self.db, id)?.ok_or_else(|| eg!(format!("VM not found: {id}")))?;
-        if vm.state == VmState::Stopped {
+        if vm.state == VmState::Stopped
+            && !vm
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("stop unfinished:"))
+        {
             return Ok(());
         }
         if matches!(vm.state, VmState::Creating | VmState::Deleting) {
@@ -443,7 +448,7 @@ impl Runtime {
                 vm.error = None;
             }
             Err(e) => {
-                vm.error = Some(e.to_string());
+                vm.error = Some(format!("stop unfinished: {e}"));
                 save_vm(&self.db, &vm)?;
                 return Err(e);
             }
@@ -1478,8 +1483,12 @@ mod lifecycle_tests {
         fn start(&self, _: &Vm) -> Result<()> {
             Ok(())
         }
-        fn stop(&self, _: &Vm) -> Result<()> {
-            Ok(())
+        fn stop(&self, vm: &Vm) -> Result<()> {
+            if vm.image == "stop-fails" {
+                Err(eg!("injected stop failure"))
+            } else {
+                Ok(())
+            }
         }
         fn destroy(&self, vm: &Vm) -> Result<()> {
             if vm.image == "fail-delete" {
@@ -1522,6 +1531,37 @@ mod lifecycle_tests {
             network_ready: false,
         }
     }
+
+    #[test]
+    fn retry_of_interrupted_stop_confirms_exit_and_clears_only_its_own_error() {
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        let mut guest = vm("stop-retry", "stop-fails", VmState::Running);
+        save_vm(&rt.db, &guest).unwrap();
+        assert!(rt.stop_vm(&guest.id).is_err());
+        guest = load_vm(&rt.db, &guest.id).unwrap().unwrap();
+        assert!(
+            guest
+                .error
+                .as_deref()
+                .unwrap()
+                .starts_with("stop unfinished:")
+        );
+        // Reconciliation can observe exit before the caller retries the failed stop.
+        guest.state = VmState::Stopped;
+        guest.image = "stopped".into();
+        save_vm(&rt.db, &guest).unwrap();
+        rt.stop_vm(&guest.id).unwrap();
+        let mut stopped = load_vm(&rt.db, &guest.id).unwrap().unwrap();
+        assert!(stopped.error.is_none());
+        stopped.error = Some("unrelated resource update error".into());
+        save_vm(&rt.db, &stopped).unwrap();
+        rt.stop_vm(&guest.id).unwrap();
+        assert_eq!(
+            load_vm(&rt.db, &guest.id).unwrap().unwrap().error,
+            stopped.error
+        );
+    }
+
     /// Fault injection at the storage boundary, without changing process-wide PATH.
     struct QemuTestStore {
         fail_after_growth: bool,
