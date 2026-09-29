@@ -47,7 +47,7 @@ is one reason to keep the trigger explicit.
 | Manual trigger; stopped VM | Recommended boundary | Callers explicitly request backup/restore; TTstack does not stop or restart guests implicitly. |
 | Restore into the same existing VM | Recommended boundary | Keep VM identity and management metadata; do not implement import or recovery after VM deletion. |
 | VM deletion also removes backups | Recommended boundary | Preserve the existing destructive deletion/expiry contract; this is not protection against deleting the VM. |
-| No automatic full-copy fallback | Recommended boundary | A lightweight operation must not silently become a whole-disk transfer. |
+| Lightweight backup only | Requested, mandatory | If the runtime cannot provide a qualified lightweight, fast backup mechanism, return backup unsupported. Full-file-copy backup is excluded, including explicit opt-in and fallback paths. |
 
 The recommended boundaries require product review before implementation. They
 are not additional requirements already approved by the requester.
@@ -62,7 +62,7 @@ proposed contract; **recommend** identifies a design choice still open to review
 | [CLI](../../crates/cli/src/main.rs), [controller routes](../../crates/ctl/src/main.rs), [agent routes](../../crates/agent/src/main.rs) | No backup, restore, or backup-removal operation. | New operations must cross all three layers. |
 | [ImageStore](../../crates/core/src/storage/mod.rs) | Clone, remove, resolve, inspect, and grow images. | Backup mechanics belong near storage, not in guest applications. |
 | [ZvolStore](../../crates/core/src/storage/zvol.rs) | Fixed base-image `@ttsnap`; runtime clones; recursive runtime deletion. | Base snapshots do not capture later guest writes. Existing deletion can remove runtime snapshots. |
-| [FileStore](../../crates/core/src/storage/file.rs) | QEMU qcow2 files; directory/file copies using `cp --reflink=auto`. | Provisioning may fall back to full copying; backup must make a separate, explicit choice. |
+| [FileStore](../../crates/core/src/storage/file.rs) | QEMU qcow2 files; directory/file copies using `cp --reflink=auto`. | Backup must not inherit provisioning's full-copy fallback. |
 | [QEMU](../../crates/core/src/engine/qemu.rs) | One writable root drive plus a read-only seed, with a monitor socket. | No existing backup job orchestration; shelling out to `qemu-img` must remain offline. |
 | [Firecracker](../../crates/core/src/engine/firecracker.rs), [sandbox](../../crates/core/src/engine/firecracker/sandbox.rs) | Writable raw root disk, optional read-only config disk, file hard links or jailed block devices. | Rootfs replacement must agree with the jail rebuilt on cold start. |
 | [Docker/Podman](../../crates/core/src/engine/docker.rs) | Runtime-managed container storage, bypassing `ImageStore`. | Agent `file`/`zvol` selection does not describe container storage. |
@@ -137,6 +137,29 @@ backup so that the default environment lifetime is not mistaken for retention.
 No migration, restore-as-new-VM, independent archive, object storage, replication,
 guest agent, multi-disk atomic group, encryption service, or dashboard workflow is
 included. Existing API administrator authentication remains unchanged.
+
+### 3.4 Mandatory lightweight capability boundary
+
+Backup creation and refresh must use a qualified snapshot or copy-on-write clone
+mechanism that preserves existing disk blocks without copying the complete image
+payload. If the actual engine, image, tools, filesystem, or source/destination
+placement cannot provide such a lightweight, fast mechanism, return **backup
+unsupported**. Check eligibility before admitting a backup operation; never start
+a full copy to compensate for a missing capability.
+
+Whole-file or whole-disk copying, including ordinary `cp`, `dd`, sparse full-image
+copies, and image conversion, is not a backup implementation in this proposal.
+There is no slow mode, opt-in full-copy option, or automatic fallback. Compression,
+sparsity, chunking, or background execution does not make full-copy backup eligible.
+Strict reflink remains eligible because it shares blocks rather than transferring
+the complete payload. This boundary applies to every supported engine/backend.
+
+Capability must be established for the actual runtime, not inferred from a file
+extension or filesystem name. A backend error must not trigger copying or an
+unvalidated backend switch. Missing capability is distinct from a timeout, an I/O
+failure, or insufficient capacity: those retain their own error/recovery semantics
+and must not erase an existing valid backup. Metadata work still has a cost;
+lightweight capability is not a fixed millisecond latency guarantee.
 
 ## 4. Storage research and backend assessment
 
@@ -290,7 +313,8 @@ state without eliminating disk handling. See
 For current file rootfs images, use reflink where available. Without filesystem
 copy-on-write support, a raw image has no qcow2-style internal snapshot primitive.
 A sparse copy can avoid allocating holes but still copies non-hole data and is
-not a generally lightweight point-in-time backup of a running disk.
+excluded by section 3.4 even when the VM is stopped. Return backup unsupported
+when no qualified lightweight mechanism is available.
 
 ### 4.5 Containers and other alternatives
 
@@ -306,7 +330,7 @@ root or infer storage capability from the agent's VM backend.
 | Alternative | Assessment for this scope |
 | --- | --- |
 | QEMU external overlay | Fast to create but introduces active backing-chain changes, refresh/merge work, and cleanup dependencies; defer. |
-| Whole-disk copy or `qemu-img convert` | Broad compatibility but time, I/O, and space scale with data; no silent fallback. |
+| Whole-disk/file copy or `qemu-img convert` | Excluded by the mandatory lightweight boundary; neither an opt-in implementation nor a fallback. |
 | File images on one shared ZFS dataset | A dataset snapshot can include unrelated VMs; whole-dataset rollback would revert them. Requires per-file extraction or a different layout. |
 | One dataset/subvolume per file VM | Potentially useful, but changes storage provisioning/layout; existing zvol or reflink paths are smaller. |
 | ZFS send/receive or external archives | Useful for independent backups and deleted-VM recovery; requires different retention, metadata, and transfer semantics. |
@@ -321,7 +345,7 @@ root or infer storage capability from the agent's VM backend.
 | QEMU + standalone file on proven reflink storage | First file target | Yes, retired backup files only |
 | Firecracker + file on proven reflink storage | First file target | Yes, retired backup files only |
 | QEMU + eligible qcow2 without reflink | Conditional follow-up backend | No with the proposed offline tool path |
-| Firecracker + file without reflink | Unsupported in the lightweight first version | Not applicable |
+| Firecracker + file without a qualified lightweight mechanism | Return backup unsupported; no full-copy path | Not applicable |
 | Docker/Podman | Out of scope | Not applicable |
 
 This ordering refines the initial investigation: qcow2 has native snapshots, but
@@ -569,6 +593,11 @@ caller intentionally restoring again must inspect anew and choose a new key.
 | `428` | Required mutation precondition missing. |
 | `502` / `503` | Agent/storage failure or unavailable host; inspect persisted operation because outcome may be unknown. |
 
+For the capability boundary in section 3.4, return HTTP 400 with an explicit
+`backup unsupported: <reason>` error, expose unsupported eligibility on inspection,
+and make the CLI exit unsuccessfully. Do not retry through a full-copy path or
+offer a flag to enable one. A failed refresh retains the existing recovery point.
+
 Suggested CLI shape, extending the existing VM-targeting precedent of
 `tt env resize`:
 
@@ -679,7 +708,10 @@ host, isolated task-owned disks/guests, bounded load, and complete owned cleanup
 
 - Disabled default creates no backup artifacts/reservations; disabling after use
   leaves inspection, restore, removal, and owned cleanup available.
-- Reject unsupported engines/images and failed reflink probes without full copy.
+- Reject unsupported engines/images and unavailable lightweight mechanisms with
+  the explicit unsupported response. Verify that unsupported/cross-filesystem
+  reflink attempts invoke no ordinary copy, sparse copy, or image conversion,
+  leave existing backups intact, and expose no opt-in full-copy mode.
 - Revision/key replay before and after admission, publication, controller restart,
   VM restart, later guest writes, removal, and a subsequent generation.
 - Inject failure at every durable boundary of refresh and restore; preserve the
@@ -745,7 +777,7 @@ checks rather than a Rust build.
 | Scope of default-off | Agent admission flag plus explicit per-VM invocation | Invocation-only opt-in removes one host option but changes the meaning of disabled. |
 | Backup trigger | Manual, stopped VM | Automatic or online backup requires trigger/freshness and consistency semantics. |
 | Deleted-VM recovery | Excluded; backup follows destructive VM deletion/expiry | Retention after deletion needs independent artifact ownership and sufficient reconstruction metadata. |
-| File coverage | Reflink where qualified; qcow2 internal backend conditional | Full-copy fallback expands time/space expectations; guaranteed coverage on all filesystems is a different requirement. |
+| Eligible file mechanisms | Reflink where qualified; qcow2 internal backend conditional | Other mechanisms need qualification against section 3.4; full-copy backup is prohibited, not an open design choice. |
 | Retirement backlog | Two retired generations plus current/candidate | A different bound changes admission headroom; unlimited backlog violates the small operational scope. |
 | Disk resize with backups | Require explicit removal and completed cleanup first | Preserving backups across resize needs geometry/resource reconciliation and additional restore tests. |
 | Durability policy | WAL/FULL writer connections in implementing release | Keeping NORMAL limits the crash guarantee and requires an explicitly narrower contract. |
