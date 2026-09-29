@@ -107,6 +107,10 @@ pub fn agent_client(api_key: Option<&str>, timeout_secs: u64) -> Result<reqwest:
         .map_err(|e| e.to_string())
 }
 
+pub async fn capabilities() -> Json<ApiResp<ttcore::capability::Matrix>> {
+    Json(ApiResp::success(ttcore::capability::matrix()))
+}
+
 // ── Host Management ─────────────────────────────────────────────────
 
 /// POST /api/hosts — register a new host by its agent address.
@@ -206,6 +210,7 @@ pub async fn register_host(
         host.resource.vm_count = host.resource.vm_count.max(previous.vm_count);
         host.engines = info.engines;
         host.capabilities = info.capabilities;
+        host.capability_report = info.capability_report;
         host.images = info.images;
         host.image_sizes = info.image_sizes;
         host.state = HostState::Online;
@@ -236,6 +241,7 @@ pub async fn register_host(
         );
     }
     let host = Host {
+        capability_report: info.capability_report,
         error: None,
         image_sizes: info.image_sizes,
         capabilities: info.capabilities,
@@ -819,22 +825,18 @@ async fn resize_virtual_machine(
     if host.state != HostState::Online {
         return Err((StatusCode::SERVICE_UNAVAILABLE, "VM host is offline".into()));
     }
-    let capability = match vm.engine {
-        Engine::Qemu => "qemu_resources",
-        Engine::Firecracker => "firecracker_resources",
-        Engine::Docker | Engine::Bhyve | Engine::Jail => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "resource updates require QEMU or Firecracker".into(),
-            ));
-        }
-    };
-    if !host.capabilities.iter().any(|c| c == capability) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("agent lacks {capability}; upgrade agent and controller"),
-        ));
+    ttcore::capability::Feature::Resources
+        .require_design(vm.engine, host.storage)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if vm.pending_resources.is_none() {
+        ttcore::capability::require_host(
+            &host,
+            vm.engine,
+            &[ttcore::capability::Feature::Resources],
+        )
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     }
+
     if vm.backup.busy()
         || (vm.backup.has_artifacts()
             && target.disk
@@ -1266,6 +1268,7 @@ fn apply_snapshot(
             };
             host.engines = info.engines;
             host.capabilities = info.capabilities;
+            host.capability_report = info.capability_report;
             host.storage = info.storage;
             host.images = info.images;
             host.image_sizes = info.image_sizes;
@@ -1439,6 +1442,7 @@ mod tests {
             resource.account(vm);
         }
         Json(ApiResp::success(AgentInfo {
+            capability_report: None,
             vms: None,
             warnings: vec![],
             image_sizes: Default::default(),
@@ -1673,6 +1677,7 @@ mod tests {
         state
             .lock_db()
             .put_host(&Host {
+                capability_report: None,
                 error: None,
                 image_sizes: Default::default(),
                 capabilities: vec![],
@@ -1687,6 +1692,102 @@ mod tests {
             })
             .unwrap();
         (state, mock, task)
+    }
+
+    #[tokio::test]
+    async fn recorded_resize_can_retry_after_host_capability_withdrawal() {
+        let (state, mock, server) = fixture().await;
+        seed(&state, &mock);
+        let target = VmResources {
+            cpu: 2,
+            mem: 512,
+            disk: 128,
+        };
+        for vm in mock.vms.lock().unwrap().iter_mut() {
+            vm.engine = Engine::Qemu;
+            vm.state = VmState::Stopped;
+            vm.disk = 64;
+            state.lock_db().put_vm(vm).unwrap();
+        }
+        let mut pending = state.lock_db().get_vm("good").unwrap().unwrap();
+        pending.pending_resources = Some(target);
+        state.lock_db().put_vm(&pending).unwrap();
+        // A previously forwarded operation must settle even when fresh admission
+        // would now fail; the exact target is still enforced by the lifecycle path.
+        let applied = resize_virtual_machine(&state, "good", target)
+            .await
+            .unwrap();
+        assert_eq!(applied.disk, 128);
+        assert!(applied.pending_resources.is_none());
+        assert_eq!(
+            resize_virtual_machine(
+                &state,
+                "good",
+                VmResources {
+                    disk: 256,
+                    ..target
+                }
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn host_refresh_replaces_scoped_reports_and_retains_unknown_tags_offline() {
+        use ttcore::capability::{self, Feature, Report};
+        let (state, mock, server) = fixture().await;
+        let mut snapshot = info(State(mock)).await.0.data.unwrap();
+        snapshot.engines = vec![Engine::Qemu, Engine::Firecracker];
+        snapshot.capabilities = capability::legacy::ALL
+            .iter()
+            .map(|s| (*s).into())
+            .collect();
+        let mut report = Report::from_probes(
+            Storage::File,
+            &snapshot.engines,
+            &snapshot.capabilities,
+            false,
+            None,
+        );
+        let qemu = report
+            .engines
+            .iter_mut()
+            .find(|entry| entry.engine == Engine::Qemu)
+            .unwrap();
+        let status = qemu
+            .features
+            .iter_mut()
+            .find(|status| status.tag == Feature::Resources.tag())
+            .unwrap();
+        status.enabled = false;
+        status.reason = Some("operator's host prerequisite is unavailable".into());
+        status.evidence.clear();
+        let mut future = status.clone();
+        future.tag = "future.contract".into();
+        qemu.features.push(future);
+        snapshot.capability_report = Some(report.clone());
+        apply_host_snapshot(&state, "host", Ok((snapshot.clone(), vec![]))).unwrap();
+        let observed = state.lock_db().get_host("host").unwrap().unwrap();
+        assert_eq!(observed.capability_report, Some(report.clone()));
+        assert!(capability::require_host(&observed, Engine::Qemu, &[Feature::Resources]).is_err());
+        assert!(
+            capability::require_host(&observed, Engine::Firecracker, &[Feature::Resources]).is_ok()
+        );
+        apply_host_snapshot(&state, "host", Err("host offline".into())).unwrap();
+        let offline = state.lock_db().get_host("host").unwrap().unwrap();
+        assert_eq!(offline.state, HostState::Offline);
+        assert_eq!(offline.capability_report, Some(report));
+        // A legacy snapshot replaces the whole report; stale canonical grants do not survive.
+        snapshot.capability_report = None;
+        apply_host_snapshot(&state, "host", Ok((snapshot, vec![]))).unwrap();
+        let legacy = state.lock_db().get_host("host").unwrap().unwrap();
+        assert!(legacy.capability_report.is_none());
+        assert!(capability::require_host(&legacy, Engine::Qemu, &[Feature::Resources]).is_ok());
+        server.abort();
     }
     fn seed(state: &CtlState, mock: &MockAgent) {
         let records = vec![record("good", "env"), record("bad", "env")];

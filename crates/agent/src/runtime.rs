@@ -13,6 +13,7 @@ use ttcore::storage::{self, ImageStore};
 mod backup;
 
 pub struct Runtime {
+    probed_capabilities: Vec<String>,
     backup_enabled: bool,
     backup_unsupported: Option<String>,
     backup_running: HashSet<String>,
@@ -50,7 +51,10 @@ impl Runtime {
         db.busy_timeout(std::time::Duration::from_secs(5))
             .c(d!("agent DB timeout"))?;
         init_db(&db)?;
+        let engines = detect_engines(None);
+        let probed_capabilities = detect_capabilities(&engines, storage);
         let mut rt = Self {
+            probed_capabilities,
             backup_enabled: false,
             backup_unsupported: Some("backup unsupported: backend has not been qualified".into()),
             backup_running: HashSet::new(),
@@ -58,7 +62,7 @@ impl Runtime {
             ssh_ingress: None,
             host_id,
             db,
-            engines: detect_engines(None),
+            engines,
             store: storage::create_store(storage),
             storage,
             image_dir,
@@ -170,12 +174,9 @@ impl Runtime {
             &req.ports,
         )
         .map_err(|e| eg!(e))?;
-        if !self.engines.contains(&req.engine) {
-            return Err(eg!("engine {} is unavailable on this host", req.engine));
-        }
-        if self.storage == Storage::Zvol && req.engine == Engine::Jail {
-            return Err(eg!("Jail requires file storage"));
-        }
+        ttcore::capability::Feature::Run
+            .require_design(req.engine, self.storage)
+            .map_err(|e| eg!(e))?;
         if req.engine == Engine::Qemu && req.disk == 0 {
             return Err(eg!("QEMU disk size must be > 0"));
         }
@@ -225,6 +226,15 @@ impl Runtime {
                 ));
             }
             return Ok(vm);
+        }
+        let report = self.capability_report();
+        for feature in ttcore::capability::Create::try_from(req)
+            .map_err(|e| eg!(e))?
+            .requirements(req.engine)
+        {
+            report
+                .require(req.engine, self.storage, feature)
+                .map_err(|e| eg!(e))?;
         }
         self.recount()?;
         let base_image = format!("{}/{}", self.image_dir, req.image);
@@ -562,8 +572,17 @@ impl Runtime {
                 "conflict: remove backups and finish cleanup before disk resizing"
             ));
         }
-        if !matches!(vm.engine, Engine::Qemu | Engine::Firecracker) {
-            return Err(eg!("resource updates require QEMU or Firecracker"));
+        ttcore::capability::Feature::Resources
+            .require_design(vm.engine, self.storage)
+            .map_err(|e| eg!(e))?;
+        if vm.pending_resources.is_none() {
+            self.capability_report()
+                .require(
+                    vm.engine,
+                    self.storage,
+                    ttcore::capability::Feature::Resources,
+                )
+                .map_err(|e| eg!(e))?;
         }
         if target.cpu == 0 || target.mem == 0 || target.disk == 0 {
             return Err(eg!("cpu, memory and root disk must be > 0"));
@@ -822,26 +841,40 @@ impl Runtime {
     pub fn list_vms(&self) -> Result<Vec<Vm>> {
         load_all_vms(&self.db)
     }
+    fn capability_tags(&self) -> Vec<String> {
+        use ttcore::capability::legacy;
+        let mut caps = self.probed_capabilities.clone();
+        caps.push(legacy::BACKUP.into());
+        if self.backup_unsupported.is_none() {
+            caps.push(
+                if self.storage == Storage::Zvol {
+                    legacy::BACKUP_ZVOL
+                } else {
+                    legacy::BACKUP_REFLINK
+                }
+                .into(),
+            );
+        }
+        caps
+    }
+
+    fn capability_report(&self) -> ttcore::capability::Report {
+        ttcore::capability::Report::from_probes(
+            self.storage,
+            &self.engines,
+            &self.capability_tags(),
+            self.backup_enabled,
+            self.backup_unsupported.as_deref(),
+        )
+    }
+
     pub fn agent_info(&self) -> Result<AgentInfo> {
         Ok(AgentInfo {
+            capability_report: Some(self.capability_report()),
             vms: None,
             warnings: vec![],
             image_sizes: Default::default(),
-            capabilities: {
-                let mut caps = detect_capabilities(&self.engines, self.storage);
-                caps.push("disk_backup_v1".into());
-                if self.backup_unsupported.is_none() {
-                    caps.push(
-                        if self.storage == Storage::Zvol {
-                            "disk_backup_zvol_v1"
-                        } else {
-                            "disk_backup_reflink_v1"
-                        }
-                        .into(),
-                    );
-                }
-                caps
-            },
+            capabilities: self.capability_tags(),
             host_id: self.host_id.clone(),
             resource: self.resource.clone(),
             engines: self.engines.clone(),
@@ -1215,7 +1248,7 @@ fn detect_capabilities(engines: &[Engine], _storage: Storage) -> Vec<String> {
     let mut caps = Vec::new();
     #[cfg(target_os = "freebsd")]
     if engines.contains(&Engine::Bhyve) {
-        caps.push("bhyve_deny_outgoing".into());
+        caps.push(ttcore::capability::legacy::BHYVE_EGRESS.into());
     }
     #[cfg(target_os = "linux")]
     {
@@ -1227,16 +1260,16 @@ fn detect_capabilities(engines: &[Engine], _storage: Storage) -> Vec<String> {
                     .is_ok()
             })
         {
-            caps.push("ssh_bootstrap".into());
+            caps.push(ttcore::capability::legacy::SSH.into());
         }
 
         if engines.contains(&Engine::Qemu)
             && (_storage == Storage::File || probe("zfs", &["version"]))
         {
-            caps.push("qemu_resources".into());
+            caps.push(ttcore::capability::legacy::QEMU_RESOURCES.into());
         }
         if probe("nft", &["--version"]) && probe("ip", &["-Version"]) {
-            caps.push("isolated_network".into());
+            caps.push(ttcore::capability::legacy::ISOLATION.into());
         }
         if engines.contains(&Engine::Firecracker) {
             let controllers =
@@ -1245,17 +1278,17 @@ fn detect_capabilities(engines: &[Engine], _storage: Storage) -> Vec<String> {
                 .iter()
                 .all(|c| controllers.split_whitespace().any(|v| v == *c))
             {
-                caps.push("firecracker_jailer".into());
+                caps.push(ttcore::capability::legacy::FC_JAILER.into());
             }
             if probe("mkfs.ext4", &["-V"]) {
-                caps.push("guest_config".into());
+                caps.push(ttcore::capability::legacy::CONFIG.into());
             }
             if probe("e2fsck", &["-V"]) && probe("which", &["resize2fs"]) {
-                caps.push("firecracker_disk_resize".into());
-                caps.push("firecracker_resources".into());
+                caps.push(ttcore::capability::legacy::FC_DISK.into());
+                caps.push(ttcore::capability::legacy::FC_RESOURCES.into());
             }
             if _storage == Storage::Zvol && probe("zfs", &["version"]) {
-                caps.push("firecracker_zvol".into());
+                caps.push(ttcore::capability::legacy::FC_ZVOL.into());
             }
         }
     }
@@ -1633,6 +1666,10 @@ mod lifecycle_tests {
     fn runtime(db: Connection) -> Runtime {
         init_db(&db).unwrap();
         Runtime {
+            probed_capabilities: ttcore::capability::legacy::ALL
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
             backup_enabled: false,
             backup_unsupported: None,
             backup_running: HashSet::new(),
@@ -1640,7 +1677,7 @@ mod lifecycle_tests {
             ssh_ingress: None,
             host_id: "h1".into(),
             db,
-            engines: vec![Engine::Docker],
+            engines: ttcore::capability::ENGINES.to_vec(),
             store: storage::create_store(Storage::File),
             storage: Storage::File,
             image_dir: String::new(),
@@ -2291,6 +2328,7 @@ mod lifecycle_tests {
         let state = std::sync::Arc::new(crate::handler::AgentShared {
             backup_settings: (false, None),
             info: AgentInfo {
+                capability_report: None,
                 vms: None,
                 warnings: vec![],
                 image_sizes: Default::default(),
@@ -2361,6 +2399,81 @@ mod lifecycle_tests {
         );
         assert!(rt.list_vms().unwrap().is_empty());
         assert_eq!(rt.resource.vm_count, 0);
+    }
+
+    #[test]
+    fn exact_creation_retry_is_not_fresh_admission_after_capability_withdrawal() {
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        let mut guest = vm("retained-create", "fixture", VmState::Running);
+        guest.engine = Engine::Bhyve;
+        save_vm(&rt.db, &guest).unwrap();
+        let mut req: CreateVmReq = serde_json::from_value(serde_json::json!({
+            "vm_id":guest.id, "env_id":guest.env_id, "image":guest.image,
+            "engine":"bhyve", "cpu":guest.cpu, "mem":guest.mem, "disk":0,
+            "ports":[], "deny_outgoing":false, "ssh_keys":[]
+        }))
+        .unwrap();
+        rt.engines.clear();
+        rt.probed_capabilities.clear();
+        assert_eq!(rt.create_vm(&req).unwrap().id, guest.id);
+        req.vm_id = "fresh-create".into();
+        assert!(
+            rt.create_vm(&req)
+                .unwrap_err()
+                .to_string()
+                .contains(ttcore::capability::Feature::Run.tag())
+        );
+        assert_eq!(rt.list_vms().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn direct_create_rejects_missing_capability_before_allocating_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("raw-image"), [0; 4096]).unwrap();
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        rt.engines = vec![Engine::Bhyve];
+        rt.store = Box::new(ttcore::storage::file::FileStore);
+        rt.image_dir = dir.path().to_str().unwrap().into();
+        rt.runtime_dir = dir.path().to_str().unwrap().into();
+        rt.probed_capabilities
+            .retain(|tag| tag != ttcore::capability::legacy::BHYVE_EGRESS);
+        let req: CreateVmReq = serde_json::from_value(serde_json::json!({
+            "vm_id":"capability-rejected", "env_id":"env", "image":"raw-image",
+            "engine":"bhyve", "cpu":1, "mem":128, "disk":0,
+            "ports":[], "deny_outgoing":true, "ssh_keys":[]
+        }))
+        .unwrap();
+        let error = rt.create_vm(&req).unwrap_err().to_string();
+        assert!(error.contains(ttcore::capability::Feature::DenyOutgoing.tag()));
+        assert!(rt.list_vms().unwrap().is_empty());
+        assert_eq!(rt.resource.vm_count, 0);
+        assert!(!dir.path().join("clone-capability-rejected").exists());
+    }
+
+    #[test]
+    fn direct_resize_rejects_missing_capability_without_saving_intent() {
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        let mut guest = vm("no-resize", "offline", VmState::Stopped);
+        guest.engine = Engine::Qemu;
+        guest.disk = 64;
+        save_vm(&rt.db, &guest).unwrap();
+        rt.probed_capabilities
+            .retain(|tag| tag != ttcore::capability::legacy::QEMU_RESOURCES);
+        let error = rt
+            .resize_vm(
+                &guest.id,
+                VmResources {
+                    cpu: 2,
+                    mem: 512,
+                    disk: 128,
+                },
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(ttcore::capability::Feature::Resources.tag()));
+        let saved = load_vm(&rt.db, &guest.id).unwrap().unwrap();
+        assert!(saved.pending_resources.is_none());
+        assert_eq!(saved.disk, guest.disk);
     }
 
     #[test]
@@ -2450,6 +2563,7 @@ mod lifecycle_tests {
                 std::fs::create_dir(&image_dir).unwrap();
                 std::fs::write(image_dir.join("test.qcow2"), b"fixture").unwrap();
                 let info = AgentInfo {
+                    capability_report: None,
                     vms: None,
                     warnings: vec![],
                     image_sizes: Default::default(),

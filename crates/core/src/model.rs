@@ -169,6 +169,8 @@ impl Resource {
 /// A physical host in the fleet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Host {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_report: Option<crate::capability::Report>,
     #[serde(default)]
     pub error: Option<String>,
     /// Base logical disk capacity in MiB; absent entries are unverified.
@@ -265,13 +267,11 @@ impl VmOptions {
     /// Firecracker carries caller configuration and/or the initial SSH seed on one disk.
     /// The caller configuration digest remains independent of the generated SSH identity.
     pub fn config_disk_mib(&self, engine: Engine) -> u32 {
-        if engine == Engine::Firecracker
-            && (self.guest_config_digest.is_some() || self.ssh.is_some())
-        {
-            crate::guest_config::CONFIG_DISK_MIB
-        } else {
-            0
-        }
+        crate::guest_config::disk_mib(
+            engine,
+            self.guest_config_digest.is_some(),
+            self.ssh.is_some(),
+        )
     }
 }
 
@@ -532,16 +532,20 @@ pub fn validate_vm_options(
     ssh_keys: &[String],
     ports: &[u16],
 ) -> std::result::Result<(), String> {
-    if disk.is_some() && !matches!(engine, Engine::Qemu | Engine::Firecracker) {
-        return Err(
-            "--disk is supported only by QEMU and Firecracker (Docker has no disk quota)".into(),
-        );
+    use crate::capability::Feature;
+    if disk.is_some() {
+        Feature::DiskSize.require_design(engine, Storage::File)?;
     }
-    if deny_outgoing && matches!(engine, Engine::Docker | Engine::Jail) {
-        return Err(format!("--deny-outgoing is not supported by {engine}"));
+    if deny_outgoing {
+        Feature::DenyOutgoing.require_design(engine, Storage::File)?;
     }
-    if !ssh_keys.is_empty() && matches!(engine, Engine::Docker | Engine::Bhyve) {
-        return Err(format!("SSH key injection is not supported by {engine}"));
+    if !ssh_keys.is_empty() {
+        let feature = if engine == Engine::Jail {
+            Feature::RootKeys
+        } else {
+            Feature::SshBootstrap
+        };
+        feature.require_design(engine, Storage::File)?;
     }
     if ports.len() > 256 {
         return Err("at most 256 published ports are allowed per VM".into());

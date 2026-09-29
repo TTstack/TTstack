@@ -83,11 +83,12 @@ impl Runtime {
         let vm = load_vm(&self.db, id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("not found: VM {id}"))?;
-        let unsupported_reason = if matches!(vm.engine, Engine::Docker | Engine::Jail) {
-            Some("backup unsupported: container and Jail roots are not VM disks".into())
-        } else {
-            self.backup_unsupported.clone()
-        };
+        let unsupported_reason = ttcore::capability::backup_unsupported(
+            vm.engine,
+            self.storage,
+            self.backup_unsupported.clone(),
+            Some(&self.capability_report()),
+        );
         Ok(View {
             vm,
             enabled: self.backup_enabled,
@@ -115,9 +116,9 @@ impl Runtime {
                     return Err(reason);
                 }
             }
-            if matches!(view.vm.engine, Engine::Docker | Engine::Jail) {
-                return Err("backup unsupported: container and Jail roots are not VM disks".into());
-            }
+            ttcore::capability::Feature::Backup
+                .require_design(view.vm.engine, self.storage)
+                .map_err(|e| format!("backup unsupported: {e}"))?;
             if view.vm.state != VmState::Stopped || view.vm.pending_resources.is_some() {
                 return Err(
                     "conflict: backup requires a stopped VM without an unfinished resource update"
@@ -417,6 +418,10 @@ mod tests {
         let db = Connection::open(path).unwrap();
         init_db(&db).unwrap();
         Runtime {
+            probed_capabilities: ttcore::capability::legacy::ALL
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
             backup_enabled: false,
             backup_unsupported: None,
             backup_running: HashSet::new(),
@@ -424,7 +429,7 @@ mod tests {
             ssh_ingress: None,
             host_id: "host".into(),
             db,
-            engines: vec![Engine::Firecracker],
+            engines: ttcore::capability::ENGINES.to_vec(),
             store: storage::create_store(Storage::File),
             storage: Storage::File,
             image_dir: String::new(),
@@ -743,7 +748,7 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(
                 body["data"]["supported"],
-                !matches!(engine, Engine::Docker | Engine::Jail)
+                matches!(engine, Engine::Qemu | Engine::Firecracker)
             );
         }
     }

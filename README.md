@@ -124,7 +124,7 @@ For multiple hosts, use [distributed deployment](docs/deployment.md#distributed-
 
 Resource and lifecycle details, including failure recovery, are in the
 [API reference](docs/rest-api.md#lifecycle-and-recovery). The CLI is
-`tt status`, `tt config`, `tt host {add,list,show,remove,detach}`,
+`tt status`, `tt config`, `tt capabilities`, `tt host {add,list,show,remove,detach}`,
 `tt env {create,list,show,start,stop,resize,backup,delete}`,
 `tt image {list,recipes,create}` and `tt deploy {agent,ctl,all,dist}`; use
 `tt --help` and `tt env create --help` for options. Request defaults are listed
@@ -158,6 +158,7 @@ readiness and application readiness are separate observations.
 | [Guest images](docs/guest-images.md) | Recipes, image formats, guest access, storage and networking |
 | [Initial SSH access](docs/ssh.md) | Guest accounts, public keys, reachable endpoints and readiness |
 | [REST API](docs/rest-api.md) | Endpoints, request defaults, response/state semantics and recovery |
+| [Technical capabilities](docs/capabilities.md) | Engine/storage matrix, scoped host reports and compatibility |
 | [Compatibility](docs/compatibility.md) | Supported scope, CI and limits of live verification |
 | [Validation evidence](docs/README.md#validation-evidence) | Dated reports for specific tested revisions, with their limits |
 | [Fleet configuration template](tools/deploy.toml.example) | Commented distributed deployment configuration |

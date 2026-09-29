@@ -486,6 +486,7 @@ mod tests {
 
     fn make_host(id: &str) -> Host {
         Host {
+            capability_report: None,
             error: None,
             image_sizes: Default::default(),
             capabilities: vec![],

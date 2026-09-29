@@ -211,6 +211,7 @@ pub async fn create_vm(
             StatusCode::CREATED,
             Json(ApiResp::success(CreateVmResp { vm })),
         ),
+        Err(e) if e.contains("capability ") => (StatusCode::BAD_REQUEST, Json(ApiResp::err(e))),
         Err(e) => failure(e),
     }
 }
@@ -241,7 +242,7 @@ pub async fn resize_vm(
                 StatusCode::CONFLICT
             } else if e.contains("shrinking")
                 || e.contains("must be > 0")
-                || e.contains("require QEMU or Firecracker")
+                || e.contains("capability ")
                 || e.contains("overflow")
             {
                 StatusCode::BAD_REQUEST
@@ -286,14 +287,12 @@ pub async fn get_backup(
         let vm = runtime::read_vm(&state.db_path, &id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("not found: VM {id}"))?;
-        let unsupported_reason = if matches!(
+        let unsupported_reason = ttcore::capability::backup_unsupported(
             vm.engine,
-            ttcore::model::Engine::Docker | ttcore::model::Engine::Jail
-        ) {
-            Some("backup unsupported: container and Jail roots are not VM disks".into())
-        } else {
-            state.backup_settings.1.clone()
-        };
+            state.info.storage,
+            state.backup_settings.1.clone(),
+            state.info.capability_report.as_ref(),
+        );
         Ok(ttcore::backup::View {
             vm,
             enabled: state.backup_settings.0,

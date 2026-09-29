@@ -36,6 +36,12 @@ enum Cmd {
         #[arg(long, short = 'k', env = "TT_API_KEY")]
         api_key: Option<String>,
     },
+    /// Show technical engine/storage support, including experimental platforms.
+    Capabilities {
+        /// Print the complete versioned matrix as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show fleet-wide status.
     Status,
     /// Manage physical hosts.
@@ -316,6 +322,7 @@ async fn main() {
     let result = match cli.cmd {
         Cmd::Config { .. } | Cmd::Deploy { .. } => unreachable!(),
         Cmd::Status => cmd_status(&c).await,
+        Cmd::Capabilities { json } => cmd_capabilities(&c, json).await,
         Cmd::Host { action } => cmd_host(&c, action).await,
         Cmd::Env { action } => cmd_env(&c, action).await,
         Cmd::Image { action } => cmd_image(&c, action).await,
@@ -328,6 +335,54 @@ async fn main() {
 }
 
 // ── Command Implementations ─────────────────────────────────────────
+
+async fn cmd_capabilities(c: &Client, json: bool) -> Result<()> {
+    let matrix: ttcore::capability::Matrix = c.get("/api/capabilities").await?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&matrix).c(d!("capability matrix"))?
+        );
+        return Ok(());
+    }
+    println!(
+        "{:<13} {:<7} {:<23} CAPABILITIES",
+        "ENGINE", "STORAGE", "PLATFORM"
+    );
+    for entry in matrix.combinations {
+        let platform = format!(
+            "{}{}",
+            entry.platform,
+            if entry.experimental {
+                " (experimental)"
+            } else {
+                ""
+            }
+        );
+        let enabled = entry
+            .features
+            .iter()
+            .filter(|f| f.supported)
+            .map(|f| f.tag.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "{:<13} {:<7} {:<23} {}",
+            entry.engine,
+            entry.storage,
+            platform,
+            if enabled.is_empty() {
+                "unsupported"
+            } else {
+                &enabled
+            }
+        );
+    }
+    println!(
+        "Host prerequisites and VM eligibility are checked separately. Use 'tt host show ID' for the current host report."
+    );
+    Ok(())
+}
 
 async fn cmd_status(c: &Client) -> Result<()> {
     let s: FleetStatus = c.get("/api/status").await?;
@@ -397,6 +452,47 @@ async fn cmd_host(c: &Client, action: HostCmd) -> Result<()> {
                 h.resource.disk_used, h.resource.disk_total
             );
             println!("  VMs:      {}", h.resource.vm_count);
+            if let Some(report) = &h.capability_report {
+                println!(
+                    "  Capability report: v{}{}",
+                    report.version,
+                    if h.state == HostState::Offline {
+                        " (last known; host offline)"
+                    } else {
+                        ""
+                    }
+                );
+                println!(
+                    "  Backup admission: {}",
+                    if report.backup_admission {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                );
+                for entry in &report.engines {
+                    if !h.engines.contains(&entry.engine) {
+                        continue;
+                    }
+                    let enabled = entry
+                        .features
+                        .iter()
+                        .filter(|f| f.enabled)
+                        .map(|f| f.tag.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!("    {}: {}", entry.engine, enabled);
+                    for feature in entry.features.iter().filter(|f| !f.enabled) {
+                        println!(
+                            "      {}: {}",
+                            feature.tag,
+                            feature.reason.as_deref().unwrap_or("not enabled")
+                        );
+                    }
+                }
+            } else {
+                println!("  Legacy capabilities: {}", h.capabilities.join(", "));
+            }
         }
         HostCmd::Detach { id } => {
             let orphans: Vec<Vm> = c.post(&format!("/api/hosts/{id}/detach"), &()).await?;

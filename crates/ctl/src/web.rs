@@ -286,7 +286,7 @@ function toast(msg, isError) {
   setTimeout(function() { el.className = 'toast'; }, 5000);
 }
 
-function showModal(id) { document.getElementById('modal-' + id).classList.add('show'); }
+function showModal(id) { document.getElementById('modal-' + id).classList.add('show'); if (id === 'add-env') updateEngineOptions(); }
 function hideModals() { document.querySelectorAll('.modal-overlay').forEach(function(el) { el.classList.remove('show'); }); }
 
 function setBtn(id, disabled) {
@@ -334,7 +334,7 @@ async function loadHosts() {
       '<td>' + esc(h.id) + '</td>' +
       '<td>' + esc(h.addr) + '</td>' +
       '<td>' + badge(h.state) + '</td>' +
-      '<td>' + esc((h.engines || []).join(', ')) + '</td>' +
+      '<td>' + esc((h.engines || []).join(', ')) + hostCapabilities(h) + '</td>' +
       '<td>' + esc(h.resource.cpu_used) + '/' + esc(h.resource.cpu_total) + '</td>' +
       '<td>' + esc(h.resource.mem_used) + '/' + esc(h.resource.mem_total) + ' MB</td>' +
       '<td>' + esc(h.resource.vm_count) + '</td>' +
@@ -415,14 +415,40 @@ async function removeHost(id) {
   catch (e) { toast(e.message, true); }
 }
 
-function updateEngineOptions() {
-  const engine = document.getElementById('env-engine').value;
-  document.getElementById('env-disk').disabled = engine !== 'qemu' && engine !== 'firecracker';
-  document.getElementById('env-deny-outgoing').disabled = engine === 'docker';
-  document.getElementById('env-ssh-keys').disabled = !['qemu', 'jail'].includes(engine);
+var capabilityMatrix = null;
+function engineSupports(field) {
+  var engine = document.getElementById('env-engine').value;
+  var tags = capabilityMatrix && capabilityMatrix.create_fields[field] || [];
+  return capabilityMatrix && capabilityMatrix.combinations.some(function(row) {
+    return row.engine === engine && row.features.some(function(f) { return tags.includes(f.tag) && f.supported; });
+  });
+}
+async function updateEngineOptions() {
+  ['env-disk', 'env-deny-outgoing', 'env-ssh-keys'].forEach(function(id) { document.getElementById(id).disabled = true; });
+  setBtn('btn-create-env', true);
+  try {
+    if (!capabilityMatrix) capabilityMatrix = await api('GET', '/api/capabilities');
+    if (capabilityMatrix.version !== 1) throw new Error('Unsupported capability matrix version; reload after updating the controller');
+    document.getElementById('env-disk').disabled = !engineSupports('disk');
+    document.getElementById('env-deny-outgoing').disabled = !engineSupports('deny_outgoing');
+    document.getElementById('env-ssh-keys').disabled = !engineSupports('ssh_keys');
+    setBtn('btn-create-env', false);
+  } catch (e) { toast(e.message, true); }
+}
+
+function hostCapabilities(h) {
+  if (!h.capability_report) return '<details><summary>Legacy capabilities</summary><pre>' + esc((h.capabilities || []).join('\n')) + '</pre></details>';
+  var report = h.capability_report;
+  var lines = ['Report v' + report.version + (h.state === 'offline' ? ' (last known; host offline)' : ''), 'Backup admission: ' + (report.backup_admission ? 'enabled' : 'disabled')];
+  report.engines.filter(function(e) { return (h.engines || []).includes(e.engine); }).forEach(function(e) {
+    lines.push(e.engine + '/' + report.storage);
+    e.features.forEach(function(f) { lines.push('  ' + f.tag + ': ' + (f.enabled ? 'enabled' : f.reason || 'not enabled')); });
+  });
+  return '<details><summary>Capabilities</summary><pre style="white-space:pre-wrap">' + esc(lines.join('\n')) + '</pre></details>';
 }
 
 async function createEnv() {
+  if (!capabilityMatrix || capabilityMatrix.version !== 1) { toast('Load the capability matrix before creating an environment', true); return; }
   var name = document.getElementById('env-name').value.trim();
   var owner = document.getElementById('env-owner').value.trim() || 'web';
   var image = document.getElementById('env-image').value.trim();
@@ -443,10 +469,10 @@ async function createEnv() {
 
   var vms = [];
   for (var i = 0; i < dup; i++) {
-    vms.push({ image: image, engine: engine, cpu: cpu, mem: mem, disk: (engine === 'qemu' || engine === 'firecracker') ? disk : null, ports: ports, deny_outgoing: engine === 'docker' ? false : denyOutgoing, ssh_keys: [] });
+    vms.push({ image: image, engine: engine, cpu: cpu, mem: mem, disk: engineSupports('disk') ? disk : null, ports: ports, deny_outgoing: engineSupports('deny_outgoing') ? denyOutgoing : false, ssh_keys: [] });
   }
 
-  var body = { id: name, owner: owner, vms: vms, lifetime: lifetime, ssh_keys: ['qemu', 'jail'].includes(engine) ? sshKeys : [] };
+  var body = { id: name, owner: owner, vms: vms, lifetime: lifetime, ssh_keys: engineSupports('ssh_keys') ? sshKeys : [] };
 
   setBtn('btn-create-env', true);
   try {

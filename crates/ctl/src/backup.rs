@@ -37,7 +37,11 @@ fn target(state: &CtlState, id: &str) -> Result<(Vm, Host), ApiError> {
     if host.state != HostState::Online {
         return Err((StatusCode::SERVICE_UNAVAILABLE, "VM host offline".into()));
     }
-    if !host.capabilities.iter().any(|c| c == "disk_backup_v1") {
+    if !host
+        .capabilities
+        .iter()
+        .any(|c| c == ttcore::capability::legacy::BACKUP)
+    {
         return Err(invalid(
             "backup unsupported: agent lacks disk_backup_v1; upgrade agent and controller".into(),
         ));
@@ -194,6 +198,12 @@ async fn mutation(
                 if !view.enabled {
                     return Err(invalid("backup admission disabled".into()));
                 }
+                ttcore::capability::require_host(
+                    &host,
+                    vm.engine,
+                    &[ttcore::capability::Feature::Backup],
+                )
+                .map_err(|e| invalid(format!("backup unsupported: {e}")))?;
                 if !view.supported {
                     return Err(invalid(
                         view.unsupported_reason

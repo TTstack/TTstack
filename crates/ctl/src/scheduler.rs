@@ -29,15 +29,11 @@ fn disk_reservation(spec: &VmSpec, host: &Host) -> Option<u32> {
     if base.is_some_and(|base| disk < base) {
         return None;
     }
-    disk.checked_add(
-        if spec.engine == Engine::Firecracker
-            && (!spec.guest_config.is_empty() || spec.ssh.is_some())
-        {
-            ttcore::guest_config::CONFIG_DISK_MIB
-        } else {
-            0
-        },
-    )
+    disk.checked_add(ttcore::guest_config::disk_mib(
+        spec.engine,
+        !spec.guest_config.is_empty(),
+        spec.ssh.is_some(),
+    ))
 }
 
 /// Choose the best host for a VM spec using a best-fit strategy.
@@ -61,20 +57,11 @@ pub fn place_vm(
 
     // Docker images are managed by Docker, not by the image directory
     let check_images = !host_images.is_empty() && spec.engine != Engine::Docker;
-    let supports = |h: &Host| {
-        let has = |cap: &str| h.capabilities.iter().any(|c| c == cap);
-        (!spec.isolated_network || has("isolated_network"))
-            && (spec.ssh.is_none() || has("ssh_bootstrap"))
-            && (spec.guest_config.is_empty() || has("guest_config"))
-            && (spec.engine != Engine::Bhyve || !spec.deny_outgoing || has("bhyve_deny_outgoing"))
-            && (spec.engine != Engine::Firecracker || has("firecracker_jailer"))
-            && (spec.engine != Engine::Firecracker
-                || spec.disk.is_none()
-                || has("firecracker_disk_resize"))
-            && (spec.engine != Engine::Firecracker
-                || h.storage != Storage::Zvol
-                || has("firecracker_zvol"))
-    };
+    let requirements = ttcore::capability::Create::try_from(spec)
+        .map_err(|e| eg!(e))?
+        .requirements(spec.engine);
+    let supports =
+        |h: &Host| ttcore::capability::require_host(h, spec.engine, &requirements).is_ok();
 
     let mut candidates: Vec<&Host> = hosts
         .iter()
@@ -82,7 +69,6 @@ pub fn place_vm(
             h.state == HostState::Online
                 && supports(h)
                 && h.engines.contains(&spec.engine)
-                && !(h.storage == Storage::Zvol && spec.engine == Engine::Jail)
                 && disk_reservation(spec, h).is_some_and(|disk| h.resource.can_fit(cpu, mem, disk))
                 && (!check_images
                     || host_images
@@ -99,8 +85,18 @@ pub fn place_vm(
                 h.state == HostState::Online && h.engines.contains(&spec.engine) && supports(h)
             })
         {
+            let reasons: Vec<_> = hosts
+                .iter()
+                .filter(|h| h.state == HostState::Online && h.engines.contains(&spec.engine))
+                .filter_map(|h| {
+                    ttcore::capability::require_host(h, spec.engine, &requirements)
+                        .err()
+                        .map(|e| format!("{}: {e}", h.id))
+                })
+                .collect();
             return Err(eg!(
-                "no online agent supports the requested capabilities; upgrade agents before using guest_config, isolated_network, jailed Firecracker, disk sizing or Firecracker zvol storage"
+                "no online agent supports the requested capabilities: {}",
+                reasons.join("; ")
             ));
         }
         if hosts.iter().any(|h| {
@@ -128,7 +124,6 @@ pub fn place_vm(
                 h.state == HostState::Online
                     && h.engines.contains(&spec.engine)
                     && supports(h)
-                    && !(h.storage == Storage::Zvol && spec.engine == Engine::Jail)
                     && disk_reservation(spec, h)
                         .is_some_and(|disk| h.resource.can_fit(cpu, mem, disk))
             })
@@ -212,6 +207,7 @@ mod tests {
 
     fn make_host(id: &str, cpu: u32, mem: u32, engines: Vec<Engine>) -> Host {
         Host {
+            capability_report: None,
             error: None,
             image_sizes: [("ubuntu".into(), 128)].into(),
             capabilities: vec![
@@ -552,6 +548,7 @@ mod tests {
         let imgs = images_for("h1", &["alpine"]); // no "ubuntu"
         let mut spec = make_spec();
         spec.engine = Engine::Docker;
+        spec.disk = None;
         // Should succeed — Docker images are not checked against host_images
         let p = place_vm(&hosts, &spec, &imgs).unwrap();
         assert_eq!(p.host_id, "h1");

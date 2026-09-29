@@ -80,6 +80,7 @@ async fn main() {
     }
 
     let api_routes = Router::new()
+        .route("/api/capabilities", get(handler::capabilities))
         .route(
             "/api/hosts",
             get(handler::list_hosts).post(handler::register_host),

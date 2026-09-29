@@ -14,6 +14,7 @@ behavior and are updated together with the code.
 | Prepare guests and understand storage/network boundaries | [Guest images](guest-images.md) |
 | Call the API or understand lifecycle recovery | [REST API](rest-api.md) |
 | Create or restore an opt-in local disk recovery point | [VM disk backup](disk-backup.md) |
+| Inspect engine/storage capabilities and host denial reasons | [Technical capabilities](capabilities.md) |
 | Check supported platforms and validation limits | [Compatibility](compatibility.md) |
 | Configure initial VM SSH and public ingress | [SSH](ssh.md) |
 | Inspect the experimental FreeBSD restoration and its limits | [FreeBSD scope](compatibility.md#experimental-freebsd-restoration) |
@@ -32,6 +33,8 @@ It is not the [defect registry](audit.md).
 - [VM SSH access and recovery evidence](proposals/vm-access-and-recovery.md):
   initial SSH implemented for QEMU/prepared Firecracker; host-side diagnostic
   additions remain proposed.
+- [Unified capability tags](proposals/capability-tags.md): design rationale and
+  corrections for the implemented scoped reports and shared requirement checks.
 
 ## Validation evidence
 
@@ -42,6 +45,7 @@ establish. A new report belongs in `docs/validation/` and is linked here.
 
 | Evidence | Document |
 | --- | --- |
+| Scoped capability reports, mixed Linux/FreeBSD lifecycle, backup/recovery, host failures and isolated cleanup | [Capability tags and mixed fleet, 2026-09-29](validation/capability-tags-mixed-fleet-2026-09-29.md) |
 | Master synchronization, native FreeBSD regressions, bhyve backup/restore and Jail rejection | [FreeBSD master synchronization, 2026-09-29](validation/freebsd-master-sync-2026-09-29.md) |
 | Opt-in ZFS/reflink disk backup, interrupted operations, exact replay and isolated cleanup on two hosts | [VM disk backup, 2026-09-29](validation/disk-backup-validation-2026-09-29.md) |
 | Master rebase, native database/ownership regressions and FreeBSD Jail/bhyve lifecycle | [FreeBSD master port, 2026-09-28](validation/freebsd-master-port-2026-09-28.md) |
