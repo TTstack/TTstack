@@ -216,6 +216,17 @@ impl ImageStore for ZvolStore {
         Ok(())
     }
 
+    fn bhyve_size(&self, path: &str) -> Result<u64> {
+        if property(path, "type")? != "volume" {
+            return Err(eg!("bhyve requires a root zvol"));
+        }
+        let bytes = volume_size(path)?;
+        if bytes == 0 {
+            return Err(eg!("bhyve requires a nonempty root zvol"));
+        }
+        Ok(bytes)
+    }
+
     fn firecracker_dir(&self, path: &str) -> Result<String> {
         let dir = mountpoint(path)?;
         // Re-resolve /dev/zvol after reboot; never cache a /dev/zdN minor number.

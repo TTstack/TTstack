@@ -129,6 +129,9 @@ pub struct ControllerConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct AgentConfig {
+    /// Explicitly allow lightweight disk backup creation on this host.
+    #[serde(default)]
+    pub enable_disk_backup: bool,
     pub host: String,
     #[serde(default = "default_ssh_user")]
     pub ssh_user: String,
@@ -1047,6 +1050,9 @@ pub async fn deploy_distributed(config_path: &str) -> Result<()> {
         }
         if let Some(runtime) = &agent.container_runtime {
             exec_cmd.push_str(&format!(" --container-runtime {runtime}"));
+        }
+        if agent.enable_disk_backup {
+            exec_cmd.push_str(" --enable-disk-backup");
         }
         let env_path = format!("{prefix}/etc/tt-agent.env");
 

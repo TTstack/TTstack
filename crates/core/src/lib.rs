@@ -11,6 +11,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod backup;
 pub mod model;
 
 pub mod engine;

@@ -94,11 +94,13 @@ async fn main() {
             std::process::exit(1);
         });
 
+    rt.configure_backup(cfg.enable_disk_backup);
     let info = rt.agent_info().unwrap_or_else(|e| {
         eprintln!("Failed to read agent info: {e}");
         std::process::exit(1);
     });
     let state: AppState = Arc::new(handler::AgentShared {
+        backup_settings: rt.backup_settings(),
         runtime: Arc::new(tokio::sync::Mutex::new(rt)),
         db_path,
         info,
@@ -133,6 +135,16 @@ async fn main() {
         .route("/api/vms/{id}/stop", post(handler::stop_vm))
         .route("/api/vms/{id}/start", post(handler::start_vm))
         .route("/api/vms/{id}/resources", post(handler::resize_vm))
+        .route(
+            "/api/vms/{id}/backup",
+            get(handler::get_backup)
+                .put(handler::create_backup)
+                .delete(handler::delete_backup),
+        )
+        .route(
+            "/api/vms/{id}/backup/restore",
+            post(handler::restore_backup),
+        )
         .with_state(state);
 
     let app = if let Some(key) = cfg.api_key {

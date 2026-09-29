@@ -43,6 +43,19 @@ fn configuration(vm: &Vm, mac: &str) -> serde_json::Value {
 }
 
 impl FirecrackerEngine {
+    /// A stopped file disk can be replaced only after dropping the old jail links.
+    pub fn prepare_disk_restore(vm: &Vm) -> Result<()> {
+        if let Some(pid) = Self::read_pid(vm)? {
+            let (_, marker) = Self::identity(vm)?;
+            if super::process_matches(pid, &marker)? {
+                return Err(eg!("Firecracker is still running"));
+            }
+        }
+        if let Some(sandbox) = Sandbox::load(vm)? {
+            sandbox.cleanup()?;
+        }
+        Ok(())
+    }
     pub fn new() -> Self {
         Self
     }

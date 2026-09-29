@@ -237,10 +237,28 @@ its address exactly matches the configured one.
 
 ### Resource-update schema gate
 
-The current controller uses schema v4 and the agent uses schema v5. Agent state
-contains VM records, pending resource updates, SSH metadata and container/network
-bindings. The pre-production transition to this layout, its rationale and tested
-behavior are recorded in the [dated validation record](validation/native-agent-schema-2026-09-28.md).
+The current controller uses schema v5 and the agent uses schema v6. Both use
+WAL/FULL writer connections. Backup generations, pending operations and retirement
+reservations must not be ignored by older binaries. Controller upgrade materializes
+stable backup revisions for existing rows transactionally. The agent still accepts
+only its native schema; it does not automatically migrate v5 inventory.
+
+For the supplied upgrade path, use the previous compatible binaries to drain and
+explicitly delete agent workloads, then remove the empty host registration. Stop
+the old agent, retain its old database/state privately, and initialize a separate
+empty state directory with the new agent before re-registering the host. Recreate
+workloads explicitly. This is destructive workload replacement, not in-place VM
+migration. If retained workloads must survive, do not deploy over their old state:
+an independently reviewed offline state conversion is required and is not supplied
+by this release. Never merely edit the schema marker to bypass the guard.
+
+The earlier native-state transition and its evidence remain in the
+[dated validation record](validation/native-agent-schema-2026-09-28.md).
+
+`--enable-disk-backup` admits explicit lightweight backup creation; it defaults to
+false. Distributed agent configuration accepts `enable_disk_backup = true`.
+Disabling admission leaves existing backup maintenance available. See
+[disk backup](disk-backup.md) for eligible storage and lifecycle semantics.
 
 Use `--container-runtime docker|podman` or `TT_CONTAINER_RUNTIME` to select a runtime
 for a new container inventory. Distributed deployment accepts `container_runtime`

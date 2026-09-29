@@ -17,13 +17,13 @@ pub struct Placement {
 }
 
 fn disk_reservation(spec: &VmSpec, host: &Host) -> Option<u32> {
-    if matches!(spec.engine, Engine::Docker | Engine::Bhyve | Engine::Jail) {
+    if matches!(spec.engine, Engine::Docker | Engine::Jail) {
         return Some(0);
     }
     let base = host.image_sizes.get(&spec.image).copied();
     let disk = match (spec.disk, spec.engine) {
         (Some(disk), _) => disk,
-        (None, Engine::Firecracker) => base?,
+        (None, Engine::Firecracker | Engine::Bhyve) => base.filter(|size| *size > 0)?,
         _ => spec.engine.default_disk(),
     };
     if base.is_some_and(|base| disk < base) {
@@ -294,6 +294,33 @@ mod tests {
         assert!(place_vm(std::slice::from_ref(&host), &spec, &HashMap::new()).is_err());
         host.image_sizes.clear();
         spec.disk = None;
+        assert!(place_vm(&[host], &spec, &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn bhyve_placement_requires_capacity_and_reserves_the_full_root_disk() {
+        let mut host = make_host("freebsd", 4, 4096, vec![Engine::Bhyve]);
+        let mut spec = make_spec();
+        spec.engine = Engine::Bhyve;
+        spec.disk = None;
+        host.resource.disk_total = 200;
+        assert_eq!(
+            place_vm(std::slice::from_ref(&host), &spec, &HashMap::new())
+                .unwrap()
+                .disk,
+            128
+        );
+        assert!(
+            schedule_env(
+                std::slice::from_ref(&host),
+                &[spec.clone(), spec.clone()],
+                &HashMap::new()
+            )
+            .is_err()
+        );
+        host.image_sizes.clear();
+        assert!(place_vm(std::slice::from_ref(&host), &spec, &HashMap::new()).is_err());
+        host.image_sizes.insert(spec.image.clone(), 0);
         assert!(place_vm(&[host], &spec, &HashMap::new()).is_err());
     }
 

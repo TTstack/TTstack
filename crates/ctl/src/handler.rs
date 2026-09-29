@@ -14,6 +14,10 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use ttcore::api::*;
 use ttcore::model::*;
 
+#[path = "backup.rs"]
+mod backup;
+pub use backup::{create_backup, delete_backup, get_backup, restore_backup};
+
 /// Shared controller state.
 pub struct CtlShared {
     pub(crate) db: Mutex<Db>,
@@ -478,6 +482,7 @@ async fn create_environment(
         let requested_disk = spec.disk.unwrap_or(spec.engine.default_disk());
         let disk = placement.disk;
         planned.push(Vm {
+            backup: Default::default(),
             ssh: None,
             pending_resources: None,
             id: vm_id.clone(),
@@ -830,6 +835,15 @@ async fn resize_virtual_machine(
             format!("agent lacks {capability}; upgrade agent and controller"),
         ));
     }
+    if vm.backup.busy()
+        || (vm.backup.has_artifacts()
+            && target.disk
+                != vm
+                    .disk
+                    .saturating_sub(vm.options.config_disk_mib(vm.engine)))
+    {
+        return Err((StatusCode::CONFLICT, "backup operation or artifacts prevent this resource update; inspect/remove backups first".into()));
+    }
     if vm.state != VmState::Stopped || vm.pending_resources.is_some_and(|r| r != target) {
         return Err((
             StatusCode::CONFLICT,
@@ -933,6 +947,13 @@ async fn resize_virtual_machine(
 async fn change_environment(state: &CtlState, id: &str, action: &str) -> Result<(), ApiError> {
     let _operation = begin_operation(state, id)?;
     let detail = environment_detail(state, id)?;
+    if detail.vms.iter().any(|vm| vm.backup.busy()) {
+        return Err((
+            StatusCode::CONFLICT,
+            "backup outcome unresolved; inspect or retry that operation before lifecycle changes"
+                .into(),
+        ));
+    }
     if matches!(detail.env.state, EnvState::Creating | EnvState::Deleting) {
         return Err((
             StatusCode::CONFLICT,
@@ -1301,6 +1322,44 @@ fn apply_snapshot(
 /// An older observed row is not evidence that the recorded intent was cancelled.
 fn merge_vm_snapshot(known: &Vm, actual: &Vm) -> Vm {
     let mut vm = actual.clone();
+    if known.backup.sequence > actual.backup.sequence
+        || (known.backup.sequence == actual.backup.sequence
+            && known.backup.last_result.as_ref().is_some_and(|r| {
+                actual
+                    .backup
+                    .pending
+                    .as_ref()
+                    .is_some_and(|p| p.request == r.request)
+            }))
+    {
+        vm.backup = known.backup.clone();
+        vm.ssh = known.ssh.clone();
+    }
+    if let Some(request) = &known.backup.forwarding {
+        let confirmed = actual
+            .backup
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.request == *request)
+            || actual
+                .backup
+                .last_result
+                .as_ref()
+                .is_some_and(|r| r.request == *request)
+            || known
+                .backup
+                .forwarding_settled_sequence
+                .is_some_and(|sequence| actual.backup.sequence >= sequence);
+        if !confirmed {
+            vm.backup.forwarding = Some(request.clone());
+            vm.backup.forwarding_reserved_mib = known.backup.forwarding_reserved_mib;
+            vm.backup.forwarding_settled_sequence = known.backup.forwarding_settled_sequence;
+        } else {
+            vm.backup.forwarding = None;
+            vm.backup.forwarding_reserved_mib = 0;
+            vm.backup.forwarding_settled_sequence = None;
+        }
+    }
     if let Some(target) = known.pending_resources {
         let overhead = vm.options.config_disk_mib(vm.engine);
         let completed = vm.pending_resources.is_none()
@@ -1344,6 +1403,7 @@ mod tests {
     }
     fn record(id: &str, env: &str) -> Vm {
         Vm {
+            backup: Default::default(),
             ssh: None,
             pending_resources: None,
             id: id.into(),

@@ -118,11 +118,14 @@ For multiple hosts, use [distributed deployment](docs/deployment.md#distributed-
   Identity, application installation and idle-stop policy remain caller responsibilities.
 - Image preparation happens on each agent host. There is no automatic image
   distribution, cross-host private network, guest migration or high availability.
+- [VM disk backup](docs/disk-backup.md) is opt-in and stopped-only, using ZFS
+  snapshots or strict file reflinks. Refresh preserves the previous recovery point
+  until publication, then cleans it asynchronously. No full-copy fallback exists.
 
 Resource and lifecycle details, including failure recovery, are in the
 [API reference](docs/rest-api.md#lifecycle-and-recovery). The CLI is
 `tt status`, `tt config`, `tt host {add,list,show,remove,detach}`,
-`tt env {create,list,show,start,stop,resize,delete}`,
+`tt env {create,list,show,start,stop,resize,backup,delete}`,
 `tt image {list,recipes,create}` and `tt deploy {agent,ctl,all,dist}`; use
 `tt --help` and `tt env create --help` for options. Request defaults are listed
 in the [API request reference](docs/rest-api.md#environment-requests).

@@ -9,7 +9,14 @@ use ttcore::model::*;
 use ttcore::net;
 use ttcore::storage::{self, ImageStore};
 
+#[path = "backup.rs"]
+mod backup;
+
 pub struct Runtime {
+    backup_enabled: bool,
+    backup_unsupported: Option<String>,
+    backup_running: HashSet<String>,
+    backup_locks: std::path::PathBuf,
     pub ssh_ingress: Option<crate::ssh_ingress::SshIngress>,
     pub host_id: String,
     db: Connection,
@@ -44,6 +51,10 @@ impl Runtime {
             .c(d!("agent DB timeout"))?;
         init_db(&db)?;
         let mut rt = Self {
+            backup_enabled: false,
+            backup_unsupported: Some("backup unsupported: backend has not been qualified".into()),
+            backup_running: HashSet::new(),
+            backup_locks: std::path::Path::new(db_path).parent().unwrap().into(),
             ssh_ingress: None,
             host_id,
             db,
@@ -190,6 +201,7 @@ impl Runtime {
         options.ssh_keys.sort();
         options.ssh_keys.dedup();
         if let Some(mut vm) = load_vm(&self.db, &req.vm_id)? {
+            self.backup_guard(&vm)?;
             vm.options.ports.sort_unstable();
             vm.options.ports.dedup();
             vm.options.ssh_keys.sort();
@@ -220,7 +232,11 @@ impl Runtime {
             return Err(eg!("base image does not exist"));
         }
         let disk = match req.engine {
-            Engine::Docker | Engine::Bhyve | Engine::Jail => 0,
+            Engine::Docker | Engine::Jail => 0,
+            Engine::Bhyve => {
+                u32::try_from(self.store.bhyve_size(&base_image)?.div_ceil(1024 * 1024))
+                    .c(d!("bhyve disk too large"))?
+            }
             Engine::Firecracker => {
                 let bytes = self.store.firecracker_size(&base_image)?;
                 let base_mib =
@@ -275,6 +291,7 @@ impl Runtime {
             std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, p)).is_ok()
         })?;
         let mut vm = Vm {
+            backup: Default::default(),
             ssh: None,
             pending_resources: None,
             id: req.vm_id.clone(),
@@ -308,6 +325,7 @@ impl Runtime {
                 file.persist(ttcore::ssh::seed_path(&vm.id))
                     .map_err(|e| eg!(e.error.to_string()))?;
                 vm.ssh = Some(ttcore::ssh::SshInfo {
+                    observation_error: None,
                     user: settings.user.clone(),
                     sudo: settings.sudo,
                     host: self
@@ -435,7 +453,13 @@ impl Runtime {
 
     pub fn stop_vm(&mut self, id: &str) -> Result<()> {
         let mut vm = load_vm(&self.db, id)?.ok_or_else(|| eg!(format!("VM not found: {id}")))?;
-        if vm.state == VmState::Stopped {
+        self.backup_guard(&vm)?;
+        if vm.state == VmState::Stopped
+            && !vm
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("stop unfinished:"))
+        {
             return Ok(());
         }
         if matches!(vm.state, VmState::Creating | VmState::Deleting) {
@@ -451,7 +475,7 @@ impl Runtime {
                 vm.error = None;
             }
             Err(e) => {
-                vm.error = Some(e.to_string());
+                vm.error = Some(format!("stop unfinished: {e}"));
                 save_vm(&self.db, &vm)?;
                 return Err(e);
             }
@@ -462,6 +486,7 @@ impl Runtime {
 
     pub fn start_vm(&mut self, id: &str) -> Result<()> {
         let mut vm = load_vm(&self.db, id)?.ok_or_else(|| eg!(format!("VM not found: {id}")))?;
+        self.backup_guard(&vm)?;
         if vm.pending_resources.is_some() {
             return Err(eg!(
                 "resource update unfinished; retry the recorded resources before starting"
@@ -526,6 +551,17 @@ impl Runtime {
     /// Change a stopped VM without replacing its disk or identity.
     pub fn resize_vm(&mut self, id: &str, target: VmResources) -> Result<Vm> {
         let mut vm = load_vm(&self.db, id)?.ok_or_else(|| eg!(format!("VM not found: {id}")))?;
+        self.backup_guard(&vm)?;
+        if vm.backup.has_artifacts()
+            && target.disk
+                != vm
+                    .disk
+                    .saturating_sub(vm.options.config_disk_mib(vm.engine))
+        {
+            return Err(eg!(
+                "conflict: remove backups and finish cleanup before disk resizing"
+            ));
+        }
         if !matches!(vm.engine, Engine::Qemu | Engine::Firecracker) {
             return Err(eg!("resource updates require QEMU or Firecracker"));
         }
@@ -615,6 +651,11 @@ impl Runtime {
         let Some(mut vm) = load_vm(&self.db, id)? else {
             return Ok(());
         };
+        if self.backup_running.contains(id) {
+            return Err(eg!(
+                "conflict: backup writer is active; retry deletion after it settles"
+            ));
+        }
         vm.state = VmState::Deleting;
         save_vm(&self.db, &vm)?;
         // Disk deletion is safe only after process termination is confirmed.
@@ -625,6 +666,11 @@ impl Runtime {
             return Err(e);
         }
         let mut errors = Vec::new();
+        self.delete_backups(&vm)?;
+        vm.backup.current = None;
+        vm.backup.pending = None;
+        vm.backup.retired.clear();
+        save_vm(&self.db, &vm)?;
         let mut collect = |result: Result<()>| {
             if let Err(e) = result {
                 errors.push(e.to_string());
@@ -738,6 +784,15 @@ impl Runtime {
                 ssh.initialized = ttcore::ssh::initial_identity_ready(&vm.ip, &ssh.host_key);
             }
             ssh.ready = reachable && ssh.initialized;
+            if ssh.observation_error.is_some() && vm.state == VmState::Running {
+                ssh.observation_error = if ssh.ready {
+                    None
+                } else if reachable {
+                    Some("initial SSH identity not confirmed after disk restore".into())
+                } else {
+                    Some("SSH banner unavailable after disk restore".into())
+                };
+            }
             ssh.checked_at = now();
         }
         save_vm(&self.db, &vm)?;
@@ -772,7 +827,21 @@ impl Runtime {
             vms: None,
             warnings: vec![],
             image_sizes: Default::default(),
-            capabilities: detect_capabilities(&self.engines, self.storage),
+            capabilities: {
+                let mut caps = detect_capabilities(&self.engines, self.storage);
+                caps.push("disk_backup_v1".into());
+                if self.backup_unsupported.is_none() {
+                    caps.push(
+                        if self.storage == Storage::Zvol {
+                            "disk_backup_zvol_v1"
+                        } else {
+                            "disk_backup_reflink_v1"
+                        }
+                        .into(),
+                    );
+                }
+                caps
+            },
             host_id: self.host_id.clone(),
             resource: self.resource.clone(),
             engines: self.engines.clone(),
@@ -899,7 +968,7 @@ fn bind_container_runtime(
 }
 
 /// The only supported agent database format. There is no in-agent migration.
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 
 fn init_db(db: &Connection) -> Result<()> {
     let populated: bool = db
@@ -945,7 +1014,7 @@ fn init_db(db: &Connection) -> Result<()> {
             .commit()
             .c(d!("commit agent database initialization"))?;
     }
-    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
         .c(d!("configure agent database"))?;
     Ok(())
 }
@@ -1202,6 +1271,7 @@ mod tests {
 
     fn make_vm(id: &str, state: VmState) -> Vm {
         Vm {
+            backup: Default::default(),
             ssh: None,
             pending_resources: None,
             id: id.into(),
@@ -1340,7 +1410,8 @@ mod tests {
             Some("2"),
             Some("3"),
             Some("4"),
-            Some("6"),
+            Some("5"),
+            Some("7"),
             Some("invalid"),
         ] {
             let dir = tempfile::tempdir().unwrap();
@@ -1531,8 +1602,12 @@ mod lifecycle_tests {
         fn start(&self, _: &Vm) -> Result<()> {
             Ok(())
         }
-        fn stop(&self, _: &Vm) -> Result<()> {
-            Ok(())
+        fn stop(&self, vm: &Vm) -> Result<()> {
+            if vm.image == "stop-fails" {
+                Err(eg!("injected stop failure"))
+            } else {
+                Ok(())
+            }
         }
         fn destroy(&self, vm: &Vm) -> Result<()> {
             if vm.image == "fail-delete" {
@@ -1555,6 +1630,10 @@ mod lifecycle_tests {
     fn runtime(db: Connection) -> Runtime {
         init_db(&db).unwrap();
         Runtime {
+            backup_enabled: false,
+            backup_unsupported: None,
+            backup_running: HashSet::new(),
+            backup_locks: std::env::temp_dir(),
             ssh_ingress: None,
             host_id: "h1".into(),
             db,
@@ -1573,6 +1652,44 @@ mod lifecycle_tests {
             container_runtime: None,
             port_range: 20000..=65535,
             network_ready: false,
+        }
+    }
+
+    #[test]
+    fn retry_of_interrupted_stop_confirms_exit_and_clears_only_its_own_error() {
+        for engine in [
+            Engine::Qemu,
+            Engine::Firecracker,
+            Engine::Bhyve,
+            Engine::Jail,
+        ] {
+            let mut rt = runtime(Connection::open_in_memory().unwrap());
+            let mut guest = vm("stop-retry", "stop-fails", VmState::Running);
+            guest.engine = engine;
+            save_vm(&rt.db, &guest).unwrap();
+            assert!(rt.stop_vm(&guest.id).is_err());
+            guest = load_vm(&rt.db, &guest.id).unwrap().unwrap();
+            assert!(
+                guest
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("stop unfinished:")
+            );
+            // Reconciliation can observe exit before the caller retries the failed stop.
+            guest.state = VmState::Stopped;
+            guest.image = "stopped".into();
+            save_vm(&rt.db, &guest).unwrap();
+            rt.stop_vm(&guest.id).unwrap();
+            let mut stopped = load_vm(&rt.db, &guest.id).unwrap().unwrap();
+            assert!(stopped.error.is_none());
+            stopped.error = Some("unrelated resource update error".into());
+            save_vm(&rt.db, &stopped).unwrap();
+            rt.stop_vm(&guest.id).unwrap();
+            assert_eq!(
+                load_vm(&rt.db, &guest.id).unwrap().unwrap().error,
+                stopped.error
+            );
         }
     }
     /// Fault injection at the storage boundary, without changing process-wide PATH.
@@ -1833,6 +1950,7 @@ mod lifecycle_tests {
     }
     fn vm(id: &str, image: &str, state: VmState) -> Vm {
         Vm {
+            backup: Default::default(),
             ssh: None,
             pending_resources: None,
             id: id.into(),
@@ -2168,6 +2286,7 @@ mod lifecycle_tests {
             .unwrap();
         }
         let state = std::sync::Arc::new(crate::handler::AgentShared {
+            backup_settings: (false, None),
             info: AgentInfo {
                 vms: None,
                 warnings: vec![],
@@ -2242,6 +2361,35 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn bhyve_capacity_is_rechecked_before_allocating_runtime_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = std::fs::File::create(dir.path().join("raw-image")).unwrap();
+        // A partial MiB still needs a full MiB reservation.
+        disk.set_len(1024 * 1024 + 1).unwrap();
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        rt.engines = vec![Engine::Bhyve];
+        rt.store = Box::new(ttcore::storage::file::FileStore);
+        rt.image_dir = dir.path().to_str().unwrap().into();
+        rt.runtime_dir = dir.path().to_str().unwrap().into();
+        rt.resource.disk_total = 1;
+        let req: CreateVmReq = serde_json::from_value(serde_json::json!({
+            "vm_id":"bhyve-budget", "env_id":"env", "image":"raw-image",
+            "engine":"bhyve", "cpu":1, "mem":128, "disk":0,
+            "ports":[], "deny_outgoing":false, "ssh_keys":[]
+        }))
+        .unwrap();
+        assert!(
+            rt.create_vm(&req)
+                .unwrap_err()
+                .to_string()
+                .contains("insufficient resources")
+        );
+        assert!(rt.list_vms().unwrap().is_empty());
+        assert_eq!(rt.resource.vm_count, 0);
+        assert!(!dir.path().join("clone-bhyve-budget").exists());
+    }
+
+    #[test]
     fn bhyve_propagates_strict_file_disk_resolution() {
         let dir = tempfile::tempdir().unwrap();
         let mut rt = runtime(Connection::open_in_memory().unwrap());
@@ -2310,6 +2458,7 @@ mod lifecycle_tests {
                     images: vec![],
                 };
                 let state = std::sync::Arc::new(crate::handler::AgentShared {
+                    backup_settings: (false, None),
                     runtime: std::sync::Arc::new(tokio::sync::Mutex::new(rt)),
                     db_path: db_path.to_string_lossy().into(),
                     info,

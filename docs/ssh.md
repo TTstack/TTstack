@@ -88,8 +88,10 @@ reachability from the agent, not external routing or initial-key validity foreve
 The advertised host key is the initial identity, not a key-rotation registry.
 
 Agents require ssh-keygen and ssh-keyscan to advertise `ssh_bootstrap`.
-Controller schema v4 and agent schema v5 preserve SSH options, host identity and
-bootstrap observation; v5 additionally protects agent runtime/network bindings.
+Controller schema v5 and agent schema v6 preserve SSH options, host identity,
+runtime/network bindings and the disk-backup lifecycle. Disk restore invalidates
+old SSH observations and exposes `ssh.observation_error` while the initial identity
+is unconfirmed; see the [restore policy](disk-backup.md#ssh-observations-after-restore).
 Upgrade them together following the target revision's compatibility requirements.
 Existing VMs without SSH options are not rekeyed or reimaged.
 

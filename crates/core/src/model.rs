@@ -193,6 +193,8 @@ pub struct Host {
 /// A VM or container instance managed by an agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vm {
+    #[serde(default)]
+    pub backup: crate::backup::State,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh: Option<crate::ssh::SshInfo>,
     /// Durable intent for an unfinished offline resource update. Retry the same target.
@@ -232,12 +234,14 @@ pub struct VmResources {
 
 impl Vm {
     pub fn reserved_disk(&self) -> u32 {
-        self.pending_resources.map_or(self.disk, |r| {
-            self.disk.max(
-                r.disk
-                    .saturating_add(self.options.config_disk_mib(self.engine)),
-            )
-        })
+        self.pending_resources
+            .map_or(self.disk, |r| {
+                self.disk.max(
+                    r.disk
+                        .saturating_add(self.options.config_disk_mib(self.engine)),
+                )
+            })
+            .saturating_add(self.backup.reserved_mib())
     }
 }
 

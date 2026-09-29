@@ -16,6 +16,7 @@ code change does not inherit a fresh live-validation claim from an older report.
 | Linux Firecracker + file storage | Jailer, configuration drive, prepared-image SSH, offline ext4 growth, shutdown and opt-in isolation | [Two-host audit fixes, 2026-09-28](validation/audit-fixes-2026-09-28.md): SSH-only configuration disks, resource accounting and recovery; [2026-09-24 follow-up](validation/firecracker-validation-2026-09-24.md) covers isolation and shutdown cases |
 | Linux Firecracker + zvol | Snapshot clones, jailed block devices, prepared-image SSH and ext4 growth | [Zvol lifecycle, 2026-09-24](validation/firecracker-zvol-validation-2026-09-24.md); [subsequent SSH deployment](validation/expert-ssh-2026-09-28.md#subsequent-firecrackerzfs-deployment) |
 | QEMU + zvol | Raw ZFS volumes, snapshot clones and offline resource updates | [Alpine resize and recovery, 2026-09-26](validation/qemu-resize-validation-2026-09-26.md) on file storage and dedicated ZFS pools |
+| Stopped VM disk backup | QEMU/Firecracker root-disk recovery points on zvol or qualified reflink storage | [Two-host backup validation, 2026-09-29](validation/disk-backup-validation-2026-09-29.md): ZFS and XFS reflink, explicit unsupported storage, restore/retry/cleanup; no online or host-power-loss claim |
 | Podman | Alternate container runtime bound to the agent inventory | [Native probes, 2026-09-26](validation/engine-capability-probes-2026-09-26.md); these did not validate the complete TTstack lifecycle or enable container resource/network-policy APIs |
 | Ubuntu cloud guest | Built-in QEMU recipe | Not covered by the listed guest lifecycle runs |
 | Linux/systemd deployment | Local/distributed service generation and isolated service restart | [Linux upgrade, 2026-09-24](validation/linux-host-upgrade-validation-2026-09-24.md) and later isolated runs; not every deploy configuration |
@@ -59,11 +60,17 @@ records the exact tested revision and scope.
   `rc.shutdown`; bhyve stop requests ACPI shutdown with SIGTERM and can fall back
   to SIGKILL. Deletion waits for confirmed termination, and a failed devfs
   unmount retains the Jail root. Guest memory is not retained.
-- Jail CPU/memory and both engines' disk usage are not enforced host limits;
-  FreeBSD disk accounting is currently zero. CPU/memory reservations are used
-  for placement. Jail zvol storage is rejected. Bhyve zvols accept FreeBSD
+- Jail CPU/memory and disk usage are not enforced host limits. Jail disk
+  accounting remains zero. bhyve reserves the full raw file or zvol capacity,
+  rounded up to MiB; placement requires an agent that reports image sizes and
+  admission rechecks capacity before cloning. Disk sizing/resizing is still
+  unsupported. CPU/memory reservations are used for placement. Jail zvol storage is rejected. Bhyve zvols accept FreeBSD
   character devices; see the [native zvol follow-up](validation/freebsd-zvol-validation-2026-09-28.md)
   for clone lifecycle and retry coverage.
+- bhyve on zvol storage supports the shared opt-in [disk backup protocol](disk-backup.md),
+  including stopped-only admission, ownership checks, retry and deferred cleanup.
+  FreeBSD file storage has no strict reflink backend; Jail roots are ineligible.
+  Unsupported backup requests never fall back to a full copy.
 - Both FreeBSD engines reject Linux guest configuration and `isolated_network`.
   Keep mutually untrusted tenants on a separately validated isolation setup.
 
@@ -153,6 +160,12 @@ an upgrade policy for future data.
   installation, connection leases and idle-stop policy belong in callers.
 - No automatic guest restart after host reboot, guest migration, HA, distributed storage,
   image distribution or application/database provisioning.
+- Optional [disk backup](disk-backup.md) supports stopped QEMU/Firecracker root
+  disks on zvol or qualified reflink storage, and experimental bhyve root zvols.
+  No full-copy fallback, memory snapshot,
+  online backup, container backup, or deleted-VM recovery is provided. Filesystem
+  and image eligibility must be checked; a host capability alone does not validate
+  every disk image or underlying storage configuration.
 - QEMU and Firecracker support stopped-VM CPU/RAM updates and disk growth on file
   and ZFS storage. QEMU requires `qemu_resources` and expands only the virtual disk;
   the guest must grow its partitions/filesystems. See the
