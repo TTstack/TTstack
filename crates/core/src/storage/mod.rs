@@ -2,7 +2,7 @@
 //!
 //! Two backends: plain file copies (`FileStore`) and ZFS zvols (`ZvolStore`).
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub mod backup;
 pub mod file;
 pub mod zvol;
@@ -38,6 +38,16 @@ pub trait ImageStore: Send + Sync {
 
     /// Disk format string for the engine (e.g. `"qcow2"` or `"raw"`).
     fn disk_format(&self) -> &'static str;
+
+    /// Bhyve raw disk capacity; no resize or format conversion is implied.
+    fn bhyve_size(&self, path: &str) -> Result<u64> {
+        let disk =
+            std::fs::symlink_metadata(self.resolve_disk(path)?).c(d!("inspect bhyve disk"))?;
+        if !disk.is_file() || disk.len() == 0 {
+            return Err(eg!("bhyve file storage requires a nonempty regular disk"));
+        }
+        Ok(disk.len())
+    }
 
     /// Inspect a QEMU base image or an offline clone's virtual disk capacity.
     fn qemu_size(&self, path: &str) -> Result<u64> {
@@ -100,6 +110,13 @@ pub fn image_sizes(
             let bytes = store
                 .firecracker_size(&path)
                 .or_else(|_| store.qemu_size(&path))
+                .or_else(|error| {
+                    if cfg!(target_os = "freebsd") {
+                        store.bhyve_size(&path)
+                    } else {
+                        Err(error)
+                    }
+                })
                 .ok()?;
             let size = u32::try_from(bytes.div_ceil(1024 * 1024)).ok()?;
             (size > 0).then(|| (name.clone(), size))
@@ -123,5 +140,31 @@ mod tests {
     fn create_store_names() {
         assert_eq!(create_store(Storage::File).name(), "file");
         assert_eq!(create_store(Storage::Zvol).name(), "zvol");
+    }
+
+    #[test]
+    fn bhyve_capacity_rejects_empty_ambiguous_and_linked_disks() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_str().unwrap();
+        let disk = temp.path().join("disk.raw");
+        std::fs::write(&disk, []).unwrap();
+        assert!(file::FileStore.bhyve_size(root).is_err());
+        std::fs::write(&disk, [0; 1025]).unwrap();
+        assert_eq!(file::FileStore.bhyve_size(root).unwrap(), 1025);
+        #[cfg(target_os = "freebsd")]
+        assert_eq!(
+            image_sizes(&file::FileStore, root, &["disk.raw".into()])["disk.raw"],
+            1
+        );
+        let second = temp.path().join("second.raw");
+        std::fs::write(&second, [0; 2048]).unwrap();
+        assert!(file::FileStore.bhyve_size(root).is_err());
+        std::fs::remove_file(&second).unwrap();
+        std::os::unix::fs::symlink(&disk, &second).unwrap();
+        assert!(
+            file::FileStore
+                .bhyve_size(second.to_str().unwrap())
+                .is_err()
+        );
     }
 }

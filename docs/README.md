@@ -16,6 +16,7 @@ behavior and are updated together with the code.
 | Create or restore an opt-in local disk recovery point | [VM disk backup](disk-backup.md) |
 | Check supported platforms and validation limits | [Compatibility](compatibility.md) |
 | Configure initial VM SSH and public ingress | [SSH](ssh.md) |
+| Inspect the experimental FreeBSD restoration and its limits | [FreeBSD scope](compatibility.md#experimental-freebsd-restoration) |
 | Configure distributed deployment | [Fleet template](../tools/deploy.toml.example) |
 | Contribute or choose an AI workflow | [Repository instructions](../AGENTS.md) and [Claude workflows](../.claude/README.md) |
 
@@ -43,11 +44,15 @@ establish. A new report belongs in `docs/validation/` and is linked here.
 
 | Evidence | Document |
 | --- | --- |
+| Master synchronization, native FreeBSD regressions, bhyve backup/restore and Jail rejection | [FreeBSD master synchronization, 2026-09-29](validation/freebsd-master-sync-2026-09-29.md) |
 | Opt-in ZFS/reflink disk backup, interrupted operations, exact replay and isolated cleanup on two hosts | [VM disk backup, 2026-09-29](validation/disk-backup-validation-2026-09-29.md) |
+| Master rebase, native database/ownership regressions and FreeBSD Jail/bhyve lifecycle | [FreeBSD master port, 2026-09-28](validation/freebsd-master-port-2026-09-28.md) |
 | 0.5.1 version-only deployment, retained state and observed caller-driven VM interruption | [0.5.1 upgrade, 2026-09-28](validation/version-0.5.1-upgrade-2026-09-28.md) |
 | Native agent database initialization, reopen and non-mutating format rejection | [Native agent schema, 2026-09-28](validation/native-agent-schema-2026-09-28.md) |
 | Configuration-disk accounting, resource ownership, restart recovery and cleanup on two hosts | [Lifecycle audit fixes, 2026-09-28](validation/audit-fixes-2026-09-28.md) |
 | Native SSH/SCP, full guest sudo and cold restart on QEMU/Firecracker | [Expert SSH, 2026-09-28](validation/expert-ssh-2026-09-28.md) |
+| FreeBSD 15.1 bhyve zvol lifecycle, deletion retries and engine-specific egress restrictions | [FreeBSD zvol and egress validation, 2026-09-28](validation/freebsd-zvol-validation-2026-09-28.md) |
+| Native FreeBSD build, Jail/bhyve lifecycle, SSH and PF cleanup after PR #12 corrections | [FreeBSD restoration validation, 2026-09-28](validation/freebsd-validation-2026-09-28.md) |
 | Container cleanup, unknown resize outcomes, heartbeat availability and scoped port forwarding on two hosts | [Lifecycle correction validation, 2026-09-28](validation/lifecycle-corrections-2026-09-28.md) |
 | Implemented QEMU resize, partial-growth recovery and lifecycle on file/ZFS | [QEMU resize validation, 2026-09-26](validation/qemu-resize-validation-2026-09-26.md) |
 | Native QEMU resize, Docker/Podman resource and network feasibility | [Engine capability probes, 2026-09-26](validation/engine-capability-probes-2026-09-26.md) |

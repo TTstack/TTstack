@@ -286,8 +286,11 @@ pub async fn get_backup(
         let vm = runtime::read_vm(&state.db_path, &id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("not found: VM {id}"))?;
-        let unsupported_reason = if vm.engine == ttcore::model::Engine::Docker {
-            Some("backup unsupported: container disks are not managed by TTstack".into())
+        let unsupported_reason = if matches!(
+            vm.engine,
+            ttcore::model::Engine::Docker | ttcore::model::Engine::Jail
+        ) {
+            Some("backup unsupported: container and Jail roots are not VM disks".into())
         } else {
             state.backup_settings.1.clone()
         };
@@ -433,6 +436,7 @@ async fn run_backup(
                     .as_ref()
                     .ok_or("not found: backup absent")?;
                 let removed = context.prepare_restore(&lock, source, &vm.backup.retired)?;
+                #[cfg(target_os = "linux")]
                 if vm.engine == ttcore::model::Engine::Firecracker {
                     ttcore::engine::firecracker::FirecrackerEngine::prepare_disk_restore(&vm)
                         .map_err(|e| e.to_string())?;

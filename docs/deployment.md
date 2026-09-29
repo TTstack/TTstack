@@ -137,7 +137,9 @@ keys must use only letters, digits, `-`, `_` and `.`.
 Distributed deployment detects systemd or OpenRC. OpenRC and musl targets are
 implemented but not covered by the current live validation. The fallback on hosts
 with neither init system is an unmanaged background process, not a persistent
-service setup. Deployment targets must be Linux hosts.
+service setup. Automated deployment targets must be Linux hosts. Experimental
+FreeBSD hosts require native binaries and manual setup; see the
+[restoration limits](compatibility.md#experimental-freebsd-restoration).
 
 Deployment does **not** register agents or distribute images. Configure the CLI
 with the controller address and the protected sidecar key, prepare images on the relevant hosts,
@@ -215,14 +217,17 @@ tested combinations.
 
 Before upgrading, back up controller and agent SQLite state together with retained
 VM disks. All tracked engines must be among the current `qemu`, `firecracker`,
-and `docker` values, including cached host engine lists. Unknown engine values
-are rejected, never mapped to another backend or silently deleted. If old state
+`docker`, `bhyve` and `jail` values, including cached host engine lists. Unknown
+engine values are rejected, never mapped to another backend or silently deleted. If old state
 contains an unsupported engine, use its compatible prior release to drain/remove
 those workloads and unregister their hosts before upgrading. Do not edit raw state
 to pretend that an existing workload uses a different engine.
 
 With a compatible database, ordinary Linux workspaces retain their identities,
 disks and lifecycle state through an upgrade.
+Returning to a Linux-only release requires removing FreeBSD workloads and cached
+host entries first; see [FreeBSD upgrade limits](compatibility.md#experimental-freebsd-restoration).
+
 
 CLI credentials are written atomically with mode 0600 and require `HOME`.
 Reconfiguring the same address without a key preserves its saved key. Changing

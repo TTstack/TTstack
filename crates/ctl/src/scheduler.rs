@@ -17,13 +17,13 @@ pub struct Placement {
 }
 
 fn disk_reservation(spec: &VmSpec, host: &Host) -> Option<u32> {
-    if spec.engine == Engine::Docker {
+    if matches!(spec.engine, Engine::Docker | Engine::Jail) {
         return Some(0);
     }
     let base = host.image_sizes.get(&spec.image).copied();
     let disk = match (spec.disk, spec.engine) {
         (Some(disk), _) => disk,
-        (None, Engine::Firecracker) => base?,
+        (None, Engine::Firecracker | Engine::Bhyve) => base.filter(|size| *size > 0)?,
         _ => spec.engine.default_disk(),
     };
     if base.is_some_and(|base| disk < base) {
@@ -66,6 +66,7 @@ pub fn place_vm(
         (!spec.isolated_network || has("isolated_network"))
             && (spec.ssh.is_none() || has("ssh_bootstrap"))
             && (spec.guest_config.is_empty() || has("guest_config"))
+            && (spec.engine != Engine::Bhyve || !spec.deny_outgoing || has("bhyve_deny_outgoing"))
             && (spec.engine != Engine::Firecracker || has("firecracker_jailer"))
             && (spec.engine != Engine::Firecracker
                 || spec.disk.is_none()
@@ -81,6 +82,7 @@ pub fn place_vm(
             h.state == HostState::Online
                 && supports(h)
                 && h.engines.contains(&spec.engine)
+                && !(h.storage == Storage::Zvol && spec.engine == Engine::Jail)
                 && disk_reservation(spec, h).is_some_and(|disk| h.resource.can_fit(cpu, mem, disk))
                 && (!check_images
                     || host_images
@@ -126,6 +128,7 @@ pub fn place_vm(
                 h.state == HostState::Online
                     && h.engines.contains(&spec.engine)
                     && supports(h)
+                    && !(h.storage == Storage::Zvol && spec.engine == Engine::Jail)
                     && disk_reservation(spec, h)
                         .is_some_and(|disk| h.resource.can_fit(cpu, mem, disk))
             })
@@ -254,6 +257,21 @@ mod tests {
     }
 
     #[test]
+    fn bhyve_egress_restriction_requires_the_agent_capability() {
+        let mut host = make_host("freebsd", 4, 4096, vec![Engine::Bhyve]);
+        let mut spec = make_spec();
+        spec.engine = Engine::Bhyve;
+        spec.disk = None;
+        spec.deny_outgoing = true;
+        assert!(place_vm(std::slice::from_ref(&host), &spec, &HashMap::new()).is_err());
+        host.capabilities.push("bhyve_deny_outgoing".into());
+        assert!(place_vm(std::slice::from_ref(&host), &spec, &HashMap::new()).is_ok());
+        spec.deny_outgoing = false;
+        host.capabilities.clear();
+        assert!(place_vm(&[host], &spec, &HashMap::new()).is_ok());
+    }
+
+    #[test]
     fn image_sized_disks_and_config_drives_are_reserved_during_placement() {
         let mut host = make_host("host", 8, 8192, vec![Engine::Firecracker]);
         host.image_sizes.insert("ubuntu".into(), 1024);
@@ -277,6 +295,66 @@ mod tests {
         host.image_sizes.clear();
         spec.disk = None;
         assert!(place_vm(&[host], &spec, &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn bhyve_placement_requires_capacity_and_reserves_the_full_root_disk() {
+        let mut host = make_host("freebsd", 4, 4096, vec![Engine::Bhyve]);
+        let mut spec = make_spec();
+        spec.engine = Engine::Bhyve;
+        spec.disk = None;
+        host.resource.disk_total = 200;
+        assert_eq!(
+            place_vm(std::slice::from_ref(&host), &spec, &HashMap::new())
+                .unwrap()
+                .disk,
+            128
+        );
+        assert!(
+            schedule_env(
+                std::slice::from_ref(&host),
+                &[spec.clone(), spec.clone()],
+                &HashMap::new()
+            )
+            .is_err()
+        );
+        host.image_sizes.clear();
+        assert!(place_vm(std::slice::from_ref(&host), &spec, &HashMap::new()).is_err());
+        host.image_sizes.insert(spec.image.clone(), 0);
+        assert!(place_vm(&[host], &spec, &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn freebsd_placement_requires_matching_engine_and_file_storage_for_jail() {
+        let linux = make_host("linux", 8, 8192, vec![Engine::Qemu]);
+        let mut freebsd = make_host("freebsd", 4, 4096, vec![Engine::Bhyve, Engine::Jail]);
+        freebsd.capabilities.clear();
+        let mut spec = make_spec();
+        spec.disk = None;
+        for engine in [Engine::Bhyve, Engine::Jail] {
+            spec.engine = engine;
+            assert!(place_vm(std::slice::from_ref(&linux), &spec, &HashMap::new()).is_err());
+            let placement =
+                place_vm(&[linux.clone(), freebsd.clone()], &spec, &HashMap::new()).unwrap();
+            assert_eq!(placement.host_id, "freebsd");
+        }
+        let mut zvol = freebsd.clone();
+        zvol.id = "freebsd-zvol".into();
+        zvol.storage = Storage::Zvol;
+        assert!(place_vm(&[zvol.clone()], &spec, &HashMap::new()).is_err());
+        assert_eq!(
+            place_vm(&[zvol.clone(), freebsd.clone()], &spec, &HashMap::new())
+                .unwrap()
+                .host_id,
+            "freebsd"
+        );
+        spec.engine = Engine::Bhyve;
+        assert_eq!(
+            place_vm(&[freebsd, zvol], &spec, &HashMap::new())
+                .unwrap()
+                .host_id,
+            "freebsd-zvol"
+        );
     }
 
     #[test]

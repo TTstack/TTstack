@@ -1,7 +1,8 @@
 # VM disk backup
 
 TTstack can retain one current root-disk recovery point for a stopped QEMU or
-Firecracker VM. Backup admission is **disabled by default**. This is a local disk
+Firecracker VM, or an experimental FreeBSD bhyve VM on zvol storage. Backup
+admission is **disabled by default**. This is a local disk
 rollback facility: it does not save memory or recover a deleted VM or failed host.
 
 ## Enable and use
@@ -45,13 +46,21 @@ shown by `env show`; the normal default is six hours unless explicitly changed.
 | QEMU + `file` | Strict filesystem reflink of an eligible standalone qcow2 image |
 | Firecracker + `file` | Strict filesystem reflink of its raw `rootfs.ext4` file |
 | File storage without qualified reflink support | Backup unsupported |
-| Docker/Podman | Backup unsupported |
+| FreeBSD bhyve + `zvol` | Snapshot the VM's runtime root zvol |
+| FreeBSD bhyve + `file` | Backup unsupported; no strict file reflink implementation |
+| Docker/Podman or FreeBSD Jail | Backup unsupported |
 
 There is **no full-file-copy fallback or opt-in slow mode**, including sparse
 copies or image conversion. qcow2 internal snapshots are not implemented by this
 release. A file image on ZFS still uses the file/reflink path, not an automatic
 dataset snapshot. Provisioning's existing `cp --reflink=auto` behavior does not
 apply to backup.
+
+Strict file reflinks currently use Linux `FICLONE`; FreeBSD file storage returns
+unsupported without copying or modifying the disk. bhyve zvols use the shared ZFS
+ownership, retry, restore and cleanup protocol; its root capacity is reserved
+at placement and rechecked on the agent before cloning. Jail roots are directories and
+are rejected before storage admission even when the host has ZFS.
 
 Reflink support is probed at the configured runtime location, with independent
 writes verified. Source and backup files must be on the same eligible filesystem.
@@ -63,7 +72,8 @@ configured logical disk budget.
 
 Host capabilities are `disk_backup_v1` for the protocol and, when qualified,
 `disk_backup_zvol_v1` or `disk_backup_reflink_v1`. Inspection's `supported` flag
-describes the host mechanism; the particular disk is revalidated on admission.
+describes engine and host-mechanism eligibility; the particular disk is revalidated
+on admission.
 Unsupported eligibility returns an explicit `backup unsupported: ...` error.
 Timeouts, unavailable storage, and exhausted budgets remain operational errors;
 none triggers a copy fallback or an unvalidated backend switch.

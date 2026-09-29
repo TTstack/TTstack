@@ -2,7 +2,9 @@
 use ruc::*;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::process::Command;
+#[cfg(target_os = "linux")]
 use ttcore::command::CommandExt;
 use ttcore::model::Vm;
 
@@ -15,6 +17,9 @@ pub struct SshIngress {
 
 impl SshIngress {
     pub fn validate(&self) -> Result<()> {
+        if !cfg!(target_os = "linux") && self.namespace.is_some() {
+            return Err(eg!("outer SSH network namespaces require Linux"));
+        }
         if self.namespace.is_some() != self.target.is_some() {
             return Err(eg!(
                 "SSH ingress requires both namespace and target address"
@@ -31,7 +36,10 @@ impl SshIngress {
         }
         Ok(())
     }
+}
 
+#[cfg(target_os = "linux")]
+impl SshIngress {
     fn command(&self) -> Command {
         if let Some(namespace) = &self.namespace {
             let mut cmd = Command::new("nsenter");
@@ -128,6 +136,18 @@ impl SshIngress {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+impl SshIngress {
+    pub fn apply(&self, _: &Vm) -> Result<()> {
+        self.validate()
+    }
+
+    pub fn remove(&self, _: &str) -> Result<()> {
+        self.validate()
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn remove_rules(rules: Option<&serde_json::Value>, id: &str) -> String {
     let mut script = String::new();
     if let Some(items) = rules.and_then(|r| r["nftables"].as_array()) {
@@ -148,7 +168,7 @@ fn remove_rules(rules: Option<&serde_json::Value>, id: &str) -> String {
     script
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     #[test]
@@ -163,5 +183,32 @@ mod tests {
             "delete rule ip tt-ssh prerouting handle 1\n"
         );
         assert_eq!(remove_rules(None, "mine"), "");
+    }
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+mod platform_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_linux_namespace_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut ingress = SshIngress {
+            public_address: "192.0.2.1".parse().unwrap(),
+            namespace: Some(directory.path().to_path_buf()),
+            target: Some("192.0.2.2".parse().unwrap()),
+        };
+        assert!(
+            ingress
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("require Linux")
+        );
+        assert!(ingress.remove("guest").is_err());
+        ingress.namespace = None;
+        ingress.target = None;
+        assert!(ingress.validate().is_ok());
+        assert!(ingress.remove("guest").is_ok());
     }
 }

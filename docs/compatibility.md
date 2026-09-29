@@ -1,7 +1,8 @@
 # Compatibility and validation scope
 
-Linux x86_64 is the supported host implementation and CI target. The host agent
-requires Linux. QEMU/KVM, Firecracker and Docker/Podman are the available engines.
+Linux x86_64 is the supported host implementation and CI target, with QEMU/KVM,
+Firecracker and Docker/Podman. The agent also includes experimental FreeBSD
+Bhyve/Jail paths; this is outside the Linux support commitment and CI scope.
 
 ## Implementation versus live verification
 
@@ -21,11 +22,108 @@ code change does not inherit a fresh live-validation claim from an older report.
 | Linux/systemd deployment | Local/distributed service generation and isolated service restart | [Linux upgrade, 2026-09-24](validation/linux-host-upgrade-validation-2026-09-24.md) and later isolated runs; not every deploy configuration |
 | Agent database initialization | Current native schema, identity and runtime/network bindings | [Process-level checks, 2026-09-28](validation/native-agent-schema-2026-09-28.md): fresh initialization, reopen and non-mutating rejection of incompatible fixtures; no production data migration |
 | Linux/OpenRC, musl binaries | Distributed deployment support | No complete live deployment coverage in the listed reports |
+| FreeBSD Bhyve/Jail/PF | Restored experimental implementation, manual setup | Native FreeBSD 15.1 lifecycle, bhyve backup/restore and Jail eligibility; see [the dated report](validation/freebsd-master-sync-2026-09-29.md) |
 | Other host platforms | No validated agent deployment path | No support commitment |
 
 The [validation index](README.md#validation-evidence) retains earlier engine,
 storage, networking and caller evidence. Unit tests, prerequisite detection and
 a recipe's presence do not establish guest boot or application readiness.
+
+## Experimental FreeBSD restoration
+
+The `bhyve` and `jail` engines remain experimental. Native binaries and manual
+service/network setup are required; automated deployment and primary CI remain
+Linux-only. Live FreeBSD validation covers **FreeBSD 15.1-RELEASE-p3 (amd64) only**;
+other FreeBSD versions have not been live-tested. The [dated FreeBSD report](validation/freebsd-validation-2026-09-28.md)
+records the exact tested revision and scope.
+
+Host implementations are selected with Rust `cfg(target_os)`, not additive Cargo
+features: Linux includes QEMU, Firecracker and Docker/Podman; FreeBSD includes
+bhyve and Jail. Linux nftables SSH namespace ingress is excluded from FreeBSD.
+Shared engine names, models and validation remain available on both targets so
+a controller can manage a mixed fleet. No Cargo feature enables another OS's
+host implementation; an incompatible engine is rejected by the local factory.
+
+- Bhyve uses `bhyveload`, `bhyve`, `bhyvectl` and `/dev/vmmctl`. Supply a raw disk
+  that `bhyveload` can boot, with its own guest networking and credentials. There
+  is no Bhyve image recipe, SSH injection, guest configuration or resource resize.
+  Renamed interfaces retain a separately recorded `/dev/tapN` device. Startup
+  failures are reported with a runtime log; process identity is checked before
+  termination. A leftover VMM device alone does not mean a VM is running.
+- Jail uses file storage with a copied FreeBSD root. The `freebsd-base` recipe
+  requires a RELEASE host, uses its exact major/minor release (without the patch
+  suffix), downloads with the native `fetch` utility, and publishes only a
+  completely extracted/configured root. Existing incomplete/unmanaged recipe
+  directories require inspection and moving aside before retry. Custom roots
+  must provide `/etc/rc`, `/etc/rc.shutdown` and their desired services. Jail root
+  paths must be UTF-8 without whitespace.
+- Jails share the agent's IP stack, receive an alias on `tt0`, and run their rc
+  scripts. Public keys enable root key authentication; the built-in recipe starts
+  sshd. This is not VNET isolation. Jail rejects `deny_outgoing`; retained Jail
+  records with that option report a recovery error. Bhyve supports this option
+  through PF, gated by the agent's `bhyve_deny_outgoing` capability. Upgrade both
+  controller and agent before requesting it.
+- Stop/start cold-boots a retained bhyve disk or Jail root. Jail stop invokes
+  `rc.shutdown`; bhyve stop requests ACPI shutdown with SIGTERM and can fall back
+  to SIGKILL. Deletion waits for confirmed termination, and a failed devfs
+  unmount retains the Jail root. Guest memory is not retained.
+- Jail CPU/memory and disk usage are not enforced host limits. Jail disk
+  accounting remains zero. bhyve reserves the full raw file or zvol capacity,
+  rounded up to MiB; placement requires an agent that reports image sizes and
+  admission rechecks capacity before cloning. Disk sizing/resizing is still
+  unsupported. CPU/memory reservations are used for placement. Jail zvol storage is rejected. Bhyve zvols accept FreeBSD
+  character devices; see the [native zvol follow-up](validation/freebsd-zvol-validation-2026-09-28.md)
+  for clone lifecycle and retry coverage.
+- bhyve on zvol storage supports the shared opt-in [disk backup protocol](disk-backup.md),
+  including stopped-only admission, ownership checks, retry and deferred cleanup.
+  FreeBSD file storage has no strict reflink backend; Jail roots are ineligible.
+  Unsupported backup requests never fall back to a full copy.
+- Both FreeBSD engines reject Linux guest configuration and `isolated_network`.
+  Keep mutually untrusted tenants on a separately validated isolation setup.
+
+The agent uses the same native database format and persistent network ownership
+checks as Linux. Its configured `--port-start`/`--port-end` range governs PF
+mappings and cannot change while VM records remain. Reconciliation probes one
+VM at a time, allowing queued lifecycle operations between probes. Linux outer
+SSH namespace options are rejected on FreeBSD; Jail root-key access continues
+through its ordinary mapped port without managed SSH endpoint metadata.
+
+PF must already be enabled and the operator must install the following hooks
+in the active root ruleset, with the filter hook before broader pass rules:
+
+```pf
+# Place any operator-owned outbound NAT here, before rdr rules.
+rdr-anchor "ttstack/*"
+anchor "ttstack/*"
+```
+
+Use the wildcard filter hook **without `quick`**; the native PF implementation
+otherwise stops visiting subsequent child anchors. TTstack checks this prerequisite
+and does not change the root ruleset. Individual guest rules use `quick`.
+Outbound NAT and the remaining firewall policy stay operator-owned.
+
+Each published TCP port has an independent translation/filter anchor. Separate
+interface-bound states cover the external and guest-facing legs, preserving
+replies to mapped connections when bhyve's deny anchor blocks new routed IPv4
+initiation before source NAT. Host-local access remains allowed. This is an
+IPv4 egress restriction, not anti-spoofing, peer or IPv6 isolation. Existing
+connections can retain their PF states. Create/restart/delete preserve sibling
+anchors; deletion removes both translation and filter rules.
+
+When the agent itself runs in a VNET jail, its parent must delegate child-jail
+creation and devfs mounting (`children.max`, `allow.mount`, `allow.mount.devfs`,
+`enforce_statfs < 2`), and expose the needed PF/TAP/VMM devices. For bhyve this includes
+`/dev/vmmctl`, `/dev/vmm/*` and `/dev/vmm.io/*`, as well as the TAP devices;
+bhyve additionally requires `allow.vmm`. Nested Jail guests also need permission to mount devfs with
+ruleset 4; the agent's VMM/ZFS devices can use a separate devfs mount ruleset.
+Use a dedicated test jail; changing a gateway jail's
+permissions or firewall is not required by TTstack.
+
+The Linux-only release cannot deserialize restored engine names in persisted
+VMs or cached host lists. Upgrade controller and agents together when trying this
+branch. Before returning to Linux-only binaries, use this branch to remove all
+FreeBSD workloads and unregister their hosts; keep consistent state/disk backups.
+Existing dated Linux reports below retain their original tested revisions and scope.
 
 ## Build and CI
 
@@ -70,7 +168,8 @@ an upgrade policy for future data.
 - No automatic guest restart after host reboot, guest migration, HA, distributed storage,
   image distribution or application/database provisioning.
 - Optional [disk backup](disk-backup.md) supports stopped QEMU/Firecracker root
-  disks on zvol or qualified reflink storage. No full-copy fallback, memory snapshot,
+  disks on zvol or qualified reflink storage, and experimental bhyve root zvols.
+  No full-copy fallback, memory snapshot,
   online backup, container backup, or deleted-VM recovery is provided. Filesystem
   and image eligibility must be checked; a host capability alone does not validate
   every disk image or underlying storage configuration.
