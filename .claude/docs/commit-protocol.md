@@ -60,12 +60,13 @@ commit → new atomic fix, then re-run the affected checks.
 - The version lives in `[workspace.package] version` of the root
   [Cargo.toml](../../Cargo.toml); every crate inherits it. There is no changelog and
   no release convention — do not bump or tag unless the user asks.
-- The real compatibility gates are `SCHEMA_VERSION`
-  (`crates/ctl/src/db.rs`, `crates/agent/src/runtime.rs`) and the host capability
-  strings advertised in `crates/agent/src/runtime.rs` and consumed by
-  `crates/ctl/src/scheduler.rs`. Controller and agent upgrade together: an older
+- Compatibility includes `SCHEMA_VERSION`
+  (`crates/ctl/src/db.rs`, `crates/agent/src/runtime.rs`), stored engine values and
+  the scoped capability/legacy protocol contracts in `crates/core/src/capability.rs`.
+  Additive host reports do not themselves require a database migration; preserve
+  their version and explicit legacy mapping. Controller and agent upgrade together: an older
   binary rejects a newer schema, and unknown stored engine values are rejected rather
-  than remapped (`docs/deployment.md`). A change to any of these carries its
-  migration and guide update in the same unit.
+  than remapped (`docs/deployment.md`). Document compatibility and any required
+  migration with the guide update in the same unit.
 - `make deploy*` requires root and changes live services; it is never a development
   check. Deployment behavior is documented in `docs/deployment.md`.

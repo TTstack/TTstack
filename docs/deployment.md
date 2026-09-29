@@ -182,7 +182,7 @@ Agent options for resource ownership and guest access include:
 | --- | --- |
 | `--container-runtime docker\|podman` | Choose the persisted container runtime; also available as `TT_CONTAINER_RUNTIME` and TOML `container_runtime` |
 | `--ssh-public-address IPv4` | Advertise the client-reachable SSH address |
-| `--ssh-ingress-netns PATH` and `--ssh-ingress-target IPv4` | Add SSH-only forwarding through an outer network namespace; supply both together |
+| `--ssh-ingress-netns PATH` and `--ssh-ingress-target IPv4` | Linux-only SSH forwarding through an outer network namespace; supply both together |
 | `--port-start PORT` and `--port-end PORT` | Set an agent's host TCP allocation range |
 
 The SSH/port options are agent startup flags, not fields in the distributed TOML

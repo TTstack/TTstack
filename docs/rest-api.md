@@ -68,11 +68,14 @@ entire recovery scan.
 
 `POST /api/vms/{id}/resources` takes `{"cpu": 4, "mem": 8192, "disk": 16384}`.
 All three positive values are required; memory/root disk use MiB. This operation
-supports stopped QEMU and Firecracker VMs on file or ZFS storage. The agent must
-advertise **`qemu_resources`** for QEMU or **`firecracker_resources`** for Firecracker;
-the latter is separate from creation-time `firecracker_disk_resize`.
-Docker/Podman is rejected by both controller and agent. This operation does not
-stop or start guests or offer an atomic multi-VM update. The CLI equivalent is:
+supports stopped QEMU and Firecracker VMs on file or ZFS storage. Fresh updates
+require scoped `vm.resources.offline` support for that engine/storage pair.
+For agents without a report, the legacy gates are `qemu_resources` and
+`firecracker_resources`; creation-time disk sizing is a separate capability.
+See [capability admission and recovery](capabilities.md#decisions-and-recovery).
+Docker/Podman, bhyve and Jail are rejected by both controller and agent. This
+operation does not stop or start guests or offer an atomic multi-VM update.
+The CLI equivalent is:
 
 ```sh
 tt env stop demo
@@ -145,13 +148,17 @@ Each `VmSpec` accepts:
 | `mem` | integer | Positive memory in MiB; default 1024 |
 | `disk` | integer | Disk size in MiB. QEMU defaults to 40960; Firecracker defaults to the base rootfs size and allows creation-time ext4 growth. Omit for other engines |
 | `ports` | integer[] | Up to 256 TCP guest-port entries; default empty; port 22 is added for QEMU/Bhyve/Jail and for guests with SSH bootstrap |
-| `deny_outgoing` | boolean | Default false; block routed outgoing initiation, not host/guest isolation; QEMU/Firecracker/Bhyve; rejected for Docker/Jail; Bhyve requires the agent capability `bhyve_deny_outgoing` |
+| `deny_outgoing` | boolean | Default false; block routed outgoing initiation, not host/guest isolation; QEMU/Firecracker/Bhyve; requires scoped `net.egress.deny` support; rejected for Docker/Jail |
 | `isolated_network` | boolean | Default false; Linux QEMU/Firecracker only; block peers, guest-initiated host access, private/link-local destinations and IPv6; allow public IPv4 egress and replies to inbound connections |
 | `guest_config` | object | Default `{}`; Firecracker only; simple file names mapped to UTF-8 strings on a read-only drive; [file/byte limits](guest-images.md#firecracker-guest-configuration) also apply to the managed SSH seed |
 | `ssh_keys` | string[] | Empty; merged with environment keys; QEMU or prepared Firecracker; root keys for experimental Jail |
 | `ssh` | object | Optional initial account settings: `{"user":"user","sudo":true}`; requires public keys; keys without this object select `root` with no extra sudo grant |
 
 Bhyve and Jail retain [experimental FreeBSD limitations](compatibility.md#experimental-freebsd-restoration).
+Jail accepts only default root/no-sudo SSH options with public keys, normalized
+to root-key injection; it does not return managed SSH metadata. Bhyve accepts no
+SSH keys or account options. Host checks use the scoped report when present and
+the [explicit legacy mapping](capabilities.md#compatibility) otherwise.
 CLI engine aliases such as `kvm`, `fc` and `podman` are not JSON enum values.
 VM responses include optional `ssh` endpoint/readiness metadata; see the
 [SSH contract](ssh.md) for keys, images, ingress and schema compatibility.
@@ -189,7 +196,7 @@ through the environment cleanup path.
 
 Each `Vm` includes its `id`, `env_id`, `host_id`, image/engine, `cpu`, `mem`, `disk`,
 internal `ip`, `port_map`, saved creation `options`, `state`, nullable `error` and
-`created_at`, optional `pending_resources` and optional `ssh` metadata.
+`created_at`, `backup` state, optional `pending_resources` and optional `ssh` metadata.
 `Vm.disk` is the total disk reservation; Firecracker includes its configuration
 drive when present. Resource-update request `disk` is the root disk only.
 For example, `"port_map":{"22":20000}` means host TCP port 20000
@@ -203,8 +210,10 @@ Resource `*_total` fields are configured scheduling capacities; `*_used` fields
 are **reservations**, not measured CPU load, RAM use or physical filesystem usage.
 Stopped guests release CPU/memory reservations and retain disk reservations. Failed
 or incomplete operations conservatively retain resources until cleanup. `vm_count`
-includes stopped/failed/deleting records. Docker disk usage is not accounted or
-quota-enforced; Firecracker reserves its requested rootfs size (or the image size when omitted) plus 4 MiB when a
+includes stopped/failed/deleting records. Docker and Jail disk usage is not
+accounted or quota-enforced. bhyve reserves the raw image/zvol capacity rounded
+up to MiB; placement requires a reported image size, and the agent rechecks it.
+Firecracker reserves its requested rootfs size (or the image size when omitted) plus 4 MiB when a
 configuration drive is present, including an SSH-only configuration drive.
 Firecracker memory reservations include 128 MiB
 of VMM headroom in addition to the guest's `mem`; stopped guests release both.
@@ -236,7 +245,8 @@ before requesting capabilities they do not advertise. A transient catalog failur
 returns an empty catalog instead of declaring every existing guest offline.
 Unreadable VM rows retain their raw data and close new admission; healthy rows
 remain available for background recovery and targeted deletion. Strict inventory
-reads report malformed state rather than silently discarding it.
+reads report malformed state rather than silently discarding it. An offline host
+retains its last capability report for inspection but cannot receive placement.
 VM placement prefers eligible ZFS hosts, then file hosts; see the
 [storage policy](guest-images.md#storage). This does not migrate existing VMs.
 
@@ -281,6 +291,8 @@ immediate engine probes, and end-to-end freshness is not guaranteed within 15 se
   The image must support orderly shutdown; a successful stop alone does not prove
   that the guest flushed its data. Stopping a paused Firecracker first resumes it.
   Resume failure also falls back to forced termination. Save work before stopping. Partial failures are reported instead of hidden.
+  Experimental bhyve/Jail also retain disks/roots across cold starts; their
+  shutdown paths and limits are in [FreeBSD scope](compatibility.md#experimental-freebsd-restoration).
 - **Delete:** failed cleanup returns an error and retains remaining records as
   `deleting`. The controller retries, or the client can repeat DELETE. A missing
   agent does not make its resources disappear from tracking. Offline hosts are
@@ -327,10 +339,12 @@ normal fleet operations to avoid untracked resources.
 as in a VM specification. `ssh_keys` and `guest_config` default to empty and
 `isolated_network` defaults to false. Unlike controller
 requests, QEMU requires a positive `disk`; Firecracker accepts 0 for the image
-size or a positive creation-time size in MiB. Other engines require 0. Agent
-create/start/stop/delete errors currently return HTTP 500, including validation
-failures. Resource-update validation/state errors use 400/409 as described above;
-other resource-update failures use 500.
+size or a positive creation-time size in MiB. Other engines require 0; bhyve's
+reservation is derived from its base image rather than a requested disk size.
+Agent creation capability rejections return HTTP 400. Other create errors,
+including validation failures without a capability diagnostic, and start/stop/delete
+errors use HTTP 500. Resource-update validation/state errors use 400/409 as
+described above; other resource-update failures use 500.
 
 Repeated creation with the same VM ID and parameters reuses the record rather
 than allocating a second VM. A stopped VM stays stopped; use start explicitly.

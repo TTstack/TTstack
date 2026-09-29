@@ -80,7 +80,8 @@ partition/filesystem; increasing the virtual disk alone does not do that. Disk
 reservations track virtual capacity, not physical bytes used by sparse files.
 For an existing stopped VM on file or ZFS storage, use
 [`tt env resize`](rest-api.md#offline-resource-updates) to change CPU/RAM and grow
-the virtual disk. The agent must advertise `qemu_resources`. CPU/RAM take effect
+the virtual disk. Fresh updates require scoped `vm.resources.offline` support
+(`qemu_resources` on legacy agents without a report). CPU/RAM take effect
 at the next boot; guest filesystem growth remains the guest's responsibility.
 
 Stop requests guest shutdown, then terminates QEMU if necessary. Start boots the
@@ -192,16 +193,19 @@ image size is rejected before allocation; the base image is never modified.
 Disk space is reserved at the requested logical size, even for sparse files;
 configuration drives reserve another 4 MiB, including when only SSH bootstrap is
 configured. Filesystem metadata and reserved
-blocks reduce the capacity reported by guest tools such as `df`. Upgrade agents to one advertising
-`firecracker_disk_resize` before specifying a size. CPU/RAM still need to fit the
-host's configured capacity, including VMM overhead. TTstack has no application
+blocks reduce the capacity reported by guest tools such as `df`. Explicit sizes
+require scoped `disk.size.create` support (`firecracker_disk_resize` on legacy
+agents without a report). CPU/RAM still need to fit the host's configured
+capacity, including VMM overhead. TTstack has no application
 or user-tier sizing policy; callers can impose their own ceilings.
 
 Ordinary stop/start preserves the selected size and data. To change an existing
 stopped Firecracker VM, use the explicit [offline resource API](rest-api.md#offline-resource-updates).
 It grows the same root disk and ext4 filesystem, rejects shrinking, and requires
-the separate `firecracker_resources` capability. CPU/RAM changes take effect at
-the next cold boot; no memory or process state is retained.
+the separate `vm.resources.offline` capability (`firecracker_resources` on legacy
+agents). See [capability admission](capabilities.md#decisions-and-recovery).
+CPU/RAM changes take effect at the next cold boot; no memory or process state
+is retained.
 
 Stop requests orderly shutdown on x86_64, waits up to 30 seconds, then forcibly
 terminates if necessary. The kernel needs `CONFIG_SERIO_I8042` and
@@ -260,16 +264,18 @@ lightweight backup environments return an error without full-file copying.
 
 | Backend | Base image format | Runtime storage |
 |---|---|---|
-| `file` | QEMU qcow2 file; Firecracker kernel/rootfs directory | Per-VM copy, using reflinks on Linux when available, otherwise a full copy |
-| `zvol` | QEMU raw disk volume; Firecracker kernel dataset with an ext4 root volume | Per-VM snapshot clones |
+| `file` | QEMU qcow2 file; Firecracker kernel/rootfs directory; experimental bhyve raw file or Jail root directory | Per-VM copy, using reflinks on Linux when available, otherwise a full copy |
+| `zvol` | QEMU or experimental bhyve raw disk volume; Firecracker kernel dataset with an ext4 root volume | Per-VM snapshot clones; Jail is unsupported |
 | Docker runtime | Container image | Managed by Docker/Podman, independently of agent storage |
 
-For QEMU and Firecracker, the controller prefers eligible **zvol hosts** over file
-hosts, then packs by free memory within that group. The host must be online, have
+For QEMU, Firecracker and experimental bhyve, the controller prefers eligible
+**zvol hosts** over file hosts, then packs by free memory within that group. The host must be online, have
 the image and required capabilities, and have sufficient reservations. If no ZFS
 host qualifies, a file host can be selected. Docker placement is unchanged.
-Firecracker on ZFS requires the `firecracker_zvol` agent capability; update both
-controller and agents before using it.
+Firecracker on ZFS requires scoped `vm.run` support for the zvol backend. Agents
+without a report must advertise both `firecracker_jailer` and `firecracker_zvol`;
+see [capability compatibility](capabilities.md#compatibility). bhyve reserves the
+base disk's full raw capacity; Jail uses file storage with no disk quota/accounting.
 
 Storage is an operator-provisioned host setting: use `--storage zvol` with dataset
 names such as `tank/ttstack/images` and `tank/ttstack/runtime`, not `/dev/zvol/...`
@@ -396,7 +402,7 @@ addresses on public networks are not covered by a private-address egress block.
 QEMU and Firecracker instructions above describe Linux hosts. The restored
 FreeBSD Bhyve/Jail/PF paths require manual setup and retain known lifecycle and
 networking limitations. See [FreeBSD scope](compatibility.md#experimental-freebsd-restoration)
-and [compatibility and validation](compatibility.md) for tested Linux workflows.
+and [compatibility and validation](compatibility.md) for tested combinations.
 
 Reserve the agent's configured host TCP port pool for TTstack; the default is
 20000–65535 and `--port-start` / `--port-end` set inclusive bounds. Other host

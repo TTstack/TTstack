@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TTstack — Lightweight Private Cloud</title>
-<meta name="description" content="TTstack manages VMs and containers across small Linux fleets: create temporary or retained environments, access them, and stop, restart or delete them.">
+<meta name="description" content="TTstack manages VMs and containers across small Linux fleets, with experimental FreeBSD support, scoped capability checks and opt-in stopped-disk backups.">
 <meta property="og:type" content="website">
 <meta property="og:title" content="TTstack — Lightweight Private Cloud">
-<meta property="og:description" content="A small VM and container manager for Linux fleets, with QEMU/KVM, Firecracker and Docker/Podman behind one controller.">
+<meta property="og:description" content="QEMU/KVM, Firecracker and Docker/Podman on Linux, plus experimental bhyve/Jail on FreeBSD, managed through one controller.">
 <meta property="og:url" content="https://ttstack.github.io/TTstack/">
 <meta name="theme-color" content="#eef3fa">
 <link rel="icon" href="favicon.svg?v=3" type="image/svg+xml">
@@ -41,6 +41,10 @@
       temporary or retained environments on your Linux hosts, reach them over SSH
       or published ports, and manage their lifecycle from one controller.
     </p>
+    <p class="muted">
+      Linux x86_64 is the supported host platform. Mixed fleets can also use
+      <a href="#freebsd">experimental FreeBSD bhyve and Jail</a> with manual setup.
+    </p>
     <p class="cta">
       <a class="btn primary" href="https://github.com/TTstack/TTstack#quick-start-one-linuxsystemd-host">Get started</a>
       <a class="btn" href="https://github.com/TTstack/TTstack">View on GitHub</a>
@@ -59,8 +63,8 @@
     </p>
     <figure class="figure figure--arch">
       <svg viewBox="0 0 640 616" role="img" aria-labelledby="archTitle archDesc">
-        <title id="archTitle">TTstack component diagram</title>
-        <desc id="archDesc">The tt CLI and browser dashboard talk HTTP to the tt-ctl controller. The controller and each host agent keep SQLite state. Agents manage QEMU/KVM or Firecracker VMs, or Docker/Podman containers, with host-local disks and networking.</desc>
+        <title id="archTitle">TTstack components and Linux engines</title>
+        <desc id="archDesc">The tt CLI and browser dashboard talk HTTP to the tt-ctl controller. The controller and each host agent keep SQLite state. The Linux engines shown are QEMU/KVM, Firecracker and Docker/Podman. The same controller can manage experimental bhyve/Jail agents on FreeBSD.</desc>
         <defs>
           <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
             <path d="M0,0 L10,5 L0,10 z" fill="#6b6a66"></path>
@@ -129,7 +133,8 @@
       <figcaption class="figcaption">
         The CLI and dashboard speak HTTP to the controller; the controller keeps fleet
         state and drives the host agents, which own the engines and the host resources
-        underneath them. Details in the
+        underneath them. Linux engines are shown; experimental FreeBSD agents use
+        the same controller API. Details in the
         <a href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md">API reference</a>.
       </figcaption>
     </figure>
@@ -173,7 +178,7 @@
     </p>
     <div class="terms">
       <div class="term">
-<pre><code>$ tt env create demo --image alpine-cloud \
+<pre><code>$ tt env create demo --owner dev --image alpine-cloud \
     --engine qemu --cpu 1 --mem 256 --disk 2048 \
     --ssh-key ~/.ssh/id_ed25519.pub --lifetime 0
 $ tt env show demo
@@ -301,7 +306,7 @@ Fleet Status
   </section>
 
   <section id="engines">
-    <h2>Three engines, one interface</h2>
+    <h2>Linux engines, one interface</h2>
     <div class="grid">
       <article class="card">
         <svg class="icon" viewBox="0 0 26 26" role="img" aria-label="QEMU/KVM" fill="none" stroke="#2a78d6" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
@@ -345,6 +350,17 @@ Fleet Status
     </div>
   </section>
 
+  <section id="freebsd">
+    <h2>Experimental FreeBSD</h2>
+    <p>
+      bhyve boots prepared raw disks and supports stopped zvol backups; Jail uses
+      copied roots with optional root public keys. Neither supports offline
+      resizing or Linux guest network isolation. Native binaries and manual
+      host/network setup are required.
+      <a href="https://github.com/TTstack/TTstack/blob/master/docs/compatibility.md#experimental-freebsd-restoration">FreeBSD scope and limits &rarr;</a>
+    </p>
+  </section>
+
   <section id="highlights">
     <h2>Highlights</h2>
     <p class="muted">
@@ -352,6 +368,34 @@ Fleet Status
       stack small.
     </p>
     <div class="grid">
+      <article class="card">
+        <svg class="icon icon--neutral" viewBox="0 0 26 26" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 6l2 2 3-4M4 14l2 2 3-4M4 22l2 2 3-4"></path>
+          <path d="M13 6h9M13 14h9M13 22h9"></path>
+        </svg>
+        <h3>Inspect capabilities before creation</h3>
+        <p>
+          <code>tt capabilities</code> shows engine/storage support;
+          <code>tt host show HOST_ID</code> explains host availability and denial
+          reasons. Placement, direct agent requests and dashboard controls share
+          the same capability contracts. Offline reports remain visible as history.
+        </p>
+        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/capabilities.md">Technical capabilities &rarr;</a></p>
+      </article>
+      <article class="card">
+        <svg class="icon icon--neutral" viewBox="0 0 26 26" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="4" width="20" height="18" rx="3"></rect>
+          <path d="M18 10a6 6 0 1 0 0 7M18 5v5h-5"></path>
+        </svg>
+        <h3>Opt-in disk recovery points</h3>
+        <p>
+          Back up stopped QEMU/Firecracker root disks on qualified ZFS or reflink
+          storage, or experimental bhyve root zvols. Restore overwrites the current
+          disk and leaves the VM stopped. There is no full-copy fallback;
+          environment deletion and expiry also remove its backups.
+        </p>
+        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/disk-backup.md">Disk backup and restore &rarr;</a></p>
+      </article>
       <article class="card">
         <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Expiry and deletion retries" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="13" cy="13" r="9"></circle>
@@ -444,7 +488,7 @@ Fleet Status
           QEMU and Firecracker support CPU and memory increases or decreases for
           the next boot, and disk growth while stopped. QEMU guests manage their
           own filesystem growth; Firecracker also grows ext4 offline.
-          Resource updates are unavailable for Docker/Podman.
+          Resource updates are unavailable for Docker/Podman, bhyve and Jail.
         </p>
         <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md#offline-resource-updates">Offline resource updates &rarr;</a></p>
       </article>
@@ -458,12 +502,13 @@ Fleet Status
         <p>
           No message queue and no database server: the controller and each agent keep
           their state in SQLite, and you drive the fleet from the CLI, the REST API or
-          the web dashboard. Advanced SSH, guest configuration and resize options
-          are available through the CLI and API.
+          the web dashboard. The dashboard supports basic SSH-key input and host
+          capability inspection; custom SSH accounts, guest configuration, resize
+          and disk backup are available through the CLI and API.
         </p>
       </article>
       <article class="card">
-        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="One Rust workspace on Linux hosts" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="One Rust workspace" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
           <rect x="2.5" y="4.5" width="21" height="17" rx="2.5"></rect>
           <path d="M7 10l3 3-3 3"></path>
           <path d="M13 16h6"></path>
@@ -471,7 +516,8 @@ Fleet Status
         <h3>One workspace, your hosts</h3>
         <p>
           <code>tt</code>, <code>tt-ctl</code>, <code>tt-agent</code> and the shared
-          core are a single Rust workspace, running on Linux x86_64 hosts.
+          core are a single Rust workspace. Linux and experimental FreeBSD builds
+          select their native host implementations while sharing fleet models.
         </p>
       </article>
     </div>
@@ -489,6 +535,10 @@ Fleet Status
     <ul class="points">
       <li><strong>Small Linux fleets.</strong> Linux x86_64 is the supported host
         platform. The 50-host and 1000-VM limits are guardrails, not benchmarked capacity.</li>
+      <li><strong>Experimental FreeBSD in mixed fleets.</strong> Native lifecycle
+        tests cover FreeBSD 15.1-RELEASE-p3 amd64 alongside two Linux hosts.
+        Primary CI and automated deployment remain Linux-only; this does not
+        establish support for other FreeBSD versions or untrusted-tenant isolation.</li>
       <li><strong>One administrator boundary.</strong> Deployment configures a shared
         API key. Owner labels are not authorization, and services use HTTP without
         built-in TLS. Manual starts without a key leave the API unauthenticated.
@@ -527,6 +577,14 @@ Fleet Status
       <a class="card link-card" href="https://github.com/TTstack/TTstack/blob/master/docs/compatibility.md">
         <h3>Compatibility</h3>
         <p>Supported scope, CI coverage and the limits of live verification.</p>
+      </a>
+      <a class="card link-card" href="https://github.com/TTstack/TTstack/blob/master/docs/capabilities.md">
+        <h3>Technical capabilities</h3>
+        <p>Engine/storage support, scoped host reports and compatibility.</p>
+      </a>
+      <a class="card link-card" href="https://github.com/TTstack/TTstack/blob/master/docs/disk-backup.md">
+        <h3>VM disk backup</h3>
+        <p>Opt-in stopped-disk recovery points, restore, retries and cleanup.</p>
       </a>
     </div>
     <p class="muted">

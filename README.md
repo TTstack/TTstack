@@ -10,9 +10,10 @@ stopping, restarting and deleting them. Workloads can expire automatically or st
 until explicitly deleted.
 
 Linux x86_64 is the supported host platform, with QEMU/KVM, Firecracker, and
-Docker/Podman engines. This branch also restores [experimental FreeBSD
-Bhyve/Jail support](docs/compatibility.md#experimental-freebsd-restoration), outside
-the Linux validation and CI scope.
+Docker/Podman engines. [Experimental FreeBSD
+bhyve/Jail support](docs/compatibility.md#experimental-freebsd-restoration) is also
+available for mixed fleets, with manual setup and limited native validation.
+Primary CI and the supported host commitment remain Linux-only.
 
 ## Architecture
 
@@ -33,9 +34,10 @@ tt CLI / Browser → HTTP → tt-ctl → HTTP → tt-agent (one per host)
 The Rust workspace uses Tokio/Axum for HTTP and asynchronous coordination, SQLite
 for persistent state, and installed hypervisor/container tools to run workloads.
 There is one controller; no separate message queue or database server is required.
-The dashboard covers fleet inventory and basic environment actions. The CLI and
-REST API also expose offline resizing, guest configuration and advanced initial
-SSH options.
+The dashboard covers fleet inventory, scoped host capabilities and basic
+environment actions, including SSH keys for QEMU, prepared Firecracker and Jail.
+The CLI and REST API also expose offline resizing, disk backup, guest
+configuration and advanced initial SSH options.
 
 ## Quick start: one Linux/systemd host
 
@@ -100,6 +102,9 @@ For multiple hosts, use [distributed deployment](docs/deployment.md#distributed-
   to file storage.
   It uses configured CPU, memory and disk reservations, not measured load.
   Limits of 50 hosts and 1000 tracked VMs are guardrails, not tested fleet capacity.
+- Inspect engine/storage support with `tt capabilities` and host prerequisites
+  with `tt host show HOST_ID`. Shared [capability checks](docs/capabilities.md)
+  drive request validation, placement, agent admission and dashboard controls.
 - QEMU cloud images and prepared Firecracker images support
   [initial SSH accounts and public keys](docs/ssh.md), with optional guest sudo.
   QEMU supports virtual-disk growth;

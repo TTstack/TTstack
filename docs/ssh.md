@@ -4,7 +4,10 @@ QEMU and prepared Firecracker guests accept initial OpenSSH public keys and
 `ssh: {"user":"user","sudo":true}` in each VM specification. CLI equivalents are
 `--ssh-key PATH --ssh-user user --ssh-sudo`. Supplying keys without `ssh` selects
 `root` without an additional sudo grant. An explicit SSH configuration requires a
-key. Docker has no managed SSH bootstrap. The scheduler requires `ssh_bootstrap`.
+key. Docker has no managed SSH bootstrap. Requests for managed QEMU/Firecracker
+SSH require scoped `guest.ssh.bootstrap` support; Firecracker also needs
+`guest.config.drive` for the SSH seed. Agents without a report use the
+[legacy mapping](capabilities.md#compatibility), including `ssh_bootstrap`.
 
 For example, with a prepared image named `fc-ssh` already available on a host:
 
@@ -21,9 +24,14 @@ the agent's [public-address configuration](#reachable-endpoint). `ssh.user` is
 letters, digits, `_` or `-`. CLI account/sudo options accompany `--ssh-key`.
 
 Experimental FreeBSD Jail retains root public-key injection without Linux SSH
-bootstrap or `ssh` response metadata. Its keys do not require `ssh_bootstrap`;
+bootstrap or `ssh` response metadata. Its scoped capability is `guest.ssh.root_keys`;
 only the default root/no-sudo SSH options are accepted. Bhyve does not support
 key injection or SSH options. See [FreeBSD scope](compatibility.md#experimental-freebsd-restoration).
+
+The dashboard accepts public keys for QEMU, prepared Firecracker and Jail, with
+controls driven by the capability matrix. Custom users and sudo remain CLI/API
+options. The provisioning and readiness contract below applies to managed
+QEMU/Firecracker SSH, not Jail root-key injection.
 
 TTstack receives no login private key. The caller owns key generation, custody
 and download. Initial provisioning creates the account, installs its public keys,
@@ -54,12 +62,13 @@ private backups. Deleting the VM removes its seed. There is no key-update API.
 
 ## Reachable endpoint
 
-Configure `tt-agent --ssh-public-address IPv4` with the actual client-reachable
-resource-host address. If the agent shares the public network namespace, its
+For managed Linux VM SSH, configure `tt-agent --ssh-public-address IPv4` with the
+actual client-reachable resource-host address. If the agent shares the public network namespace, its
 normal mapped port is used. An agent in a private network namespace additionally
 uses `--ssh-ingress-netns /proc/1/ns/net --ssh-ingress-target AGENT_PRIVATE_IP`.
-The two ingress options must be supplied together. `nsenter` and nftables must be
-available; the namespace path must refer to the host network namespace.
+The two ingress options are Linux-only and must be supplied together. FreeBSD
+rejects them. `nsenter` and nftables must be available; the namespace path must
+refer to the host network namespace.
 
 The agent installs only the VM's SSH DNAT rule in the outer `ip tt-ssh` table,
 identified by its VM UUID, and removes that rule on VM deletion. It does not expose
@@ -87,7 +96,7 @@ banner and do not reconcile user key/config edits. This measures guest service
 reachability from the agent, not external routing or initial-key validity forever.
 The advertised host key is the initial identity, not a key-rotation registry.
 
-Agents require ssh-keygen and ssh-keyscan to advertise `ssh_bootstrap`.
+Agents require ssh-keygen and ssh-keyscan to advertise managed SSH support.
 Controller schema v5 and agent schema v6 preserve SSH options, host identity,
 runtime/network bindings and the disk-backup lifecycle. Disk restore invalidates
 old SSH observations and exposes `ssh.observation_error` while the initial identity

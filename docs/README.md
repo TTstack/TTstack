@@ -24,7 +24,7 @@ behavior and are updated together with the code.
 ## Proposals
 
 These retain design context; each document distinguishes implemented work from remaining proposals.
-The [proposal review](proposals/audit.md) checks those claims against the code.
+The [proposal review](proposals/audit.md) records checks against its dated code baseline.
 It is not the [defect registry](audit.md).
 
 - [VM disk backup design](proposals/vm-disk-backup.md): rationale for implemented

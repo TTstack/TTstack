@@ -30,11 +30,13 @@ the review lens over them.
   placement subtracts full disk sizes, including image-sized Firecracker disks and
   configuration drives.
 - A stale snapshot must not place a VM; recheck between planning and mutation.
-- Host capability strings gate engine features: `isolated_network`,
-  `firecracker_jailer`, `guest_config`, `firecracker_disk_resize`,
-  `firecracker_resources`, `firecracker_zvol`, `qemu_resources`, `ssh_bootstrap`,
-  `bhyve_deny_outgoing`. A shared API change
-  that needs an agent capability requires the capability check, not an assumption.
+- The shared typed registry in `crates/core/src/capability.rs` derives requirements
+  and checks engine/storage design support plus scoped host reports. A present
+  report is authoritative; only an absent report uses the explicit legacy mapping.
+  Unknown or ambiguous reports must not grant new work. Preserve exact retries of
+  accepted operations and existing backup recovery after admission is withdrawn.
+  See [technical capabilities](../../docs/capabilities.md); do not add a parallel
+  feature matrix or assume a host-global grant applies to every engine.
 
 ## Networking
 

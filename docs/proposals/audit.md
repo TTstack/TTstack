@@ -3,6 +3,9 @@
 Implementation follow-up: the ZFS/reflink disk-backup paths are now implemented;
 the [maintained guide](../disk-backup.md) owns current behavior. The dated review
 below describes its stated earlier baseline and is retained as design context.
+Scoped [capability reports](../capabilities.md) and matrix-driven dashboard
+controls are also implemented, including Firecracker SSH keys and Jail option
+restrictions. Those later changes supersede the UI limitations recorded below.
 Shutdown/OOM diagnostic recommendations remain separate work.
 
 This is a dated design review of the documents in this directory and of the
@@ -28,12 +31,14 @@ the stop, SSH, dashboard, lock, and timeout paths those proposals assume.
 
 ## Disposition
 
-| Document | Code status | Review result |
+| Document | Code status at the reviewed baseline | Review result |
 | --- | --- | --- |
 | [VM disk backup](vm-disk-backup.md) | Not implemented | Draft is internally consistent with the code it describes. Section 13 decisions are still open. Do not treat the draft as authorization to implement. |
 | [VM SSH and recovery evidence](vm-access-and-recovery.md) | Initial SSH is implemented on the API, CLI, and agent path. Exit/OOM history is not. | Follow-up specifies candidate evidence sources and their limits; none is a claim of implemented diagnostic history or full dashboard support. |
 
-## Disk backup is not implemented
+<a id="disk-backup-is-not-implemented"></a>
+
+## Disk backup was not implemented at the reviewed baseline
 
 Searches of the Rust tree found no backup route, CLI subcommand, persisted
 backup field, capability string, or `--enable-disk-backup`. Controller routes

@@ -2,7 +2,10 @@
 
 Status: Initial SSH implemented and [validated](../validation/expert-ssh-2026-09-28.md)
 on Linux QEMU and prepared Firecracker guests through the API, CLI, and agent.
-The dashboard does not expose the full account/sudo/Firecracker SSH contract.
+The dashboard now accepts public keys for QEMU, prepared Firecracker and Jail;
+custom-account and sudo controls remain CLI/API options. The
+[capability follow-up](../validation/capability-tags-mixed-fleet-2026-09-29.md)
+records the later matrix-driven controls and mixed-fleet checks.
 The maintained [SSH contract](../ssh.md) owns current behavior. Additional recovery
 diagnostics and the lifecycle refinements below remain proposed.
 The [review](audit.md) rechecked that split.

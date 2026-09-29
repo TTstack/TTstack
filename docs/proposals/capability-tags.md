@@ -1,6 +1,6 @@
 # Unified technical capability tags
 
-Status: implemented in this branch. The maintained behavior and wire contract are
+Status: implemented. The maintained behavior and wire contract are
 in [technical capabilities](../capabilities.md). This document records the design
 decisions and corrections to the original PR #13 proposal; it is not live
 validation evidence or a replacement for the maintained guides.
