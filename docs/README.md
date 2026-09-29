@@ -45,6 +45,7 @@ establish. A new report belongs in `docs/validation/` and is linked here.
 
 | Evidence | Document |
 | --- | --- |
+| Scoped capability reports, mixed Linux/FreeBSD lifecycle, backup/recovery, host failures and isolated cleanup | [Capability tags and mixed fleet, 2026-09-29](validation/capability-tags-mixed-fleet-2026-09-29.md) |
 | Master synchronization, native FreeBSD regressions, bhyve backup/restore and Jail rejection | [FreeBSD master synchronization, 2026-09-29](validation/freebsd-master-sync-2026-09-29.md) |
 | Opt-in ZFS/reflink disk backup, interrupted operations, exact replay and isolated cleanup on two hosts | [VM disk backup, 2026-09-29](validation/disk-backup-validation-2026-09-29.md) |
 | Master rebase, native database/ownership regressions and FreeBSD Jail/bhyve lifecycle | [FreeBSD master port, 2026-09-28](validation/freebsd-master-port-2026-09-28.md) |
