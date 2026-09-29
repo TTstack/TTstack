@@ -37,6 +37,13 @@ Linux-only. Live FreeBSD validation covers **FreeBSD 15.1-RELEASE-p3 (amd64) onl
 other FreeBSD versions have not been live-tested. The [dated FreeBSD report](validation/freebsd-validation-2026-09-28.md)
 records the exact tested revision and scope.
 
+Host implementations are selected with Rust `cfg(target_os)`, not additive Cargo
+features: Linux includes QEMU, Firecracker and Docker/Podman; FreeBSD includes
+bhyve and Jail. Linux nftables SSH namespace ingress is excluded from FreeBSD.
+Shared engine names, models and validation remain available on both targets so
+a controller can manage a mixed fleet. No Cargo feature enables another OS's
+host implementation; an incompatible engine is rejected by the local factory.
+
 - Bhyve uses `bhyveload`, `bhyve`, `bhyvectl` and `/dev/vmmctl`. Supply a raw disk
   that `bhyveload` can boot, with its own guest networking and credentials. There
   is no Bhyve image recipe, SSH injection, guest configuration or resource resize.

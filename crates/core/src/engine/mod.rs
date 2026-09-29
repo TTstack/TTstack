@@ -55,15 +55,16 @@ pub trait VmEngine: Send + Sync {
 /// Returns an error for unsupported platforms.
 pub fn create_engine(
     kind: Engine,
-    container_runtime: Option<docker::ContainerRuntime>,
+    _container_runtime: Option<docker::ContainerRuntime>,
 ) -> Result<Box<dyn VmEngine>> {
     Ok(match kind {
         #[cfg(target_os = "linux")]
         Engine::Qemu => Box::new(qemu::QemuEngine::new()),
         #[cfg(target_os = "linux")]
         Engine::Firecracker => Box::new(firecracker::FirecrackerEngine::new()),
+        #[cfg(target_os = "linux")]
         Engine::Docker => Box::new(docker::DockerEngine::new(
-            container_runtime.ok_or_else(|| eg!("container runtime is not bound"))?,
+            _container_runtime.ok_or_else(|| eg!("container runtime is not bound"))?,
         )),
         #[cfg(target_os = "freebsd")]
         Engine::Bhyve => Box::new(bhyve::BhyveEngine::new()),
@@ -232,5 +233,31 @@ mod recovery_tests {
                 .unwrap()
                 .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod platform_tests {
+    use super::*;
+
+    #[test]
+    fn host_engine_factory_rejects_other_platforms_without_probing_them() {
+        for kind in [
+            Engine::Qemu,
+            Engine::Firecracker,
+            Engine::Docker,
+            Engine::Bhyve,
+            Engine::Jail,
+        ] {
+            let expected = match kind {
+                Engine::Qemu | Engine::Firecracker | Engine::Docker => cfg!(target_os = "linux"),
+                Engine::Bhyve | Engine::Jail => cfg!(target_os = "freebsd"),
+            };
+            assert_eq!(
+                create_engine(kind, Some(docker::ContainerRuntime::Docker)).is_ok(),
+                expected,
+                "{kind}"
+            );
+        }
     }
 }

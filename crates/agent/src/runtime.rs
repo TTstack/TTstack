@@ -1209,13 +1209,16 @@ fn detect_engines(container_runtime: Option<ContainerRuntime>) -> Vec<Engine> {
     }
     engines
 }
-fn detect_capabilities(engines: &[Engine], storage: Storage) -> Vec<String> {
+fn detect_capabilities(engines: &[Engine], _storage: Storage) -> Vec<String> {
+    #[cfg(target_os = "linux")]
     use ttcore::command::CommandExt;
     let mut caps = Vec::new();
-    if cfg!(target_os = "freebsd") && engines.contains(&Engine::Bhyve) {
+    #[cfg(target_os = "freebsd")]
+    if engines.contains(&Engine::Bhyve) {
         caps.push("bhyve_deny_outgoing".into());
     }
-    if cfg!(target_os = "linux") {
+    #[cfg(target_os = "linux")]
+    {
         if (engines.contains(&Engine::Qemu) || engines.contains(&Engine::Firecracker))
             && ["ssh-keygen", "ssh-keyscan"].iter().all(|tool| {
                 std::process::Command::new(tool)
@@ -1228,7 +1231,7 @@ fn detect_capabilities(engines: &[Engine], storage: Storage) -> Vec<String> {
         }
 
         if engines.contains(&Engine::Qemu)
-            && (storage == Storage::File || probe("zfs", &["version"]))
+            && (_storage == Storage::File || probe("zfs", &["version"]))
         {
             caps.push("qemu_resources".into());
         }
@@ -1251,7 +1254,7 @@ fn detect_capabilities(engines: &[Engine], storage: Storage) -> Vec<String> {
                 caps.push("firecracker_disk_resize".into());
                 caps.push("firecracker_resources".into());
             }
-            if storage == Storage::Zvol && probe("zfs", &["version"]) {
+            if _storage == Storage::Zvol && probe("zfs", &["version"]) {
                 caps.push("firecracker_zvol".into());
             }
         }
