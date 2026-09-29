@@ -31,6 +31,8 @@ It is not the [defect registry](audit.md).
 - [VM SSH access and recovery evidence](proposals/vm-access-and-recovery.md):
   initial SSH implemented for QEMU/prepared Firecracker; host-side diagnostic
   additions remain proposed.
+- [Unified capability tags](proposals/capability-tags.md): proposed vocabulary and
+  design matrix for engine, storage and request support; nothing implemented.
 
 ## Validation evidence
 
