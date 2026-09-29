@@ -42,6 +42,7 @@ establish. A new report belongs in `docs/validation/` and is linked here.
 
 | Evidence | Document |
 | --- | --- |
+| Master synchronization, native FreeBSD regressions, bhyve backup/restore and Jail rejection | [FreeBSD master synchronization, 2026-09-29](validation/freebsd-master-sync-2026-09-29.md) |
 | Opt-in ZFS/reflink disk backup, interrupted operations, exact replay and isolated cleanup on two hosts | [VM disk backup, 2026-09-29](validation/disk-backup-validation-2026-09-29.md) |
 | Master rebase, native database/ownership regressions and FreeBSD Jail/bhyve lifecycle | [FreeBSD master port, 2026-09-28](validation/freebsd-master-port-2026-09-28.md) |
 | 0.5.1 version-only deployment, retained state and observed caller-driven VM interruption | [0.5.1 upgrade, 2026-09-28](validation/version-0.5.1-upgrade-2026-09-28.md) |

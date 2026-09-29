@@ -22,7 +22,7 @@ code change does not inherit a fresh live-validation claim from an older report.
 | Linux/systemd deployment | Local/distributed service generation and isolated service restart | [Linux upgrade, 2026-09-24](validation/linux-host-upgrade-validation-2026-09-24.md) and later isolated runs; not every deploy configuration |
 | Agent database initialization | Current native schema, identity and runtime/network bindings | [Process-level checks, 2026-09-28](validation/native-agent-schema-2026-09-28.md): fresh initialization, reopen and non-mutating rejection of incompatible fixtures; no production data migration |
 | Linux/OpenRC, musl binaries | Distributed deployment support | No complete live deployment coverage in the listed reports |
-| FreeBSD Bhyve/Jail/PF | Restored experimental implementation, manual setup | Native FreeBSD 15.1 master-port and lifecycle checks; see [the dated report](validation/freebsd-master-port-2026-09-28.md) |
+| FreeBSD Bhyve/Jail/PF | Restored experimental implementation, manual setup | Native FreeBSD 15.1 lifecycle, bhyve backup/restore and Jail eligibility; see [the dated report](validation/freebsd-master-sync-2026-09-29.md) |
 | Other host platforms | No validated agent deployment path | No support commitment |
 
 The [validation index](README.md#validation-evidence) retains earlier engine,
