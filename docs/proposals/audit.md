@@ -12,6 +12,11 @@ documents themselves. No VM, storage, or restore experiment was run. `zfs` and
 `qemu-img` were not executed. Claims below come from the source and the
 maintained guides.
 
+Follow-up on 2026-09-29 against `df3281f`: source checks and upstream cloud-init
+semantics refined the SSH-dispatch and timeout conclusions below. The related
+proposals now incorporate those constraints and identify the remaining decisions.
+No new runtime validation is implied by these documentation refinements.
+
 This is not a fresh review of every subsystem already dispositioned in the
 registry. Coverage is the two proposals, the integration points they cite, and
 the stop, SSH, dashboard, lock, and timeout paths those proposals assume.
@@ -21,22 +26,23 @@ the stop, SSH, dashboard, lock, and timeout paths those proposals assume.
 | Document | Code status | Review result |
 | --- | --- | --- |
 | [VM disk backup](vm-disk-backup.md) | Not implemented | Draft is internally consistent with the code it describes. Section 13 decisions are still open. Do not treat the draft as authorization to implement. |
-| [VM SSH and recovery evidence](vm-access-and-recovery.md) | Initial SSH is implemented on the API, CLI, and agent path. Exit/OOM history is not. | The status paragraph matches the code. The remaining diagnostic request still lacks an engine-specific evidence source. |
+| [VM SSH and recovery evidence](vm-access-and-recovery.md) | Initial SSH is implemented on the API, CLI, and agent path. Exit/OOM history is not. | Follow-up specifies candidate evidence sources and their limits; none is a claim of implemented diagnostic history or full dashboard support. |
 
 ## Disk backup is not implemented
 
 Searches of the Rust tree found no backup route, CLI subcommand, persisted
 backup field, capability string, or `--enable-disk-backup`. Controller routes
 stop at VM get, resize, and environment stop/start. Agent routes stop at
-create, get, delete, stop, start, and resize. `Vm` persists `ssh`,
-`pending_resources`, and `error` only. Schema versions are still agent v5 and
-controller v4, as the draft describes.
+create, get, delete, stop, start, and resize. Relevant existing `Vm` fields include
+`ssh`, `pending_resources`, and `error`, with no backup state. Schema versions are
+still agent v5 and controller v4, as the draft describes.
 
 Existing ZFS `@ttsnap` clones and `cp --reflink=auto` are provisioning paths.
 [Guest images](../guest-images.md) already says ordinary stop/start is not a
-snapshot or suspend-to-disk. Those mechanisms must not be reused as the backup
-implementation: provisioning reflink falls back to a full copy, and `@ttsnap`
-does not capture later guest writes.
+snapshot or suspend-to-disk. Those provisioning paths must not be reused unchanged
+as the backup implementation: provisioning reflink can fall back to a full copy,
+and `@ttsnap` does not capture later guest writes. Strict reflink and snapshots of
+the correct runtime volume remain candidate backup primitives.
 
 The draft's description of current integration points matched the code that
 was re-read: zvol runtime clones and `zfs destroy -r` of the clone path,
@@ -51,7 +57,7 @@ The maintained [SSH guide](../ssh.md) matches the code that was re-read:
 - Creation accepts public keys, `ssh.user`, and `ssh.sudo`. The CLI flags are
   `--ssh-key`, `--ssh-user`, and `--ssh-sudo`. Docker has no managed bootstrap.
 - The agent generates an Ed25519 host identity once, stores only the public
-  part on the VM, and writes the seed before the first external disk side
+  part in VM metadata, and writes the seed before the first external disk side
   effect. The guest script exits when `/var/lib/ttstack/ssh-initialized`
   exists, so a later cold start does not restore a key the guest removed.
 - QEMU reads that retained seed into a new NoCloud ISO on every cold start.
@@ -66,8 +72,8 @@ The dashboard does not expose this contract. Its SSH field is disabled unless
 the engine is QEMU, the create body sends keys only for QEMU, per-VM key lists
 are always empty, and there is no account or sudo control. The control is
 disabled rather than silently dropped, so this is an incomplete UI, not a
-false success. The proposal's implemented claim is accurate for the API, CLI,
-and agent, and false for the dashboard.
+false success. The implemented claim applies to the API, CLI, and agent; the
+revised proposal now makes the dashboard limitation explicit.
 
 Host-controlled stop/start already confirms the owned VMM has exited before a
 cold start: QEMU and Firecracker refuse `create` when the recorded process
@@ -87,7 +93,7 @@ These are recommendations and implementation constraints. They are not Open
 registry entries: the shutdown split is already documented, and the backup
 notes describe a draft that has no code yet.
 
-### Guest shutdown budgets should not stay split
+### Guest shutdown budgets need a separate decision
 
 | Stage | QEMU | Firecracker | Docker/Podman |
 | --- | --- | --- | --- |
@@ -96,16 +102,17 @@ notes describe a draft that has no code yet.
 
 [REST API](../rest-api.md#lifecycle-and-recovery) documents the 10-second and
 30-second guest windows separately. Cooperative guests return as soon as the
-process is gone; only a guest that ignores shutdown pays the full wait.
+process is gone; a guest that does not exit within the window reaches escalation.
 
-Unifying the QEMU guest-shutdown window to 30 seconds is the reasonable
-change. The guest's chance to sync and unmount should not depend on the
-engine, and the current 10-second ceiling is already tight enough that one
-live stop could not be distinguished from forced termination. Do not stretch
-`terminate()` to 30 seconds: once the guest window has expired, a longer
-`SIGTERM` wait only delays a process that has already been selected for
-kill. Do not change Docker's `-t 10` in the same change; that signal goes to
-container PID 1, not through ACPI or Ctrl-Alt-Del.
+Unifying the QEMU guest-shutdown window to 30 seconds is a candidate, not a
+demonstrated requirement or prerequisite for backup. The unclassified 10.062-second
+stop establishes missing evidence, not proof that 10 seconds caused truncation or
+that 30 seconds would fix it. First distinguish request, escalation, and observed
+exit and validate representative guests. Do not stretch `terminate()` to 30 seconds
+or change Docker's `-t 10` in the same change; that signal goes to container PID 1,
+not through ACPI or Ctrl-Alt-Del. The
+[recovery proposal](vm-access-and-recovery.md#shutdown-behavior-and-evidence)
+owns the follow-up recommendation and its acceptance cases.
 
 The cost is concrete. Agent mutations take the host-wide runtime mutex and
 keep it for the whole stop, including the guest wait. A hung QEMU stop would
@@ -139,9 +146,13 @@ current call path makes that easy to miss:
   during storage work must still enforce the persisted exclusion against
   direct agent calls, or expiry can delete the VM while a candidate exists.
 
-The draft's synchronous HTTP style fits the existing mutation clients only
-if the whole admitted operation, not each command, is budgeted against 360
-seconds and remains inspectable after that client gives up.
+Budget the whole foreground attempt against the waiting limits, not just each
+command. The 360-second HTTP timeout is not a safe storage-transaction deadline:
+expiry of a request must not clear intent, release reservations, or make a disk
+available while a writer's result is unresolved. The draft now distinguishes
+admission/execution/completion, HTTP waiting, backend step deadlines, and deferred
+cleanup in [worker supervision](vm-disk-backup.md#64-durability-and-worker-supervision).
+It retains inspection and same-operation retry after a waiting timeout.
 
 ### Storage placement is already constrained
 
@@ -150,8 +161,9 @@ seconds and remains inspectable after that client gives up.
   ambiguous and blocks start. The draft's private backup directory is
   required, not optional.
 - Image listing skips names that start with `.` or `clone-`, but only in the
-  image catalog directory. A backup stored beside clones under the runtime
-  directory is not hidden by that filter.
+  image catalog directory. Runtime disk resolution is a separate operation;
+  catalog filtering cannot protect it from a misplaced backup file. With distinct
+  configured roots, a runtime sibling is not scanned as a catalog image at all.
 - Firecracker stages `rootfs.ext4` into the jail with a hard link, then
   rebuilds that jail on the next cold start. Replacing the active inode while
   the stopped jail still links the old inode is safe only if start keeps
@@ -171,15 +183,26 @@ seconds and remains inspectable after that client gives up.
 
 ### Restore interacts with the SSH marker
 
-The host seed and advertised host key are not on the guest disk. The
-completion marker is. Restoring a disk from before the marker exists causes
-the next cold start to run the original seed again. Restoring a disk from
-after the marker preserves whatever keys and host identity that disk
-contained, while `ssh.host_key` remains the initial identity recorded at
-creation. The draft says to reset cached readiness and reject known
-incompatibilities. It should also say explicitly that a pre-marker restore
-reapplies the original seed, and that a post-marker restore does not roll
-back the host-side identity or the seed file.
+The guest completion marker, actual SSH keys/configuration, and cloud-init records
+are disk state. The retained host seed and advertised initial identity are separate
+host state; the guest may also hold copies of seed material. Restore does not
+reconcile these automatically.
+
+The original inference that a pre-marker restore necessarily reruns the seed was
+too broad. [QEMU](../../crates/core/src/engine/qemu.rs) uses a stable instance ID
+and cloud-init `runcmd`; its once-per-instance execution records also govern
+dispatch. Prepared Firecracker init must invoke its script before the marker can
+act as a guard. Marker absence alone proves neither path ran. A marker-present
+restore preserves captured guest keys when the bootstrap guard is honored, while
+the host still advertises the original identity.
+
+The [revised backup proposal](vm-disk-backup.md#65-ssh-observations-after-disk-restore)
+cites upstream dispatch semantics and defines a proposed restore-specific
+observation reset. In particular, the agent's `ssh.initialized` is not the guest
+marker: retaining a later `true` value can skip fresh identity verification.
+Conservative re-verification must report a changed guest key without rewriting
+it or misreporting a successful disk restore as a storage failure. Ordinary
+restart and disk rollback remain distinct behaviors.
 
 ### Idempotency is a new protocol
 
@@ -192,10 +215,10 @@ restore.
 
 Section 13 of the backup draft is still open, including the host admission
 flag, manual stopped-only trigger, no recovery after VM deletion, the
-retirement bound, resize-versus-backup, and WAL/FULL. Full-copy backup is
-not an open choice. Schema numbers must be chosen at implementation time;
-the agent still rejects every schema other than v5 and has no in-place
-migration.
+retirement bound, resize-versus-backup, restore-time SSH observations, and WAL/FULL.
+Full-copy backup is not an open choice. Schema numbers must be chosen at
+implementation time; the agent still rejects every schema other than v5 and has
+no in-place migration.
 
 ## What not to do next
 

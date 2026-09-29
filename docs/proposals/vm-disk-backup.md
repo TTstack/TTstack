@@ -12,6 +12,10 @@ date; upstream `master`, `main`, and `latest` references are not deployment
 version guarantees. No VM, storage, or restore experiment was performed for this
 proposal. Neither `qemu-img` nor `zfs` was available in the research workspace.
 
+Design follow-up: the review at `df3281f` and subsequent source checks inform the
+SSH, coordination, and timeout refinements below. The Rust baseline is unchanged;
+these refinements have no new live validation.
+
 ## 1. Problem and intended outcome
 
 TTstack retains VM disks across stop/start but provides no managed recovery point
@@ -116,7 +120,9 @@ reuse, and leaves the same VM stopped. UUID, host placement, IP, ports, CPU/RAM,
 environment membership, and expiry are not rolled back. Disk rollback can restore
 old guest credentials, bootstrap markers, or application state; TTstack must not
 claim that external application services or caller databases were rolled back.
-Reset cached SSH readiness and verify access after a caller starts the VM.
+Invalidate cached SSH observations as specified in
+[section 6.5](#65-ssh-observations-after-disk-restore), and verify access after a
+caller starts the VM. Successful restore does not authorize rewriting guest keys.
 
 ### 3.3 Consistency and lifecycle boundaries
 
@@ -129,6 +135,12 @@ A stopped VM can have been forcibly terminated. Describe the result as an
 offline disk recovery point, not an application-consistent backup. Guest shutdown
 and application quiescing remain caller responsibilities. Restoring successfully
 does not prove guest boot, SSH access, or application health.
+
+Changing shutdown windows or adding exit/OOM diagnostics is a separate
+[recovery proposal](vm-access-and-recovery.md#shutdown-behavior-and-evidence).
+Backup must validate stopped state under the existing lifecycle contract and must
+not depend on a new 30-second shutdown promise or infer guest flushing from elapsed
+stop time. Dashboard SSH controls are likewise outside this backup change.
 
 VM/environment deletion and expiry remove the associated backups under the
 recommended scope. Backup does not extend lifetime or suspend expiry. An expiry
@@ -282,6 +294,9 @@ Store backup files in a private, separately identified directory on the same
 eligible filesystem, outside image catalogs and the directory scanned to resolve
 the VM's active disk. Do not make the backup look like a second candidate boot
 disk. File permissions must protect guest secrets, independently of source mode.
+Enforce placement before creating a candidate: `resolve_disk` rejects multiple
+qcow2 candidates, and the image catalog's name filter does not protect a runtime
+disk directory. Keep the placement check on restore and restart recovery too.
 
 Restore creates a new writable reflink from the backup into a temporary file,
 syncs it, atomically replaces the stopped VM's active file, and syncs the parent
@@ -456,9 +471,10 @@ unknown changes rather than guessing which disk belongs to the VM.
 
 Apply the recorded source using the backend-specific procedure. Verify the
 result and durable completion before clearing intent. Retain the backup and its
-generation ID; retain the revision advanced at admission and record a replayable result.
-Clear obsolete readiness observations, not unrelated errors. The VM remains
-stopped; no automatic application checks, restart, or external state rollback.
+generation ID; retain the revision advanced at admission and record a replayable
+result. Reset SSH observations in that completion transaction under section 6.5;
+do not clear unrelated errors. The VM remains stopped; no automatic application
+checks, restart, or external state rollback.
 
 If the process crashes after applying the restore but before recording completion,
 start stays blocked. Recovery can finish or repeat the same restore while disk
@@ -493,6 +509,8 @@ Do not turn the existing recursive zvol deletion into a fleet-wide snapshot purg
 | Controller restarts with an old host observation | Preserve pending intent until an operation-specific agent result resolves it. |
 | Restore applied, completion unknown | Keep start blocked; inspect/finish that restore while no guest can write. |
 | Old completed restore request arrives after new guest writes | Return retained result or stale-revision conflict; never restore again. |
+| HTTP wait expires while storage work still runs | Preserve operation identity, exclusion, and reservations; return/report unknown outcome, never unsupported capability or completed cancellation. |
+| Restored disk boots with a changed SSH host key | Keep disk restore successful; report initial identity unconfirmed, preserve guest keys, and do not fabricate SSH readiness. |
 | Disk metadata inspection fails or qcow2 is dirty/corrupt after interruption | Fence affected operations, retain artifacts and reservations, surface diagnosis; no automatic repair or claimed valid recovery point. |
 | Snapshot held, externally cloned, renamed, replaced, or missing | Report conflict/missing backup; preserve unrelated resources; do not force cleanup. |
 | Host storage unavailable or host offline | No inferred deletion, completion, or reservation release. |
@@ -525,13 +543,120 @@ Before enabling a backend, specify how its storage process is supervised and how
 restart recovery excludes a surviving writer, including the spawn/identity-record
 race. Never launch a second image writer merely because the HTTP request ended.
 
-No general job queue is required. Use the existing blocking-work facilities and a
-small bounded backup worker path. Persist the per-VM exclusion under the host
-mutation lock, perform potentially slow storage work without holding the fleet
-or SQLite lock, and commit only a matching operation result. Every lifecycle entry
-point, including direct agent requests, must enforce the persisted exclusion.
-Unrelated VM mutations must not wait behind minutes of snapshot metadata work.
-Cleanup uses the same ownership checks and serializes with operations on its VM.
+#### Admission, execution, and completion
+
+The current [agent `mutate` helper](../../crates/agent/src/handler.rs) holds the
+host runtime mutex for the entire blocking operation and continues after client
+disconnection. Do not run the whole backup procedure through that helper unchanged.
+Use three short coordination phases around a bounded storage worker:
+
+1. Under the controller's environment coordination, validate and persist forwarding
+   intent/reservations. Under the agent runtime mutex, revalidate actual VM/disk
+   state and persist the operation and its exclusion before admitting its writer.
+2. Release the host runtime mutex and database locks for storage work. Carry only
+   the admitted operation plan/identities into the worker; permit at most one
+   conflicting writer per VM and a small bounded number of host workers. No new
+   general job queue or scheduler is required.
+3. Reacquire coordination to publish only if VM incarnation, operation ID, revision,
+   and artifact identities still match. A delayed worker cannot resurrect a deleted
+   VM or overwrite a newer result. Cleanup also rechecks exact owned identities.
+
+The durable exclusion must outlive in-memory guards and HTTP handlers:
+
+| Entry point | Required behavior while a disk mutation is unresolved |
+| --- | --- |
+| Controller or direct-agent start/resize/another backup | Reject the conflicting action; same-operation retry attaches to existing work. |
+| Stop or reconciliation | Observation is allowed; do not clear the disk exclusion merely because the VMM is stopped. |
+| Explicit delete or expiry | Retain destructive intent as appropriate, but do not touch disk/artifacts until the writer is settled and supersession is persisted. |
+| Agent/controller restart | Reconcile persisted operations before admitting a conflicting writer; old host observations cannot clear them. |
+| Retired-generation cleanup | Recheck that the target is neither current nor referenced by unresolved work; respect backend offline requirements. |
+| GET or mutation in another environment | Continue without waiting for this VM's slow storage phase; existing per-environment serialization remains. |
+
+Releasing the host mutex without these guards would allow direct API calls or
+expiry to delete an in-progress candidate or start a disk being restored. Reusing
+only the controller's environment lock is insufficient, especially after timeout.
+
+#### Waiting budgets and storage completion
+
+The inspected baseline has three distinct bounds:
+
+| Boundary | Current bound | What it does not establish |
+| --- | --- | --- |
+| [Host command helper](../../crates/core/src/command.rs) | 300 seconds by default per command | That the whole operation finished or a killed command made no changes |
+| [Controller mutation client](../../crates/ctl/src/handler.rs) | 360 seconds per agent request | That the agent stopped after a lost/timed-out response |
+| [CLI mutation request](../../crates/cli/src/client.rs) | 600 seconds per request | That the controller obtained a terminal agent result |
+
+Budget the complete foreground attempt, including admission waits, multiple tool
+calls, verification, and publication, rather than granting each step a fresh
+300-second allowance. Aim for normal completion within the HTTP wait budget, but
+do not make 360 seconds a disk-transaction deadline. Waiting limits must not cause
+an unverified rollback to be published or its exclusion to be cleared.
+
+At a waiting deadline, retain the operation ID and inspection path. At a storage
+step deadline, stop admitting new side effects and use a backend-specific safe
+completion/termination procedure; first settle any writer, then inspect artifacts
+and persist a terminal or unresolved phase. A killed tool may have changed storage.
+Do not allow unbounded untracked work, overlap retries, or release reservations
+because a timer fired. Process supervision and recovery remain required even for
+a backend normally capable of fast snapshots.
+
+Retired-generation cleanup is outside the successful refresh response's critical
+path and has its own bounded attempts. A slow operation is an operational error or
+unknown outcome, not evidence of missing lightweight capability and never a reason
+to attempt a full copy.
+
+### 6.5 SSH observations after disk restore
+
+The guest's `/var/lib/ttstack/ssh-initialized` marker, SSH configuration, actual
+host keys, and cloud-init execution records live on the root disk. The retained
+host seed and advertised initial `ssh.host_key` remain host-side dependencies.
+The guest can also contain copies of seed material; those guest files are part of
+the disk payload. Do not conflate the guest marker with the agent's independently
+persisted `ssh.initialized` observation.
+
+The [QEMU seed generator](../../crates/core/src/engine/qemu.rs) uses a stable VM
+instance ID and cloud-init `runcmd`. Upstream
+[runcmd](https://github.com/canonical/cloud-init/blob/main/cloudinit/config/cc_runcmd.py)
+and [scripts-user](https://github.com/canonical/cloud-init/blob/main/cloudinit/config/cc_scripts_user.py)
+run once per instance by default. Therefore marker absence alone does not establish
+that the seed will run: the restored cloud-init records and image configuration
+also govern dispatch. A supported Firecracker image uses its prepared init hook,
+which must actually invoke the retained configuration-drive script. Once invoked,
+the [bootstrap script](../../crates/core/src/ssh_bootstrap.sh) exits if the marker
+exists; otherwise it can apply the original account/key configuration.
+
+Test both dispatch and the marker. A restore before provisioning may replay the
+seed when the restored init state permits it; a marker-present restore normally
+preserves the captured guest configuration. Neither case rolls back the host seed
+or proves that the advertised initial identity equals the guest's current key.
+Do not clear cloud-init records, delete the marker, change instance ID, regenerate
+the seed, or force key installation as part of disk restore.
+
+Recommend the following conservative observation policy for VMs with managed SSH.
+It is a proposed restore-specific behavior, not a change to ordinary restart:
+
+| Field | Action on committed restore |
+| --- | --- |
+| `ssh.ready` | Set false; the restored guest has not been observed running. |
+| `ssh.checked_at` | Reset to 0, meaning no observation of the restored disk yet. |
+| `ssh.initialized` | Set false; prior host identity evidence must not certify the restored disk. This does not modify the guest marker. |
+| `ssh.host_key`, user/sudo and endpoint metadata | Retain their documented initial/configured meaning; do not replace them with unverified observed values. |
+
+After the caller starts the VM, require a fresh banner and initial-key match before
+setting `initialized` and `ready` again, using the existing observation model.
+If the restored guest legitimately uses another host key, keep those booleans false
+and expose "initial SSH identity not confirmed after disk restore" separately from
+disk restore success. Distinguish no banner, key mismatch, and probe failure when
+the available evidence permits it; otherwise report unknown. Never repair guest
+keys to satisfy the readiness check. The caller can still access the guest using
+separately trusted credentials; managed key rotation/adoption remains out of scope.
+
+The observation reset and successful restore receipt must commit together. Old
+readiness observations must not overwrite the reset, and replaying a completed
+restore must not reset fresh observations or apply the disk again. Test this
+explicitly for controller refresh races and delayed requests. The policy's tradeoff
+is conservative false readiness after intentional guest key rotation; accepting a
+new trusted key would require a separate explicit contract.
 
 ## 7. Proposed API and CLI
 
@@ -563,6 +688,12 @@ is stale and it is rejected; it must never be reinterpreted as a fresh action.
 Without an unbounded key history, changed-parameter detection is guaranteed for
 pending and retained completion records; expired records are protected by the
 stale revision. Clients must generate a new UUID for every deliberate new action.
+
+These headers are a new end-to-end protocol. The current resize API's same-target
+JSON retry behavior cannot implement it. CLI, controller, and agent must preserve
+the same key, expected revision, action, and generation, reject malformed or missing
+preconditions before mutation, and never generate a replacement key during
+forwarding or an automatic retry.
 
 Use synchronous completion over the existing HTTP style initially. Return 200
 only after durable completion; deletion also returns status rather than hiding
@@ -723,7 +854,18 @@ host, isolated task-owned disks/guests, bounded load, and complete owned cleanup
 - Old host observations, missing VM rows, and unreadable backup state retain
   reservations and do not erase pending intent.
 - Race backup/restore/removal with start, resize, delete, expiry, direct agent
-  calls, and reconciliation. Verify unrelated VM operations and reads can progress.
+  calls, and reconciliation, including after the HTTP/environment guard is gone.
+  Verify reads and mutations in other environments can progress during blocked
+  storage I/O while the existing per-environment ordering is preserved.
+- Use multiple individually bounded tool steps that exceed the HTTP waiting budget;
+  inspection and exact retry resolve the original operation without a second writer,
+  premature start/deletion, or full-copy fallback. Avoid real multi-minute unit waits.
+- Restore SSH fixtures before/after the guest marker and cloud-init completion,
+  including an absent marker with completed cloud-init records, failed prepared-init
+  dispatch, changed guest host keys, and a host `initialized=true` from a later disk
+  state. Verify the field policy in section 6.5 without rewriting guest data.
+- Confirm headers survive CLI/controller forwarding, missing/malformed preconditions
+  cause no mutation, and stale readiness cannot overwrite a committed restore reset.
 - Controller/agent crash with a surviving storage subprocess; no concurrent second
   writer, incorrect process kill, or premature success after timeout.
 - Persistence conversion/defaults, newer-schema rejection, and missing capability
@@ -782,6 +924,7 @@ checks rather than a Rust build.
 | Eligible file mechanisms | Reflink where qualified; qcow2 internal backend conditional | Other mechanisms need qualification against section 3.4; full-copy backup is prohibited, not an open design choice. |
 | Retirement backlog | Two retired generations plus current/candidate | A different bound changes admission headroom; unlimited backlog violates the small operational scope. |
 | Disk resize with backups | Require explicit removal and completed cleanup first | Preserving backups across resize needs geometry/resource reconciliation and additional restore tests. |
+| SSH observations after restore | Invalidate old observations and reconfirm the initial identity without rewriting guest keys | Preserving old identity evidence can overstate readiness; accepting changed keys requires an explicit trust/adoption design. |
 | Durability policy | WAL/FULL writer connections in implementing release | Keeping NORMAL limits the crash guarantee and requires an explicitly narrower contract. |
 
 No implementation or deployment is authorized by this draft itself. The request
