@@ -22,6 +22,9 @@ behavior and are updated together with the code.
 
 These retain design context; each document distinguishes implemented work from remaining proposals.
 
+- [VM disk backup](proposals/vm-disk-backup.md): draft for an opt-in disk recovery
+  point, safe replacement with asynchronous cleanup, backend research, and
+  implementation/validation requirements; not implemented.
 - [VM SSH access and recovery evidence](proposals/vm-access-and-recovery.md):
   initial SSH implemented for QEMU/prepared Firecracker; host-side diagnostic
   additions remain proposed.
