@@ -3,6 +3,7 @@
 Status: Initial SSH implemented and [validated](../validation/expert-ssh-2026-09-28.md)
 on Linux QEMU and prepared Firecracker guests. The maintained [SSH contract](../ssh.md)
 owns current behavior. Additional recovery diagnostics remain proposed.
+The [review](audit.md) rechecked that split.
 This document retains the original rationale and outstanding proposals; it is not
 a second maintained behavior guide. The implementation-gap observations below
 describe the preimplementation baseline.

@@ -1,7 +1,9 @@
 # Proposal: opt-in VM disk backup with one current recovery point
 
-Status: **Draft for review; not implemented.** This document proposes behavior;
-it does not add commands, API endpoints, configuration options, or support claims.
+Status: **Draft for review; not implemented.** The
+[review](audit.md) confirms that status and records integration constraints.
+This document proposes behavior; it does not add commands, API endpoints,
+configuration options, or support claims.
 
 Research date: 2026-09-29. Repository baseline:
 [`0547f3c`](https://github.com/TTstack/TTstack/tree/0547f3caeac3590fb86ed342ff0de94eba43a4cc),

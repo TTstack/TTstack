@@ -6,6 +6,9 @@
 > validation reports. Entry shape and severity: `.claude/docs/review-core.md` §5.
 >
 > Dated dispositions identify the reviewed revisions and their evidence.
+> Design reviews are not registry entries. The
+> [proposal review](proposals/audit.md) records draft status and adjacent
+> contract notes; it does not change the dispositions below.
 
 ## Open
 
