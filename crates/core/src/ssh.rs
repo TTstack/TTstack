@@ -42,6 +42,33 @@ impl SshOptions {
     }
 }
 
+/// Keep Jail's root-key injection separate from QEMU/Firecracker bootstrap.
+pub fn resolve_options(
+    engine: crate::model::Engine,
+    requested: Option<&SshOptions>,
+    keys: &[String],
+) -> std::result::Result<Option<SshOptions>, String> {
+    use crate::model::Engine;
+    if requested.is_none() && keys.is_empty() {
+        return Ok(None);
+    }
+    let options = requested.cloned().unwrap_or_default();
+    options.validate()?;
+    if keys.is_empty() {
+        return Err("SSH bootstrap requires a public key".into());
+    }
+    match engine {
+        Engine::Qemu | Engine::Firecracker => Ok(Some(options)),
+        Engine::Jail if options == SshOptions::default() => Ok(None),
+        Engine::Jail => {
+            Err("Jail supports only root SSH keys without SSH bootstrap options".into())
+        }
+        Engine::Docker | Engine::Bhyve => {
+            Err(format!("SSH bootstrap is not supported by {engine}"))
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -163,6 +190,42 @@ pub fn prepared_rootfs(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_options_preserve_jail_keys_without_linux_bootstrap() {
+        use crate::model::Engine;
+        let keys = vec!["ssh-ed25519 AAAA test".into()];
+        for engine in [Engine::Qemu, Engine::Firecracker] {
+            assert_eq!(
+                resolve_options(engine, None, &keys).unwrap(),
+                Some(SshOptions::default())
+            );
+            assert!(resolve_options(engine, Some(&SshOptions::default()), &[]).is_err());
+            assert!(crate::model::validate_vm_options(engine, None, false, &keys, &[]).is_ok());
+        }
+        assert_eq!(resolve_options(Engine::Jail, None, &keys).unwrap(), None);
+        assert_eq!(
+            resolve_options(Engine::Jail, Some(&SshOptions::default()), &keys).unwrap(),
+            None
+        );
+        for options in [
+            SshOptions {
+                user: "user".into(),
+                sudo: false,
+            },
+            SshOptions {
+                user: "root".into(),
+                sudo: true,
+            },
+        ] {
+            assert!(resolve_options(Engine::Jail, Some(&options), &keys).is_err());
+        }
+        for engine in [Engine::Docker, Engine::Bhyve] {
+            assert!(resolve_options(engine, None, &keys).is_err());
+            assert!(resolve_options(engine, Some(&SshOptions::default()), &[]).is_err());
+            assert_eq!(resolve_options(engine, None, &[]).unwrap(), None);
+        }
+    }
     #[test]
     fn validates_account_without_echoing_private_inputs() {
         for user in ["", "-root", "user;id", "user\nroot", "../root", "user name"] {

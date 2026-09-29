@@ -600,6 +600,7 @@ fn remove_regular(path: &Path) -> Result<()> {
         Err(e) => Err(err(e)),
     }
 }
+#[cfg(target_os = "linux")]
 fn reflink(source: &File, target: &File) -> Result<()> {
     // SAFETY: Linux FICLONE uses two live file descriptors and no pointer argument.
     let result =
@@ -617,6 +618,11 @@ fn reflink(source: &File, target: &File) -> Result<()> {
         return Err(err(error));
     }
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reflink(_: &File, _: &File) -> Result<()> {
+    Err("backup unsupported: strict file reflinks are only implemented on Linux; use zvol storage for bhyve".into())
 }
 
 pub fn probe_reflink(root: &Path) -> Result<()> {
@@ -664,6 +670,27 @@ mod tests {
             dependencies: String::new(),
             restore_staging: false,
         }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn unsupported_reflink_leaves_source_and_destination_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let target = dir.path().join("target");
+        std::fs::write(&source, b"retained disk").unwrap();
+        std::fs::write(&target, b"existing destination").unwrap();
+        let error =
+            reflink(&File::open(&source).unwrap(), &File::open(&target).unwrap()).unwrap_err();
+        assert!(error.starts_with("backup unsupported:"));
+        assert_eq!(std::fs::read(source).unwrap(), b"retained disk");
+        assert_eq!(std::fs::read(target).unwrap(), b"existing destination");
+        assert!(
+            probe_reflink(dir.path())
+                .unwrap_err()
+                .starts_with("backup unsupported:")
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 
     #[test]

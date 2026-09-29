@@ -6,15 +6,16 @@
 //! - Firewall NAT rules for port forwarding
 //!
 //! **Linux**: uses `ip`, `nftables`
+//! **FreeBSD**: uses `ifconfig`, `pf`
 
 use crate::command::CommandExt;
 #[cfg(target_os = "linux")]
 mod isolation;
 #[cfg(target_os = "linux")]
 pub use isolation::{isolate, remove_isolation};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use ruc::*;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::process::Command;
 
 /// Default bridge name on each host.
@@ -348,27 +349,54 @@ add rule ip {NFT_TABLE} postrouting ip saddr 10.10.0.0/16 masquerade
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// FreeBSD implementation
+// ═══════════════════════════════════════════════════════════════════
+
+#[cfg(target_os = "freebsd")]
+#[path = "net/freebsd.rs"]
+mod platform;
+
+// ═══════════════════════════════════════════════════════════════════
 // Public re-exports (dispatches to platform module)
 // ═══════════════════════════════════════════════════════════════════
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn setup_bridge() -> Result<()> {
     platform::setup_bridge()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn setup_nat() -> Result<()> {
     platform::setup_nat()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn create_tap(vm_id: &str, _vm_ip_addr: &str) -> Result<()> {
     platform::create_tap(vm_id)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn destroy_tap(vm_id: &str) -> Result<()> {
     platform::destroy_tap(vm_id)
+}
+
+#[cfg(target_os = "freebsd")]
+pub fn bhyve_tap_device(vm_id: &str) -> Result<String> {
+    platform::tap_device(vm_id)
+}
+
+#[cfg(target_os = "freebsd")]
+pub fn tap_exists(vm_id: &str) -> Result<bool> {
+    let out = Command::new("ifconfig")
+        .arg("-l")
+        .bounded_output()
+        .c(d!("list interfaces"))?;
+    if !out.status.success() {
+        return Err(eg!("cannot inspect host interfaces"));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .any(|name| name == tap_name(vm_id)))
 }
 
 #[cfg(target_os = "linux")]
@@ -383,22 +411,22 @@ pub fn prepare_jailed_tap(vm_id: &str, uid: u32) -> Result<()> {
     platform::set_tap_owner(vm_id, uid)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn add_port_forward(host_port: u16, vm_ip_addr: &str, guest_port: u16) -> Result<()> {
     platform::add_port_forward(host_port, vm_ip_addr, guest_port)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn remove_port_forwards(vm_ip_addr: &str) -> Result<()> {
     platform::remove_port_forwards(vm_ip_addr)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn deny_outgoing(vm_ip_addr: &str) -> Result<()> {
     platform::deny_outgoing(vm_ip_addr)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn allow_outgoing(vm_ip_addr: &str) -> Result<()> {
     platform::allow_outgoing(vm_ip_addr)
 }

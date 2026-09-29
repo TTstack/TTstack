@@ -139,17 +139,18 @@ Each `VmSpec` accepts:
 | Field | Type | Default / meaning |
 |---|---|---|
 | `image` | string | Required; file/zvol image name or container image reference |
-| `engine` | string | `qemu` by default; JSON values: `qemu`, `firecracker`, `docker` |
+| `engine` | string | `qemu` by default; JSON values: `qemu`, `firecracker`, `docker`, `bhyve`, `jail` |
 | `cpu` | integer | Positive vCPU count; default 2 |
 | `mem` | integer | Positive memory in MiB; default 1024 |
 | `disk` | integer | Disk size in MiB. QEMU defaults to 40960; Firecracker defaults to the base rootfs size and allows creation-time ext4 growth. Omit for other engines |
-| `ports` | integer[] | Up to 256 TCP guest-port entries; default empty; port 22 is added for QEMU and for guests with SSH bootstrap |
-| `deny_outgoing` | boolean | Default false; block routed outgoing initiation, not host/guest isolation; rejected for Docker |
+| `ports` | integer[] | Up to 256 TCP guest-port entries; default empty; port 22 is added for QEMU/Bhyve/Jail and for guests with SSH bootstrap |
+| `deny_outgoing` | boolean | Default false; block routed outgoing initiation, not host/guest isolation; QEMU/Firecracker/Bhyve; rejected for Docker/Jail; Bhyve requires the agent capability `bhyve_deny_outgoing` |
 | `isolated_network` | boolean | Default false; Linux QEMU/Firecracker only; block peers, guest-initiated host access, private/link-local destinations and IPv6; allow public IPv4 egress and replies to inbound connections |
 | `guest_config` | object | Default `{}`; Firecracker only; simple file names mapped to UTF-8 strings on a read-only drive; [file/byte limits](guest-images.md#firecracker-guest-configuration) also apply to the managed SSH seed |
-| `ssh_keys` | string[] | Empty; merged with environment keys; QEMU or prepared Firecracker |
+| `ssh_keys` | string[] | Empty; merged with environment keys; QEMU or prepared Firecracker; root keys for experimental Jail |
 | `ssh` | object | Optional initial account settings: `{"user":"user","sudo":true}`; requires public keys; keys without this object select `root` with no extra sudo grant |
 
+Bhyve and Jail retain [experimental FreeBSD limitations](compatibility.md#experimental-freebsd-restoration).
 CLI engine aliases such as `kvm`, `fc` and `podman` are not JSON enum values.
 VM responses include optional `ssh` endpoint/readiness metadata; see the
 [SSH contract](ssh.md) for keys, images, ingress and schema compatibility.

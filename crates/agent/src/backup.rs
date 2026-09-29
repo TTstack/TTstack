@@ -83,8 +83,8 @@ impl Runtime {
         let vm = load_vm(&self.db, id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("not found: VM {id}"))?;
-        let unsupported_reason = if vm.engine == Engine::Docker {
-            Some("backup unsupported: container disks are not managed by TTstack".into())
+        let unsupported_reason = if matches!(vm.engine, Engine::Docker | Engine::Jail) {
+            Some("backup unsupported: container and Jail roots are not VM disks".into())
         } else {
             self.backup_unsupported.clone()
         };
@@ -115,8 +115,8 @@ impl Runtime {
                     return Err(reason);
                 }
             }
-            if view.vm.engine == Engine::Docker {
-                return Err("backup unsupported: container engine".into());
+            if matches!(view.vm.engine, Engine::Docker | Engine::Jail) {
+                return Err("backup unsupported: container and Jail roots are not VM disks".into());
             }
             if view.vm.state != VmState::Stopped || view.vm.pending_resources.is_some() {
                 return Err(
@@ -524,6 +524,69 @@ mod tests {
     }
 
     #[test]
+    fn container_and_jail_backups_are_rejected_before_claiming_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rt = runtime(&dir.path().join("agent.db"));
+        rt.backup_enabled = true;
+        for engine in [Engine::Docker, Engine::Jail] {
+            let mut vm = guest();
+            vm.engine = engine;
+            // Even a qualified backend cannot turn a container root into a VM disk.
+            save_vm(&rt.db, &vm).unwrap();
+            let view = rt.backup_view(&vm.id).unwrap();
+            assert!(!view.supported);
+            assert!(
+                view.unsupported_reason
+                    .unwrap()
+                    .starts_with("backup unsupported:")
+            );
+            for action in [Action::Create, Action::Restore, Action::Delete] {
+                let req = Request {
+                    action,
+                    generation: (action == Action::Restore).then(backup::token),
+                    ..request(&vm, Action::Create)
+                };
+                assert!(
+                    rt.backup_claim(&vm.id, Some(&req))
+                        .err()
+                        .unwrap()
+                        .starts_with("backup unsupported:")
+                );
+                assert!(rt.backup_running.is_empty());
+                assert_eq!(
+                    load_vm(&rt.db, &vm.id).unwrap().unwrap().backup.revision,
+                    vm.backup.revision
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bhyve_zvol_uses_the_shared_snapshot_context_and_lifecycle_exclusion() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rt = runtime(&dir.path().join("agent.db"));
+        rt.backup_enabled = true;
+        rt.storage = Storage::Zvol;
+        rt.runtime_dir = "pool/runtime".into();
+        let mut vm = guest();
+        vm.engine = Engine::Bhyve;
+        save_vm(&rt.db, &vm).unwrap();
+        assert!(rt.backup_view(&vm.id).unwrap().supported);
+        let setup = rt
+            .backup_claim(&vm.id, Some(&request(&vm, Action::Create)))
+            .unwrap();
+        let context = setup.context().unwrap();
+        assert_eq!(context.backend, Backend::Zvol);
+        assert_eq!(context.disk, "pool/runtime/clone-test-vm");
+        assert!(context.dependencies.is_empty());
+        assert!(rt.start_vm(&vm.id).is_err());
+        assert!(rt.stop_vm(&vm.id).is_err());
+        assert!(rt.destroy_vm(&vm.id).is_err());
+        rt.backup_release(&vm.id);
+        assert!(rt.backup_running.is_empty());
+    }
+
+    #[test]
     fn failed_refresh_preserves_current_and_failed_cleanup_keeps_reservations() {
         let dir = tempfile::tempdir().unwrap();
         let mut rt = runtime(&dir.path().join("agent.db"));
@@ -634,8 +697,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agent.db");
         let rt = runtime(&path);
-        let vm = guest();
-        save_vm(&rt.db, &vm).unwrap();
+        let engines = [
+            Engine::Qemu,
+            Engine::Firecracker,
+            Engine::Bhyve,
+            Engine::Docker,
+            Engine::Jail,
+        ];
+        for engine in engines {
+            let mut vm = guest();
+            vm.id = engine.to_string();
+            vm.engine = engine;
+            save_vm(&rt.db, &vm).unwrap();
+        }
         rt.db
             .execute(
                 "INSERT INTO vms VALUES ('unrelated-corrupt','not-json')",
@@ -652,15 +726,25 @@ mod tests {
             images: Default::default(),
         });
         let _guard = state.runtime.lock().await;
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            crate::handler::get_backup(
-                axum::extract::State(state.clone()),
-                axum::extract::Path(vm.id),
-            ),
-        )
-        .await
-        .unwrap();
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        for engine in engines {
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                crate::handler::get_backup(
+                    axum::extract::State(state.clone()),
+                    axum::extract::Path(engine.to_string()),
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                body["data"]["supported"],
+                !matches!(engine, Engine::Docker | Engine::Jail)
+            );
+        }
     }
 }

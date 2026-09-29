@@ -2,10 +2,15 @@
 //!
 //! The agent binds one runtime to its persistent inventory; lifecycle calls never switch it.
 
+#[cfg(target_os = "linux")]
 use super::VmEngine;
+#[cfg(target_os = "linux")]
 use crate::command::CommandExt;
+#[cfg(target_os = "linux")]
 use crate::model::{Vm, VmState};
+#[cfg(target_os = "linux")]
 use ruc::*;
+#[cfg(target_os = "linux")]
 use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,10 +26,17 @@ impl ContainerRuntime {
         }
     }
     pub fn available(self) -> bool {
-        Command::new(self.command())
-            .arg("--version")
-            .output_timeout(std::time::Duration::from_secs(5))
-            .is_ok_and(|output| output.status.success())
+        #[cfg(target_os = "linux")]
+        {
+            Command::new(self.command())
+                .arg("--version")
+                .output_timeout(std::time::Duration::from_secs(5))
+                .is_ok_and(|output| output.status.success())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
     }
 }
 impl std::str::FromStr for ContainerRuntime {
@@ -38,10 +50,12 @@ impl std::str::FromStr for ContainerRuntime {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub struct DockerEngine {
     runtime: ContainerRuntime,
 }
 
+#[cfg(target_os = "linux")]
 impl DockerEngine {
     pub fn new(runtime: ContainerRuntime) -> Self {
         Self { runtime }
@@ -86,6 +100,7 @@ impl DockerEngine {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl VmEngine for DockerEngine {
     fn create(
         &self,
@@ -204,7 +219,7 @@ impl VmEngine for DockerEngine {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 

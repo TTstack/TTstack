@@ -65,11 +65,17 @@ fn wait_device(dataset: &str) -> Result<String> {
     let path = format!("/dev/zvol/{dataset}");
     let started = Instant::now();
     loop {
-        if std::fs::metadata(&path).is_ok_and(|m| m.file_type().is_block_device()) {
+        if std::fs::metadata(&path).is_ok_and(|m| {
+            if cfg!(target_os = "freebsd") {
+                m.file_type().is_char_device()
+            } else {
+                m.file_type().is_block_device()
+            }
+        }) {
             return Ok(path);
         }
         if started.elapsed() >= Duration::from_secs(5) {
-            return Err(eg!(format!("ZFS block device did not appear: {path}")));
+            return Err(eg!(format!("ZFS volume device did not appear: {path}")));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -208,6 +214,17 @@ impl ImageStore for ZvolStore {
             zfs_cmd(&["set", &format!("volsize={requested}"), clone_path])?;
         }
         Ok(())
+    }
+
+    fn bhyve_size(&self, path: &str) -> Result<u64> {
+        if property(path, "type")? != "volume" {
+            return Err(eg!("bhyve requires a root zvol"));
+        }
+        let bytes = volume_size(path)?;
+        if bytes == 0 {
+            return Err(eg!("bhyve requires a nonempty root zvol"));
+        }
+        Ok(bytes)
     }
 
     fn firecracker_dir(&self, path: &str) -> Result<String> {

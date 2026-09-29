@@ -173,23 +173,17 @@ impl Runtime {
         if !self.engines.contains(&req.engine) {
             return Err(eg!("engine {} is unavailable on this host", req.engine));
         }
+        if self.storage == Storage::Zvol && req.engine == Engine::Jail {
+            return Err(eg!("Jail requires file storage"));
+        }
         if req.engine == Engine::Qemu && req.disk == 0 {
             return Err(eg!("QEMU disk size must be > 0"));
         }
         if req.cpu == 0 || req.mem == 0 {
             return Err(eg!("cpu and memory must be > 0"));
         }
-        let ssh = if req.ssh_keys.is_empty() {
-            req.ssh.clone()
-        } else {
-            Some(req.ssh.clone().unwrap_or_default())
-        };
-        if let Some(settings) = &ssh {
-            settings.validate().map_err(|e| eg!(e))?;
-            if req.ssh_keys.is_empty() {
-                return Err(eg!("SSH bootstrap requires a public key"));
-            }
-        }
+        let ssh = ttcore::ssh::resolve_options(req.engine, req.ssh.as_ref(), &req.ssh_keys)
+            .map_err(|e| eg!(e))?;
         if req.guest_config.contains_key(ttcore::ssh::SEED_FILE) {
             return Err(eg!("reserved guest configuration filename"));
         }
@@ -238,7 +232,11 @@ impl Runtime {
             return Err(eg!("base image does not exist"));
         }
         let disk = match req.engine {
-            Engine::Docker => 0,
+            Engine::Docker | Engine::Jail => 0,
+            Engine::Bhyve => {
+                u32::try_from(self.store.bhyve_size(&base_image)?.div_ceil(1024 * 1024))
+                    .c(d!("bhyve disk too large"))?
+            }
             Engine::Firecracker => {
                 let bytes = self.store.firecracker_size(&base_image)?;
                 let base_mib =
@@ -283,7 +281,10 @@ impl Runtime {
                 .ok_or_else(|| eg!("IP address space exhausted"))?
         };
         let mut ports = req.ports.clone();
-        if (req.engine == Engine::Qemu || options.ssh.is_some()) && !ports.contains(&22) {
+        if (matches!(req.engine, Engine::Qemu | Engine::Bhyve | Engine::Jail)
+            || options.ssh.is_some())
+            && !ports.contains(&22)
+        {
             ports.push(22);
         }
         let port_map = allocate_ports(&vms, &ports, self.port_range.clone(), |p| {
@@ -390,7 +391,7 @@ impl Runtime {
     }
 
     fn ensure_network(&mut self) -> Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if !self.network_ready {
             net::setup_bridge()?;
             net::setup_nat()?;
@@ -406,23 +407,34 @@ impl Runtime {
         let path = self.clone_path(vm);
         match vm.engine {
             Engine::Firecracker => self.store.firecracker_dir(&path),
-            Engine::Qemu => self.store.resolve_disk(&path),
+            Engine::Qemu | Engine::Bhyve => self.store.resolve_disk(&path),
+            Engine::Jail => Ok(path),
             Engine::Docker => Ok(vm.image.clone()),
         }
     }
     fn restore_network(&self, vm: &Vm) -> Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if vm.engine != Engine::Docker {
+            if vm.engine == Engine::Jail && vm.options.deny_outgoing {
+                return Err(eg!(
+                    "Jail does not support deny_outgoing; retained guest requires operator review"
+                ));
+            }
             #[cfg(target_os = "linux")]
             if vm.options.isolated_network {
                 net::isolate(&vm.id, &vm.ip)?;
             }
-            if matches!(vm.state, VmState::Running | VmState::Paused) && !net::tap_exists(&vm.id)? {
+            if vm.engine != Engine::Jail
+                && matches!(vm.state, VmState::Running | VmState::Paused)
+                && !net::tap_exists(&vm.id)?
+            {
                 return Err(eg!(
                     "live VM tap is missing; stop/start the VM to attach a new tap"
                 ));
             }
-            net::create_tap(&vm.id, &vm.ip)?;
+            if vm.engine != Engine::Jail {
+                net::create_tap(&vm.id, &vm.ip)?;
+            }
             net::remove_port_forwards(&vm.ip)?;
             for (&guest, &host) in &vm.port_map {
                 net::add_port_forward(host, &vm.ip, guest)?;
@@ -504,7 +516,10 @@ impl Runtime {
             self.restore_network(&vm)?;
             let eng = (self.engine_factory)(vm.engine, self.container_runtime)?;
             if previous == VmState::Stopped
-                && matches!(vm.engine, Engine::Qemu | Engine::Firecracker)
+                && matches!(
+                    vm.engine,
+                    Engine::Qemu | Engine::Firecracker | Engine::Bhyve | Engine::Jail
+                )
             {
                 eng.create(
                     &vm,
@@ -665,11 +680,14 @@ impl Runtime {
         if let Some(ingress) = &self.ssh_ingress {
             collect(ingress.remove(id));
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if vm.engine != Engine::Docker {
             collect(net::remove_port_forwards(&vm.ip));
             collect(net::allow_outgoing(&vm.ip));
-            collect(net::destroy_tap(id));
+            if vm.engine != Engine::Jail {
+                collect(net::destroy_tap(id));
+            }
+            #[cfg(target_os = "linux")]
             if vm.options.isolated_network {
                 collect(net::remove_isolation(id));
             }
@@ -1156,15 +1174,51 @@ fn detect_engines(container_runtime: Option<ContainerRuntime>) -> Vec<Engine> {
             engines.push(Engine::Firecracker);
         }
     }
+    #[cfg(target_os = "freebsd")]
+    {
+        let vmm = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/vmmctl")
+            .is_ok();
+        if vmm
+            && ["bhyve", "bhyveload", "bhyvectl"]
+                .iter()
+                .all(|tool| probe("which", &[tool]))
+        {
+            engines.push(Engine::Bhyve);
+        }
+        let sysctl = |key: &str| -> Option<u32> {
+            use ttcore::command::CommandExt;
+            let out = std::process::Command::new("sysctl")
+                .args(["-n", key])
+                .bounded_output()
+                .ok()?;
+            out.status.success().then_some(())?;
+            String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+        };
+        let can_create_jail = sysctl("security.jail.jailed") == Some(0)
+            || sysctl("security.jail.children.max").is_some_and(|n| n > 0);
+        if can_create_jail && probe("which", &["jail"]) && probe("which", &["jls"]) {
+            engines.push(Engine::Jail);
+        }
+    }
+
     if container_runtime.is_some_and(ContainerRuntime::available) {
         engines.push(Engine::Docker);
     }
     engines
 }
-fn detect_capabilities(engines: &[Engine], storage: Storage) -> Vec<String> {
+fn detect_capabilities(engines: &[Engine], _storage: Storage) -> Vec<String> {
+    #[cfg(target_os = "linux")]
     use ttcore::command::CommandExt;
     let mut caps = Vec::new();
-    if cfg!(target_os = "linux") {
+    #[cfg(target_os = "freebsd")]
+    if engines.contains(&Engine::Bhyve) {
+        caps.push("bhyve_deny_outgoing".into());
+    }
+    #[cfg(target_os = "linux")]
+    {
         if (engines.contains(&Engine::Qemu) || engines.contains(&Engine::Firecracker))
             && ["ssh-keygen", "ssh-keyscan"].iter().all(|tool| {
                 std::process::Command::new(tool)
@@ -1177,7 +1231,7 @@ fn detect_capabilities(engines: &[Engine], storage: Storage) -> Vec<String> {
         }
 
         if engines.contains(&Engine::Qemu)
-            && (storage == Storage::File || probe("zfs", &["version"]))
+            && (_storage == Storage::File || probe("zfs", &["version"]))
         {
             caps.push("qemu_resources".into());
         }
@@ -1200,7 +1254,7 @@ fn detect_capabilities(engines: &[Engine], storage: Storage) -> Vec<String> {
                 caps.push("firecracker_disk_resize".into());
                 caps.push("firecracker_resources".into());
             }
-            if storage == Storage::Zvol && probe("zfs", &["version"]) {
+            if _storage == Storage::Zvol && probe("zfs", &["version"]) {
                 caps.push("firecracker_zvol".into());
             }
         }
@@ -1256,7 +1310,13 @@ mod tests {
     fn retained_engines_survive_database_reopen_and_unknown_engine_keeps_its_record() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("agent.db");
-        let engines = [Engine::Qemu, Engine::Firecracker, Engine::Docker];
+        let engines = [
+            Engine::Qemu,
+            Engine::Firecracker,
+            Engine::Docker,
+            Engine::Bhyve,
+            Engine::Jail,
+        ];
         {
             let db = Connection::open(&path).unwrap();
             init_db(&db).unwrap();
@@ -1600,32 +1660,40 @@ mod lifecycle_tests {
 
     #[test]
     fn retry_of_interrupted_stop_confirms_exit_and_clears_only_its_own_error() {
-        let mut rt = runtime(Connection::open_in_memory().unwrap());
-        let mut guest = vm("stop-retry", "stop-fails", VmState::Running);
-        save_vm(&rt.db, &guest).unwrap();
-        assert!(rt.stop_vm(&guest.id).is_err());
-        guest = load_vm(&rt.db, &guest.id).unwrap().unwrap();
-        assert!(
-            guest
-                .error
-                .as_deref()
-                .unwrap()
-                .starts_with("stop unfinished:")
-        );
-        // Reconciliation can observe exit before the caller retries the failed stop.
-        guest.state = VmState::Stopped;
-        guest.image = "stopped".into();
-        save_vm(&rt.db, &guest).unwrap();
-        rt.stop_vm(&guest.id).unwrap();
-        let mut stopped = load_vm(&rt.db, &guest.id).unwrap().unwrap();
-        assert!(stopped.error.is_none());
-        stopped.error = Some("unrelated resource update error".into());
-        save_vm(&rt.db, &stopped).unwrap();
-        rt.stop_vm(&guest.id).unwrap();
-        assert_eq!(
-            load_vm(&rt.db, &guest.id).unwrap().unwrap().error,
-            stopped.error
-        );
+        for engine in [
+            Engine::Qemu,
+            Engine::Firecracker,
+            Engine::Bhyve,
+            Engine::Jail,
+        ] {
+            let mut rt = runtime(Connection::open_in_memory().unwrap());
+            let mut guest = vm("stop-retry", "stop-fails", VmState::Running);
+            guest.engine = engine;
+            save_vm(&rt.db, &guest).unwrap();
+            assert!(rt.stop_vm(&guest.id).is_err());
+            guest = load_vm(&rt.db, &guest.id).unwrap().unwrap();
+            assert!(
+                guest
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("stop unfinished:")
+            );
+            // Reconciliation can observe exit before the caller retries the failed stop.
+            guest.state = VmState::Stopped;
+            guest.image = "stopped".into();
+            save_vm(&rt.db, &guest).unwrap();
+            rt.stop_vm(&guest.id).unwrap();
+            let mut stopped = load_vm(&rt.db, &guest.id).unwrap().unwrap();
+            assert!(stopped.error.is_none());
+            stopped.error = Some("unrelated resource update error".into());
+            save_vm(&rt.db, &stopped).unwrap();
+            rt.stop_vm(&guest.id).unwrap();
+            assert_eq!(
+                load_vm(&rt.db, &guest.id).unwrap().unwrap().error,
+                stopped.error
+            );
+        }
     }
     /// Fault injection at the storage boundary, without changing process-wide PATH.
     struct QemuTestStore {
@@ -1772,6 +1840,7 @@ mod lifecycle_tests {
             assert!(rt.resize_vm(&guest.id, target).is_err());
         }
     }
+    #[cfg(target_os = "linux")]
     #[test]
     fn resource_update_retries_after_reopen_and_keeps_disk_and_identity() {
         let dir = tempfile::tempdir().unwrap();
@@ -1970,8 +2039,8 @@ mod lifecycle_tests {
         let path = dir.path().join("agent.db");
         let ingress = crate::ssh_ingress::SshIngress {
             public_address: "192.0.2.1".parse().unwrap(),
-            namespace: Some("/proc/self/ns/net".into()),
-            target: Some("192.0.2.2".parse().unwrap()),
+            namespace: cfg!(target_os = "linux").then(|| dir.path().to_path_buf()),
+            target: cfg!(target_os = "linux").then(|| "192.0.2.2".parse().unwrap()),
         };
         let mut rt = runtime(Connection::open(&path).unwrap());
         rt.configure_network(Some(ingress.clone()), 21000, 21999)
@@ -1987,7 +2056,7 @@ mod lifecycle_tests {
                 .is_err()
         );
         let changed = crate::ssh_ingress::SshIngress {
-            target: Some("192.0.2.3".parse().unwrap()),
+            public_address: "192.0.2.3".parse().unwrap(),
             ..ingress.clone()
         };
         assert!(rt.configure_network(Some(changed), 21000, 21999).is_err());
@@ -2265,11 +2334,102 @@ mod lifecycle_tests {
         );
     }
     #[test]
-    fn firecracker_receives_root_directory_not_qcow2_path() {
+    fn jail_rejects_zvol_before_creating_a_record_or_resources() {
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        rt.storage = Storage::Zvol;
+        rt.engines = vec![Engine::Jail];
+        let req = CreateVmReq {
+            ssh: None,
+            vm_id: "jail-zvol".into(),
+            env_id: "env".into(),
+            image: "freebsd-base".into(),
+            engine: Engine::Jail,
+            cpu: 1,
+            mem: 128,
+            disk: 0,
+            ports: vec![],
+            deny_outgoing: false,
+            isolated_network: false,
+            guest_config: Default::default(),
+            ssh_keys: vec![],
+        };
+        assert!(
+            rt.create_vm(&req)
+                .unwrap_err()
+                .to_string()
+                .contains("file storage")
+        );
+        assert!(rt.list_vms().unwrap().is_empty());
+        assert_eq!(rt.resource.vm_count, 0);
+    }
+
+    #[test]
+    fn bhyve_capacity_is_rechecked_before_allocating_runtime_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = std::fs::File::create(dir.path().join("raw-image")).unwrap();
+        // A partial MiB still needs a full MiB reservation.
+        disk.set_len(1024 * 1024 + 1).unwrap();
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        rt.engines = vec![Engine::Bhyve];
+        rt.store = Box::new(ttcore::storage::file::FileStore);
+        rt.image_dir = dir.path().to_str().unwrap().into();
+        rt.runtime_dir = dir.path().to_str().unwrap().into();
+        rt.resource.disk_total = 1;
+        let req: CreateVmReq = serde_json::from_value(serde_json::json!({
+            "vm_id":"bhyve-budget", "env_id":"env", "image":"raw-image",
+            "engine":"bhyve", "cpu":1, "mem":128, "disk":0,
+            "ports":[], "deny_outgoing":false, "ssh_keys":[]
+        }))
+        .unwrap();
+        assert!(
+            rt.create_vm(&req)
+                .unwrap_err()
+                .to_string()
+                .contains("insufficient resources")
+        );
+        assert!(rt.list_vms().unwrap().is_empty());
+        assert_eq!(rt.resource.vm_count, 0);
+        assert!(!dir.path().join("clone-bhyve-budget").exists());
+    }
+
+    #[test]
+    fn bhyve_propagates_strict_file_disk_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        rt.store = Box::new(ttcore::storage::file::FileStore);
+        rt.runtime_dir = dir.path().to_str().unwrap().into();
+        let mut record = vm("bhyve-disk", "image", VmState::Stopped);
+        record.engine = Engine::Bhyve;
+        let clone = dir.path().join("clone-bhyve-disk");
+        assert!(rt.image_path(&record).is_err());
+        std::fs::create_dir(&clone).unwrap();
+        let disk = clone.join("disk.raw");
+        std::fs::write(&disk, b"raw disk").unwrap();
+        assert_eq!(rt.image_path(&record).unwrap(), disk.to_str().unwrap());
+        std::fs::write(clone.join("other.raw"), b"another disk").unwrap();
+        assert!(rt.image_path(&record).is_err());
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(clone.join("other.raw")).unwrap();
+            std::fs::remove_file(&disk).unwrap();
+            let outside = dir.path().join("outside.raw");
+            std::fs::write(&outside, b"unowned").unwrap();
+            std::os::unix::fs::symlink(outside, &disk).unwrap();
+            assert!(rt.image_path(&record).is_err());
+        }
+    }
+
+    #[test]
+    fn firecracker_and_jail_receive_root_directories_not_qcow2_paths() {
         let mut rt = runtime(Connection::open_in_memory().unwrap());
         rt.runtime_dir = "/tmp/tt-runtime".into();
         let mut record = vm("guest", "image", VmState::Stopped);
         record.engine = Engine::Firecracker;
+        assert_eq!(
+            rt.image_path(&record).unwrap(),
+            "/tmp/tt-runtime/clone-guest"
+        );
+        record.engine = Engine::Jail;
         assert_eq!(
             rt.image_path(&record).unwrap(),
             "/tmp/tt-runtime/clone-guest"

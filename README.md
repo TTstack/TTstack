@@ -10,7 +10,9 @@ stopping, restarting and deleting them. Workloads can expire automatically or st
 until explicitly deleted.
 
 Linux x86_64 is the supported host platform, with QEMU/KVM, Firecracker, and
-Docker/Podman engines.
+Docker/Podman engines. This branch also restores [experimental FreeBSD
+Bhyve/Jail support](docs/compatibility.md#experimental-freebsd-restoration), outside
+the Linux validation and CI scope.
 
 ## Architecture
 

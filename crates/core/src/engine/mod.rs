@@ -5,10 +5,15 @@
 //!
 //! Platform-specific engines:
 //! - **Linux**: Qemu, Firecracker, Docker/Podman
+//! - **FreeBSD (experimental)**: Bhyve, Jail
 
+#[cfg(target_os = "freebsd")]
+pub mod bhyve;
 pub mod docker;
 #[cfg(target_os = "linux")]
 pub mod firecracker;
+#[cfg(target_os = "freebsd")]
+pub mod jail;
 #[cfg(target_os = "linux")]
 pub mod qemu;
 
@@ -20,7 +25,7 @@ pub trait VmEngine: Send + Sync {
     /// Create and boot a new VM from the given disk path.
     ///
     /// - `disk_format`: image format (`"qcow2"` for file-based, `"raw"` for zvol).
-    /// - `ssh_keys`: initial public keys used by QEMU seed generation.
+    /// - `ssh_keys`: initial keys for QEMU seed generation or root keys for Jail.
     fn create(
         &self,
         vm: &Vm,
@@ -50,16 +55,21 @@ pub trait VmEngine: Send + Sync {
 /// Returns an error for unsupported platforms.
 pub fn create_engine(
     kind: Engine,
-    container_runtime: Option<docker::ContainerRuntime>,
+    _container_runtime: Option<docker::ContainerRuntime>,
 ) -> Result<Box<dyn VmEngine>> {
     Ok(match kind {
         #[cfg(target_os = "linux")]
         Engine::Qemu => Box::new(qemu::QemuEngine::new()),
         #[cfg(target_os = "linux")]
         Engine::Firecracker => Box::new(firecracker::FirecrackerEngine::new()),
+        #[cfg(target_os = "linux")]
         Engine::Docker => Box::new(docker::DockerEngine::new(
-            container_runtime.ok_or_else(|| eg!("container runtime is not bound"))?,
+            _container_runtime.ok_or_else(|| eg!("container runtime is not bound"))?,
         )),
+        #[cfg(target_os = "freebsd")]
+        Engine::Bhyve => Box::new(bhyve::BhyveEngine::new()),
+        #[cfg(target_os = "freebsd")]
+        Engine::Jail => Box::new(jail::JailEngine::new()),
         #[allow(unreachable_patterns)]
         other => {
             return Err(eg!(format!(
@@ -223,5 +233,31 @@ mod recovery_tests {
                 .unwrap()
                 .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod platform_tests {
+    use super::*;
+
+    #[test]
+    fn host_engine_factory_rejects_other_platforms_without_probing_them() {
+        for kind in [
+            Engine::Qemu,
+            Engine::Firecracker,
+            Engine::Docker,
+            Engine::Bhyve,
+            Engine::Jail,
+        ] {
+            let expected = match kind {
+                Engine::Qemu | Engine::Firecracker | Engine::Docker => cfg!(target_os = "linux"),
+                Engine::Bhyve | Engine::Jail => cfg!(target_os = "freebsd"),
+            };
+            assert_eq!(
+                create_engine(kind, Some(docker::ContainerRuntime::Docker)).is_ok(),
+                expected,
+                "{kind}"
+            );
+        }
     }
 }

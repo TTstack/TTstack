@@ -282,6 +282,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn ext4_growth_preserves_files_and_rejects_shrinking() {
         let dir = tempfile::tempdir().unwrap();

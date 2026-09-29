@@ -388,18 +388,8 @@ async fn create_environment(
         spec.ssh_keys.extend(req.ssh_keys.iter().cloned());
         spec.ssh_keys.sort();
         spec.ssh_keys.dedup();
-        if !spec.ssh_keys.is_empty() && spec.ssh.is_none() {
-            spec.ssh = Some(Default::default());
-        }
-        if let Some(ssh) = &spec.ssh {
-            ssh.validate().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-            if spec.ssh_keys.is_empty() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "SSH bootstrap requires a public key".into(),
-                ));
-            }
-        }
+        spec.ssh = ttcore::ssh::resolve_options(spec.engine, spec.ssh.as_ref(), &spec.ssh_keys)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         if spec.guest_config.contains_key(ttcore::ssh::SEED_FILE) {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -832,7 +822,7 @@ async fn resize_virtual_machine(
     let capability = match vm.engine {
         Engine::Qemu => "qemu_resources",
         Engine::Firecracker => "firecracker_resources",
-        Engine::Docker => {
+        Engine::Docker | Engine::Bhyve | Engine::Jail => {
             return Err((
                 StatusCode::BAD_REQUEST,
                 "resource updates require QEMU or Firecracker".into(),

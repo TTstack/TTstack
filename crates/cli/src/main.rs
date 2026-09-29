@@ -91,7 +91,7 @@ enum EnvCmd {
         /// Image name (repeatable).
         #[arg(long, short, required = true)]
         image: Vec<String>,
-        /// Engine type: qemu, firecracker, docker (Linux hosts).
+        /// Engine type: qemu, firecracker, docker (Linux); bhyve, jail (experimental FreeBSD).
         #[arg(long, default_value = "qemu")]
         engine: String,
         /// CPU cores per VM.
@@ -124,7 +124,7 @@ enum EnvCmd {
         /// Owner label, not an access control (defaults to $USER).
         #[arg(long)]
         owner: Option<String>,
-        /// Initial SSH public key or .pub path (repeatable; QEMU or prepared Firecracker).
+        /// Initial SSH keys for QEMU/prepared Firecracker; root keys for experimental Jail.
         #[arg(long)]
         ssh_key: Vec<String>,
         /// Initial SSH account (defaults to root for generic VMs).
@@ -198,7 +198,7 @@ enum ImageCmd {
         /// Image directory (for non-Docker engines).
         #[arg(long, default_value = "/home/ttstack/images")]
         image_dir: String,
-        /// Filter only bulk creation with name "all" (docker, firecracker, qemu).
+        /// Filter only bulk creation with name "all" (docker, firecracker, qemu, jail).
         #[arg(long)]
         engine: Option<String>,
     },
