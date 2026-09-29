@@ -20,6 +20,11 @@ None.
 
 ## Disposition, 2026-09-28
 
+The later [2026-09-29 offline conversion](validation/agent-v5-conversion-2026-09-29.md)
+adds a supported operator path for retaining native v5 VM metadata when upgrading
+to v6. It leaves the daemon's strict native-schema gate intact. The report
+separates conversion/rehearsal evidence from subsequent deployment acceptance.
+
 Review of `bff24fb` identified additional boundary failures, corrected in the
 implementation revision identified by the [two-host validation report](validation/lifecycle-corrections-2026-09-28.md):
 

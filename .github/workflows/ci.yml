@@ -39,6 +39,7 @@ jobs:
       - name: Install configuration-drive test tools
         run: sudo apt-get update && sudo apt-get install -y e2fsprogs
       - run: cargo test --workspace --locked
+      - run: cargo test --locked -p tt-agent --example upgrade-agent-v5
 
   clippy:
     name: Clippy
