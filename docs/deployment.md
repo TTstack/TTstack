@@ -249,14 +249,36 @@ reservations must not be ignored by older binaries. Controller upgrade materiali
 stable backup revisions for existing rows transactionally. The agent still accepts
 only its native schema; it does not automatically migrate v5 inventory.
 
+An explicit offline v5-to-v6 metadata converter is available for retained
+workloads:
+
+```sh
+cargo build --release --locked -p tt-agent --example upgrade-agent-v5
+# Stop the old controller and agent first; preserve their state and guest disks.
+target/release/examples/upgrade-agent-v5 --source /private/agent/agent.db --output /private/agent/agent-v6.db
+```
+
+The converter acquires the agent's state lock, opens the source read-only,
+validates the exact v5 tables and every VM with the target model, and writes a
+new mode-0600 database without overwriting an existing file. It preserves VM IDs,
+states, resource reservations, host/network metadata and all original JSON fields,
+and materializes one stable empty backup state per VM before setting schema v6.
+It does not modify runtime disks, install the result or start services. Review
+source/output row counts, identity and disk bindings, keep the old database and
+compatible binaries, then install the converted database while both services
+remain stopped. Preserve ownership and remove/checkpoint old WAL sidecars through
+SQLite before switching files. Upgrade the controller alongside the agent and
+verify retained guests and storage. New v6 state is not readable by a v5 agent;
+executable-only rollback is insufficient.
+
 For the supplied upgrade path, use the previous compatible binaries to drain and
 explicitly delete agent workloads, then remove the empty host registration. Stop
 the old agent, retain its old database/state privately, and initialize a separate
 empty state directory with the new agent before re-registering the host. Recreate
 workloads explicitly. This is destructive workload replacement, not in-place VM
-migration. If retained workloads must survive, do not deploy over their old state:
-an independently reviewed offline state conversion is required and is not supplied
-by this release. Never merely edit the schema marker to bypass the guard.
+migration. For retained workloads, use and verify the offline converter above
+instead. It supports only the named native v5 format; other formats need their
+own reviewed conversion. Never merely edit the schema marker to bypass the guard.
 
 The earlier native-state transition and its evidence remain in the
 [dated validation record](validation/native-agent-schema-2026-09-28.md).
