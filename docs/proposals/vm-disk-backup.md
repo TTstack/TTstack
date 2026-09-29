@@ -1,9 +1,17 @@
 # Proposal: opt-in VM disk backup with one current recovery point
 
-Status: **Draft for review; not implemented.** The
-[review](audit.md) confirms that status and records integration constraints.
-This document proposes behavior; it does not add commands, API endpoints,
-configuration options, or support claims.
+Status: **ZFS zvol and strict file-reflink paths implemented.** The maintained
+[disk backup guide](../disk-backup.md) owns the shipped commands, API, limits and
+upgrade contract. qcow2 internal snapshots remain deferred. This document retains
+the design rationale and original recommendations; the [review](audit.md) records
+the earlier draft's status and integration constraints, not current support claims.
+
+The implementation selects the recommended host opt-in flag, manual stopped-only
+operations, same-VM restore, deletion with the VM, conservative reservations,
+restore-time SSH re-observation, and WAL/FULL writers. Temporary restore metadata
+is tracked in addition to the bounded retirement backlog. Controller schema is v5
+and agent schema v6; the agent upgrade path requires a drained inventory or a
+separately reviewed offline conversion, not automatic in-agent migration.
 
 Research date: 2026-09-29. Repository baseline:
 [`0547f3c`](https://github.com/TTstack/TTstack/tree/0547f3caeac3590fb86ed342ff0de94eba43a4cc),
@@ -914,7 +922,12 @@ checks rather than a Rust build.
    limitations. Keep this document as design rationale, updating its status and
    linking to the maintained guide instead of duplicating the final contract.
 
-## 13. Decisions to confirm before implementation
+## 13. Design decisions and deferred alternatives
+
+The recommendations below record the design review. The implemented choices and
+remaining backend limits are summarized at the top and maintained in the guide;
+they are no longer an implementation-approval gate. Alternative retention,
+online-backup, key-adoption, or migration policies remain separate work.
 
 | Decision | Recommendation | Consequence of choosing otherwise |
 | --- | --- | --- |
@@ -927,7 +940,7 @@ checks rather than a Rust build.
 | SSH observations after restore | Invalidate old observations and reconfirm the initial identity without rewriting guest keys | Preserving old identity evidence can overstate readiness; accepting changed keys requires an explicit trust/adoption design. |
 | Durability policy | WAL/FULL writer connections in implementing release | Keeping NORMAL limits the crash guarantee and requires an explicitly narrower contract. |
 
-No implementation or deployment is authorized by this draft itself. The request
-for this change is to research, document, commit, and push the proposal only.
+This design document does not independently authorize deployments or changes to
+other systems. Live validation and implementation use the session's explicit scope.
 
 Return to the [documentation index](../README.md).

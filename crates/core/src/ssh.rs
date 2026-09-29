@@ -44,6 +44,8 @@ impl SshOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_error: Option<String>,
     pub user: String,
     pub sudo: bool,
     pub host: String,

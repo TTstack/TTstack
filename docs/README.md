@@ -13,6 +13,7 @@ behavior and are updated together with the code.
 | Install, deploy, or maintain a fleet | [Deployment](deployment.md) |
 | Prepare guests and understand storage/network boundaries | [Guest images](guest-images.md) |
 | Call the API or understand lifecycle recovery | [REST API](rest-api.md) |
+| Create or restore an opt-in local disk recovery point | [VM disk backup](disk-backup.md) |
 | Check supported platforms and validation limits | [Compatibility](compatibility.md) |
 | Configure initial VM SSH and public ingress | [SSH](ssh.md) |
 | Configure distributed deployment | [Fleet template](../tools/deploy.toml.example) |
@@ -24,9 +25,9 @@ These retain design context; each document distinguishes implemented work from r
 The [proposal review](proposals/audit.md) checks those claims against the code.
 It is not the [defect registry](audit.md).
 
-- [VM disk backup](proposals/vm-disk-backup.md): draft for an opt-in disk recovery
-  point, safe replacement with asynchronous cleanup, backend research, and
-  implementation/validation requirements; not implemented.
+- [VM disk backup design](proposals/vm-disk-backup.md): rationale for implemented
+  ZFS/reflink recovery points, safe replacement and asynchronous cleanup;
+  qcow2 internal snapshots remain deferred. Current behavior is in the guide above.
 - [VM SSH access and recovery evidence](proposals/vm-access-and-recovery.md):
   initial SSH implemented for QEMU/prepared Firecracker; host-side diagnostic
   additions remain proposed.
@@ -40,6 +41,7 @@ establish. A new report belongs in `docs/validation/` and is linked here.
 
 | Evidence | Document |
 | --- | --- |
+| Opt-in ZFS/reflink disk backup, interrupted operations, exact replay and isolated cleanup on two hosts | [VM disk backup, 2026-09-29](validation/disk-backup-validation-2026-09-29.md) |
 | 0.5.1 version-only deployment, retained state and observed caller-driven VM interruption | [0.5.1 upgrade, 2026-09-28](validation/version-0.5.1-upgrade-2026-09-28.md) |
 | Native agent database initialization, reopen and non-mutating format rejection | [Native agent schema, 2026-09-28](validation/native-agent-schema-2026-09-28.md) |
 | Configuration-disk accounting, resource ownership, restart recovery and cleanup on two hosts | [Lifecycle audit fixes, 2026-09-28](validation/audit-fixes-2026-09-28.md) |

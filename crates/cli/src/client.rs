@@ -13,6 +13,53 @@ pub struct Client {
 }
 
 impl Client {
+    pub async fn backup(
+        &self,
+        id: &str,
+        request: &ttcore::backup::Request,
+    ) -> Result<ttcore::backup::View> {
+        use ttcore::backup::Action;
+        let method = match request.action {
+            Action::Create => reqwest::Method::PUT,
+            Action::Restore => reqwest::Method::POST,
+            Action::Delete => reqwest::Method::DELETE,
+        };
+        let suffix = if request.action == Action::Restore {
+            "/restore"
+        } else {
+            ""
+        };
+        let mut outgoing = self
+            .http
+            .request(
+                method,
+                format!("{}/api/vms/{id}/backup{suffix}", self.base_url),
+            )
+            .timeout(std::time::Duration::from_secs(600))
+            .header("Idempotency-Key", &request.operation_id)
+            .header("If-Match", format!("\"{}\"", request.expected_revision));
+        if let Some(generation) = &request.generation {
+            outgoing = outgoing.json(&ttcore::backup::RestoreBody {
+                generation: generation.clone(),
+            });
+        }
+        let response = outgoing.send().await.c(d!(
+            "backup outcome unknown; inspect and use the printed exact retry"
+        ))?;
+        let status = response.status();
+        let body: ApiResp<ttcore::backup::View> = response
+            .json()
+            .await
+            .c(d!("backup outcome unknown: invalid response"))?;
+        if status.is_success() && body.ok {
+            body.data
+                .ok_or_else(|| eg!("backup response missing status"))
+        } else {
+            Err(eg!(body.error.unwrap_or_else(|| format!(
+                "backup request failed: {status}"
+            ))))
+        }
+    }
     pub fn new(addr: &str, api_key: Option<&str>) -> Result<Self> {
         let base_url = if addr.starts_with("http") {
             addr.to_string()

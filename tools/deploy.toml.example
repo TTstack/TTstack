@@ -28,6 +28,7 @@ host = "10.0.0.2"
 # listen = "0.0.0.0:9100"
 # host_id = "node-02"            # Omit to generate/persist an ID on first start
 # container_runtime = "docker"  # Or "podman"; persisted for this agent's inventory
+# enable_disk_backup = false    # Opt in only on eligible zvol/reflink storage
 # release_dir = "./target/release-musl" # LOCAL override; build for this host
 
 # Scheduling budgets, not measured usage. Leave capacity for the host OS.

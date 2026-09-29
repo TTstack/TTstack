@@ -106,9 +106,21 @@ state conflicts or insufficient schedulable capacity return 409. A timeout or 50
 can have an unknown outcome: inspect the VM, including pending resources and error,
 before retrying. Do not delete the environment to recover a resource update.
 
-Disk growth is not a promise of zero storage risk or a backup facility. Maintain
-backups independently. Controller schema v4 and agent schema v5 prevent older
-binaries from ignoring newer persistent contracts; upgrade both together.
+Disk growth does not create a backup. Explicit [disk recovery points](disk-backup.md)
+must be removed, including retired artifacts, before changing root capacity;
+CPU/RAM-only changes remain supported when no backup operation is pending.
+Independent disaster-recovery backups remain the operator's responsibility.
+Controller schema v5 and agent schema v6 prevent older binaries from ignoring
+newer persistent contracts; read the [upgrade guidance](deployment.md#resource-update-schema-gate).
+
+## Disk backup operations
+
+Controller and agent expose `GET`, `PUT`, and `DELETE /api/vms/{id}/backup`, plus
+`POST /api/vms/{id}/backup/restore`. These require `disk_backup_v1`; creation also
+requires enabled admission and an eligible lightweight backend. The
+[disk backup guide](disk-backup.md#api-and-exact-retries) owns request headers,
+generation selection, status/error meanings, resource accounting and exact retries.
+Restore is destructive to current disk contents and leaves the VM stopped.
 
 ## Environment requests
 

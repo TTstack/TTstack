@@ -7,6 +7,9 @@ use ttcore::model::Storage;
 #[derive(Parser, Debug)]
 #[command(name = "tt-agent", version)]
 pub struct Config {
+    /// Admit explicit lightweight disk backup creation/refresh (default: disabled).
+    #[arg(long)]
+    pub enable_disk_backup: bool,
     /// Container runtime for this inventory; persisted after the first selection.
     #[arg(long, env = "TT_CONTAINER_RUNTIME")]
     pub container_runtime: Option<ttcore::engine::docker::ContainerRuntime>,

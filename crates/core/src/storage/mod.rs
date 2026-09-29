@@ -2,6 +2,8 @@
 //!
 //! Two backends: plain file copies (`FileStore`) and ZFS zvols (`ZvolStore`).
 
+#[cfg(target_os = "linux")]
+pub mod backup;
 pub mod file;
 pub mod zvol;
 

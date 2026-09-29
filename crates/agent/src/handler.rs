@@ -10,6 +10,7 @@ use std::sync::{Arc, RwLock};
 use ttcore::{api::*, model::Vm};
 
 pub struct AgentShared {
+    pub backup_settings: (bool, Option<String>),
     pub runtime: Arc<tokio::sync::Mutex<Runtime>>,
     pub db_path: String,
     pub info: AgentInfo,
@@ -52,6 +53,15 @@ pub async fn reconcile_once(state: AppState) -> Result<(), String> {
         let diagnostic_id = id.clone();
         if let Err(e) = mutate(state.clone(), move |rt| rt.reconcile_vm(&id)).await {
             eprintln!("[agent] reconcile {diagnostic_id}: {e}");
+        }
+        if let Some(pending) = vm.backup.pending {
+            if let Err(e) =
+                run_backup(state.clone(), diagnostic_id.clone(), pending.request, false).await
+            {
+                eprintln!("[agent] backup recovery {diagnostic_id}: {e}");
+            }
+        } else if !vm.backup.retired.is_empty() {
+            cleanup_backup(state.clone(), diagnostic_id).await;
         }
     }
     Ok(())
@@ -247,4 +257,250 @@ fn action(result: Result<(), String>) -> Reply<()> {
         Ok(()) => (StatusCode::OK, Json(ApiRespEmpty::ok())),
         Err(e) => failure(e),
     }
+}
+
+fn backup_reply(result: Result<ttcore::backup::View, String>) -> axum::response::Response {
+    match result {
+        Ok(view) => {
+            let etag = format!("\"{}\"", view.vm.backup.revision);
+            (
+                StatusCode::OK,
+                [(axum::http::header::ETAG, etag)],
+                Json(ApiResp::success(view)),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::from_u16(ttcore::backup::error_status(&e)).unwrap(),
+            Json(ApiResp::<()>::err(e)),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn get_backup(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    let result = tokio::task::spawn_blocking(move || {
+        let vm = runtime::read_vm(&state.db_path, &id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("not found: VM {id}"))?;
+        let unsupported_reason = if vm.engine == ttcore::model::Engine::Docker {
+            Some("backup unsupported: container disks are not managed by TTstack".into())
+        } else {
+            state.backup_settings.1.clone()
+        };
+        Ok(ttcore::backup::View {
+            vm,
+            enabled: state.backup_settings.0,
+            supported: unsupported_reason.is_none(),
+            unsupported_reason,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r);
+    backup_reply(result)
+}
+
+pub async fn create_backup(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    backup_request(state, id, headers, ttcore::backup::Action::Create, None).await
+}
+pub async fn delete_backup(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    backup_request(state, id, headers, ttcore::backup::Action::Delete, None).await
+}
+pub async fn restore_backup(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<ttcore::backup::RestoreBody>,
+) -> axum::response::Response {
+    backup_request(
+        state,
+        id,
+        headers,
+        ttcore::backup::Action::Restore,
+        Some(body.generation),
+    )
+    .await
+}
+
+async fn backup_request(
+    state: AppState,
+    id: String,
+    headers: axum::http::HeaderMap,
+    action: ttcore::backup::Action,
+    generation: Option<String>,
+) -> axum::response::Response {
+    let request = ttcore::backup::Request::from_headers(
+        headers.get("idempotency-key").and_then(|h| h.to_str().ok()),
+        headers.get("if-match").and_then(|h| h.to_str().ok()),
+        action,
+        generation,
+    );
+    let identity = request.as_ref().ok().cloned();
+    let result = match request {
+        Err(e) => Err(e),
+        Ok(request) => tokio::spawn(run_backup(state.clone(), id.clone(), request, true))
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r),
+    };
+    let failed = result.is_err();
+    let mut response = backup_reply(result);
+    if failed
+        && let Some(request) = identity
+        && let Some(sequence) = state.runtime.lock().await.backup_settled(&id, &request)
+    {
+        response
+            .headers_mut()
+            .insert("x-tt-backup-settled", request.operation_id.parse().unwrap());
+        response.headers_mut().insert(
+            "x-tt-backup-settled-sequence",
+            sequence.to_string().parse().unwrap(),
+        );
+    }
+    response
+}
+
+async fn run_backup(
+    state: AppState,
+    id: String,
+    request: ttcore::backup::Request,
+    wait: bool,
+) -> Result<ttcore::backup::View, String> {
+    use ttcore::backup::Action;
+    let started = std::time::Instant::now();
+    let setup = loop {
+        let mut rt = state.runtime.lock().await;
+        let view = rt.backup_view(&id)?;
+        if view.vm.backup.check(&request)? {
+            return match view
+                .vm
+                .backup
+                .last_result
+                .as_ref()
+                .and_then(|r| r.error.clone())
+            {
+                Some(e) => Err(e),
+                None => Ok(view),
+            };
+        }
+        match rt.backup_claim(&id, Some(&request)) {
+            Ok(setup) => break setup,
+            Err(e)
+                if wait
+                    && e.contains("backup worker is running")
+                    && started.elapsed().as_secs() < 300 =>
+            {
+                drop(rt);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    let result = async {
+        let probe = request.action == Action::Create && setup.vm.backup.pending.is_none();
+        let (context, lock, witness) = tokio::task::spawn_blocking(move || {
+            let context = setup.context()?;
+            let lock = context.lock()?;
+            let witness = context.inspect(&lock, probe)?;
+            Ok::<_, String>((context, lock, witness))
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        let vm = state
+            .runtime
+            .lock()
+            .await
+            .backup_admit(&id, &request, &witness)?;
+        let pending = vm.backup.pending.clone().ok_or("backup intent absent")?;
+        let storage_result = tokio::task::spawn_blocking(move || match pending.request.action {
+            Action::Create => context.create(&lock, &pending).map(|g| (Some(g), vec![])),
+            Action::Restore => {
+                let source = vm
+                    .backup
+                    .current
+                    .as_ref()
+                    .ok_or("not found: backup absent")?;
+                let removed = context.prepare_restore(&lock, source, &vm.backup.retired)?;
+                if vm.engine == ttcore::model::Engine::Firecracker {
+                    ttcore::engine::firecracker::FirecrackerEngine::prepare_disk_restore(&vm)
+                        .map_err(|e| e.to_string())?;
+                }
+                context
+                    .restore(&lock, &pending, source)
+                    .map(|g| (g, removed))
+            }
+            Action::Delete => {
+                for old in vm.backup.current.iter().chain(&vm.backup.retired) {
+                    context.remove(&lock, old)?;
+                }
+                Ok((None, vec![]))
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+        let failure = storage_result.as_ref().err().cloned();
+        let removed = storage_result
+            .as_ref()
+            .map(|(_, removed)| removed.clone())
+            .unwrap_or_default();
+        let storage_result = storage_result.map(|(artifact, _)| artifact);
+        let view =
+            state
+                .runtime
+                .lock()
+                .await
+                .backup_finish(&id, &request, &removed, storage_result)?;
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(view),
+        }
+    }
+    .await;
+    state.runtime.lock().await.backup_release(&id);
+    result
+}
+
+async fn cleanup_backup(state: AppState, id: String) {
+    let setup = match state.runtime.lock().await.backup_claim(&id, None) {
+        Ok(setup) => setup,
+        Err(_) => return,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let mut removed = vec![];
+        let context = setup.context()?;
+        let lock = context.lock()?;
+        if let Some(current) = &setup.vm.backup.current {
+            context.verify(&lock, current)?;
+        }
+        let mut errors = vec![];
+        for old in &setup.vm.backup.retired {
+            match context.remove(&lock, old) {
+                Ok(()) => removed.push(old.id.clone()),
+                Err(e) => errors.push(e),
+            }
+        }
+        Ok::<_, String>((removed, (!errors.is_empty()).then(|| errors.join("; "))))
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r);
+    let (removed, error) = result.unwrap_or_else(|e| (vec![], Some(e)));
+    let mut rt = state.runtime.lock().await;
+    if let Err(e) = rt.backup_cleanup_finish(&id, &removed, error) {
+        eprintln!("[agent] backup cleanup {id}: {e}");
+    }
+    rt.backup_release(&id);
 }

@@ -15,6 +15,7 @@ code change does not inherit a fresh live-validation claim from an older report.
 | Linux Firecracker + file storage | Jailer, configuration drive, prepared-image SSH, offline ext4 growth, shutdown and opt-in isolation | [Two-host audit fixes, 2026-09-28](validation/audit-fixes-2026-09-28.md): SSH-only configuration disks, resource accounting and recovery; [2026-09-24 follow-up](validation/firecracker-validation-2026-09-24.md) covers isolation and shutdown cases |
 | Linux Firecracker + zvol | Snapshot clones, jailed block devices, prepared-image SSH and ext4 growth | [Zvol lifecycle, 2026-09-24](validation/firecracker-zvol-validation-2026-09-24.md); [subsequent SSH deployment](validation/expert-ssh-2026-09-28.md#subsequent-firecrackerzfs-deployment) |
 | QEMU + zvol | Raw ZFS volumes, snapshot clones and offline resource updates | [Alpine resize and recovery, 2026-09-26](validation/qemu-resize-validation-2026-09-26.md) on file storage and dedicated ZFS pools |
+| Stopped VM disk backup | QEMU/Firecracker root-disk recovery points on zvol or qualified reflink storage | [Two-host backup validation, 2026-09-29](validation/disk-backup-validation-2026-09-29.md): ZFS and XFS reflink, explicit unsupported storage, restore/retry/cleanup; no online or host-power-loss claim |
 | Podman | Alternate container runtime bound to the agent inventory | [Native probes, 2026-09-26](validation/engine-capability-probes-2026-09-26.md); these did not validate the complete TTstack lifecycle or enable container resource/network-policy APIs |
 | Ubuntu cloud guest | Built-in QEMU recipe | Not covered by the listed guest lifecycle runs |
 | Linux/systemd deployment | Local/distributed service generation and isolated service restart | [Linux upgrade, 2026-09-24](validation/linux-host-upgrade-validation-2026-09-24.md) and later isolated runs; not every deploy configuration |
@@ -68,6 +69,11 @@ an upgrade policy for future data.
   installation, connection leases and idle-stop policy belong in callers.
 - No automatic guest restart after host reboot, guest migration, HA, distributed storage,
   image distribution or application/database provisioning.
+- Optional [disk backup](disk-backup.md) supports stopped QEMU/Firecracker root
+  disks on zvol or qualified reflink storage. No full-copy fallback, memory snapshot,
+  online backup, container backup, or deleted-VM recovery is provided. Filesystem
+  and image eligibility must be checked; a host capability alone does not validate
+  every disk image or underlying storage configuration.
 - QEMU and Firecracker support stopped-VM CPU/RAM updates and disk growth on file
   and ZFS storage. QEMU requires `qemu_resources` and expands only the virtual disk;
   the guest must grow its partitions/filesystems. See the

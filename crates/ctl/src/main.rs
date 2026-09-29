@@ -101,6 +101,16 @@ async fn main() {
         .route("/api/envs/{id}/start", post(handler::start_env))
         .route("/api/vms/{id}", get(handler::get_vm))
         .route("/api/vms/{id}/resources", post(handler::resize_vm))
+        .route(
+            "/api/vms/{id}/backup",
+            get(handler::get_backup)
+                .put(handler::create_backup)
+                .delete(handler::delete_backup),
+        )
+        .route(
+            "/api/vms/{id}/backup/restore",
+            post(handler::restore_backup),
+        )
         .route("/api/images", get(handler::list_images))
         .route("/api/status", get(handler::fleet_status))
         .with_state(state);

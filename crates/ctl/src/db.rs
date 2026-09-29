@@ -9,7 +9,7 @@ use ttcore::api::FleetStatus;
 use ttcore::model::*;
 
 /// Current schema version. Bump this when schema changes.
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 
 /// Fleet database — the single source of truth for the controller.
 pub struct Db {
@@ -28,7 +28,7 @@ impl Db {
 
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=NORMAL;
+             PRAGMA synchronous=FULL;
              PRAGMA foreign_keys=ON;",
         )
         .c(d!("set pragmas"))?;
@@ -86,7 +86,42 @@ impl Db {
         // v2 adds lifecycle fields in serialized records, decoded with serde defaults.
         // The version guard prevents older binaries from opening this state.
 
-        Self::set_schema_version(conn, SCHEMA_VERSION)?;
+        if current < 5 {
+            // Persist initial backup revisions once rather than regenerating on reads.
+            let transaction = conn
+                .unchecked_transaction()
+                .c(d!("backup schema migration"))?;
+            let rows = {
+                let mut statement = transaction.prepare("SELECT id,data FROM vms").c(d!())?;
+                statement
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .c(d!())?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .c(d!())?
+            };
+            for (id, data) in rows {
+                let mut data: serde_json::Value =
+                    serde_json::from_str(&data).c(d!("VM backup migration"))?;
+                let object = data
+                    .as_object_mut()
+                    .ok_or_else(|| eg!("invalid VM record during backup migration"))?;
+                object
+                    .entry("backup")
+                    .or_insert(serde_json::to_value(ttcore::backup::State::default()).c(d!())?);
+                transaction
+                    .execute(
+                        "UPDATE vms SET data=?1 WHERE id=?2",
+                        rusqlite::params![data.to_string(), id],
+                    )
+                    .c(d!())?;
+            }
+            Self::set_schema_version(&transaction, SCHEMA_VERSION)?;
+            transaction.commit().c(d!("commit backup migration"))?;
+        } else {
+            Self::set_schema_version(conn, SCHEMA_VERSION)?;
+        }
 
         if current < SCHEMA_VERSION {
             eprintln!("database migrated: v{current} → v{SCHEMA_VERSION}");
@@ -120,6 +155,24 @@ impl Db {
     }
 
     // ── Hosts ───────────────────────────────────────────────────────
+
+    /// Publish backup state and its host reservation delta in one durable commit.
+    pub fn put_backup_observation(&self, vm: &Vm, previous_disk: u32) -> Result<()> {
+        let transaction = self
+            .conn
+            .unchecked_transaction()
+            .c(d!("backup observation transaction"))?;
+        self.put_vm(vm)?;
+        if let Some(mut host) = self.get_host(&vm.host_id)? {
+            host.resource.disk_used = host
+                .resource
+                .disk_used
+                .saturating_sub(previous_disk)
+                .saturating_add(vm.reserved_disk());
+            self.put_host(&host)?;
+        }
+        transaction.commit().c(d!("commit backup observation"))
+    }
 
     pub fn put_host(&self, host: &Host) -> Result<()> {
         let data = serde_json::to_string(host).c(d!("serialize host"))?;
@@ -380,6 +433,49 @@ fn query_all<T: serde::de::DeserializeOwned, P: rusqlite::Params>(
 }
 
 #[cfg(test)]
+mod backup_migration_tests {
+    use super::*;
+
+    #[test]
+    fn migration_assigns_stable_revisions_and_rolls_back_bad_records() {
+        for corrupt in [false, true] {
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE _meta (key TEXT PRIMARY KEY,value TEXT NOT NULL);
+                INSERT INTO _meta VALUES ('schema_version','4');
+                CREATE TABLE vms (id TEXT PRIMARY KEY,data TEXT NOT NULL);
+                INSERT INTO vms VALUES ('a','{\"id\":\"a\"}');",
+            )
+            .unwrap();
+            if corrupt {
+                conn.execute("INSERT INTO vms VALUES ('b','not-json')", [])
+                    .unwrap();
+            }
+            let result = Db::migrate(&conn);
+            let saved: String = conn
+                .query_row("SELECT data FROM vms WHERE id='a'", [], |r| r.get(0))
+                .unwrap();
+            if corrupt {
+                assert!(result.is_err());
+                assert_eq!(Db::get_schema_version(&conn).unwrap(), 4);
+                assert_eq!(saved, "{\"id\":\"a\"}");
+            } else {
+                result.unwrap();
+                let parsed: serde_json::Value = serde_json::from_str(&saved).unwrap();
+                assert!(
+                    uuid::Uuid::parse_str(parsed["backup"]["revision"].as_str().unwrap()).is_ok()
+                );
+                Db::migrate(&conn).unwrap();
+                let again: String = conn
+                    .query_row("SELECT data FROM vms WHERE id='a'", [], |r| r.get(0))
+                    .unwrap();
+                assert_eq!(saved, again);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
@@ -423,6 +519,7 @@ mod tests {
 
     fn make_vm(id: &str, env_id: &str, host_id: &str) -> Vm {
         Vm {
+            backup: Default::default(),
             ssh: None,
             pending_resources: None,
             id: id.into(),

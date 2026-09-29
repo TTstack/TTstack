@@ -143,11 +143,11 @@ the guest marker, keys, and cloud-init records while retaining the host seed and
 the agent's later observations. These operations must not share an unconditional
 "already initialized" assumption.
 
-The disk-backup proposal owns the
-[restore and SSH observation policy](vm-disk-backup.md#65-ssh-observations-after-disk-restore),
-including conditional seed dispatch and the proposed invalidation of `ready`,
-`checked_at`, and `initialized`. Follow that policy when backup is implemented;
-do not duplicate it here or change ordinary restart behavior as a shortcut.
+The maintained disk-backup guide owns the implemented
+[restore and SSH observation policy](../disk-backup.md#ssh-observations-after-restore),
+including conditional seed dispatch and invalidation of `ready`, `checked_at`,
+and `initialized`. The backup proposal retains the design rationale; ordinary
+restart behavior remains distinct.
 Guest key adoption/rotation and dashboard SSH controls remain separate work.
 
 ### Additional acceptance cases

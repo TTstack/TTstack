@@ -252,6 +252,11 @@ the application's responsibility.
 
 ## Storage
 
+Optional [disk backup](disk-backup.md) operates on stopped VM root disks using
+runtime zvol snapshots or qualified strict file reflinks. Provisioning clones and
+base-image `@ttsnap` snapshots do not capture later guest writes. Unsupported
+lightweight backup environments return an error without full-file copying.
+
 | Backend | Base image format | Runtime storage |
 |---|---|---|
 | `file` | QEMU qcow2 file; Firecracker kernel/rootfs directory | Per-VM copy, using reflinks on Linux when available, otherwise a full copy |

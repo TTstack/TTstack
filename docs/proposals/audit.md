@@ -1,5 +1,10 @@
 # Proposal and adjacent-contract review
 
+Implementation follow-up: the ZFS/reflink disk-backup paths are now implemented;
+the [maintained guide](../disk-backup.md) owns current behavior. The dated review
+below describes its stated earlier baseline and is retained as design context.
+Shutdown/OOM diagnostic recommendations remain separate work.
+
 This is a dated design review of the documents in this directory and of the
 current lifecycle contracts those documents depend on. It is not a maintained
 behavior guide, and it is not the defect registry. Confirmed code defects

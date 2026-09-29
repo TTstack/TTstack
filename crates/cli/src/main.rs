@@ -79,6 +79,11 @@ enum HostCmd {
 
 #[derive(Subcommand)]
 enum EnvCmd {
+    /// Inspect or explicitly manage one lightweight disk recovery point.
+    Backup {
+        #[command(subcommand)]
+        action: BackupCmd,
+    },
     /// Create a new environment with VMs.
     Create {
         /// Environment name.
@@ -150,6 +155,34 @@ enum EnvCmd {
         #[arg(long)]
         disk: u32,
     },
+}
+
+#[derive(Subcommand)]
+enum BackupCmd {
+    /// Show support, revision, recovery point, pending work and retirement status.
+    Show { vm_id: String },
+    /// Create/refresh a stopped VM's backup; the agent must explicitly enable admission.
+    Create(BackupArgs),
+    /// Overwrite the stopped VM's disk with this recovery point; retains the backup.
+    Restore {
+        #[command(flatten)]
+        args: BackupArgs,
+        #[arg(long)]
+        generation: String,
+    },
+    /// Remove the recovery point and its retired generations from a stopped VM.
+    Delete(BackupArgs),
+}
+
+#[derive(clap::Args)]
+struct BackupArgs {
+    vm_id: String,
+    /// Reuse the printed UUID for an exact retry after a lost response.
+    #[arg(long, requires = "expected_revision")]
+    operation_id: Option<String>,
+    /// Reuse the printed revision with --operation-id, never substitute a new one on retry.
+    #[arg(long, requires = "operation_id")]
+    expected_revision: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -385,6 +418,7 @@ async fn cmd_host(c: &Client, action: HostCmd) -> Result<()> {
 
 async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
     match action {
+        EnvCmd::Backup { action } => cmd_backup(c, action).await?,
         EnvCmd::Create {
             name,
             image,
@@ -597,6 +631,35 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
                             target.cpu, target.mem, target.disk
                         );
                     }
+                    if let Some(error) = vm
+                        .ssh
+                        .as_ref()
+                        .and_then(|ssh| ssh.observation_error.as_deref())
+                    {
+                        println!("    SSH observation: {error}");
+                    }
+                    if vm.backup.has_artifacts() || vm.backup.last_result.is_some() {
+                        println!(
+                            "    Backup: {} ({} retired, {} MiB reserved)",
+                            vm.backup.current.as_ref().map_or("none", |g| g.id.as_str()),
+                            vm.backup.retired.len(),
+                            vm.backup.reserved_mib()
+                        );
+                        if let Some(pending) = &vm.backup.pending {
+                            println!(
+                                "    Backup operation: {} {:?}; {}",
+                                pending.request.operation_id,
+                                pending.request.action,
+                                pending.error.as_deref().unwrap_or("pending")
+                            );
+                        }
+                        if let Some(pending) = &vm.backup.forwarding {
+                            println!("    Backup outcome unresolved: {}", pending.operation_id);
+                        }
+                        if let Some(error) = &vm.backup.cleanup_error {
+                            println!("    Backup cleanup: {error}");
+                        }
+                    }
                 }
             }
             print_access(c, &detail.vms).await;
@@ -632,6 +695,60 @@ async fn cmd_env(c: &Client, action: EnvCmd) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+async fn cmd_backup(c: &Client, action: BackupCmd) -> Result<()> {
+    use ttcore::backup::{Action, Request, View};
+    let (args, kind, generation, command) = match action {
+        BackupCmd::Show { vm_id } => {
+            validate_name(&vm_id, "vm_id").map_err(|e| eg!(e))?;
+            let view: View = c.get(&format!("/api/vms/{vm_id}/backup")).await?;
+            println!("{}", serde_json::to_string_pretty(&view).c(d!())?);
+            return Ok(());
+        }
+        BackupCmd::Create(args) => (args, Action::Create, None, "create"),
+        BackupCmd::Delete(args) => (args, Action::Delete, None, "delete"),
+        BackupCmd::Restore { args, generation } => {
+            (args, Action::Restore, Some(generation), "restore")
+        }
+    };
+    validate_name(&args.vm_id, "vm_id").map_err(|e| eg!(e))?;
+    let expected_revision = match args.expected_revision {
+        Some(value) => value,
+        None => {
+            let view: View = c.get(&format!("/api/vms/{}/backup", args.vm_id)).await?;
+            if view.vm.backup.busy() {
+                return Err(eg!(
+                    "backup operation unfinished; use its exact operation ID and expected revision"
+                ));
+            }
+            view.vm.backup.revision
+        }
+    };
+    let request = Request {
+        operation_id: args.operation_id.unwrap_or_else(ttcore::backup::token),
+        expected_revision,
+        action: kind,
+        generation,
+    };
+    request.validate().map_err(|e| eg!(e))?;
+    let generation_arg = request
+        .generation
+        .as_ref()
+        .map_or(String::new(), |g| format!(" --generation {g}"));
+    eprintln!(
+        "Exact retry after an unknown outcome:\n  tt env backup {command} {} --operation-id {} --expected-revision {}{generation_arg}",
+        args.vm_id, request.operation_id, request.expected_revision
+    );
+    if kind == Action::Restore {
+        eprintln!(
+            "Restoring disk generation {}; the VM stays stopped.",
+            request.generation.as_deref().unwrap()
+        );
+    }
+    let view = c.backup(&args.vm_id, &request).await?;
+    println!("{}", serde_json::to_string_pretty(&view).c(d!())?);
     Ok(())
 }
 
