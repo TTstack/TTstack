@@ -1,610 +1,554 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TTstack — Lightweight Private Cloud</title>
-<meta name="description" content="TTstack manages VMs and containers across small Linux fleets, with experimental FreeBSD support, scoped capability checks and opt-in stopped-disk backups.">
-<meta property="og:type" content="website">
-<meta property="og:title" content="TTstack — Lightweight Private Cloud">
-<meta property="og:description" content="QEMU/KVM, Firecracker and Docker/Podman on Linux, plus experimental bhyve/Jail on FreeBSD, managed through one controller.">
-<meta property="og:url" content="https://ttstack.github.io/TTstack/">
-<meta name="theme-color" content="#eef3fa">
-<link rel="icon" href="favicon.svg?v=3" type="image/svg+xml">
-<!-- Bump the asset query token when changing the corresponding cached file. -->
-<link rel="stylesheet" href="style.css?v=4">
-</head>
-<body id="top">
-
-<header class="bar">
-  <div class="wrap bar-inner">
-    <a class="brand" href="#top"><span class="tt">TT</span>stack</a>
-    <nav class="nav" aria-label="Page sections">
-      <a href="#architecture">Architecture</a>
-      <a href="#usage">Usage</a>
-      <a href="#lifecycle">Lifecycle</a>
-      <a href="#engines">Engines</a>
-      <a href="#highlights">Highlights</a>
-      <a href="#scope">Scope</a>
-      <a href="#docs">Docs</a>
-      <a href="https://github.com/TTstack/TTstack">GitHub</a>
-    </nav>
-  </div>
-</header>
-
-<main class="wrap">
-
-  <section class="hero">
-    <h1>TTstack &mdash; Lightweight Private Cloud</h1>
-    <p class="lede">
-      A small VM and container manager for developers and small teams. Create
-      temporary or retained environments on your Linux hosts, reach them over SSH
-      or published ports, and manage their lifecycle from one controller.
-    </p>
-    <p class="muted">
-      Linux x86_64 is the supported host platform. Mixed fleets can also use
-      <a href="#freebsd">experimental FreeBSD bhyve and Jail</a> with manual setup.
-    </p>
-    <p class="cta">
-      <a class="btn primary" href="https://github.com/TTstack/TTstack#quick-start-one-linuxsystemd-host">Get started</a>
-      <a class="btn" href="https://github.com/TTstack/TTstack">View on GitHub</a>
-    </p>
-    <p class="badges">
-      <a href="https://github.com/TTstack/TTstack/actions/workflows/ci.yml"><img src="https://github.com/TTstack/TTstack/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-      <a href="https://github.com/TTstack/TTstack/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
-      <a href="https://github.com/TTstack/TTstack/blob/master/Cargo.toml"><img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="Rust 1.88 or newer"></a>
-    </p>
-  </section>
-
-  <section id="architecture">
-    <h2>Architecture</h2>
-    <p class="muted">
-      One controller, one agent per host, and no extra infrastructure in between.
-    </p>
-    <figure class="figure figure--arch">
-      <svg viewBox="0 0 640 616" role="img" aria-labelledby="archTitle archDesc">
-        <title id="archTitle">TTstack components and Linux engines</title>
-        <desc id="archDesc">The tt CLI and browser dashboard talk HTTP to the tt-ctl controller. The controller and each host agent keep SQLite state. The Linux engines shown are QEMU/KVM, Firecracker and Docker/Podman. The same controller can manage experimental bhyve/Jail agents on FreeBSD.</desc>
-        <defs>
-          <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M0,0 L10,5 L0,10 z" fill="#6b6a66"></path>
-          </marker>
-        </defs>
-
-        <!-- clients -->
-        <rect x="90" y="40" width="190" height="52" rx="10" fill="#ffffff" stroke="#e1e0d9"></rect>
-        <text x="185" y="66" text-anchor="middle" font-size="14" font-weight="600" fill="#0b0b0b">tt CLI</text>
-        <text x="185" y="83" text-anchor="middle" font-size="11" fill="#6b6a66">commands</text>
-
-        <rect x="360" y="40" width="190" height="52" rx="10" fill="#ffffff" stroke="#e1e0d9"></rect>
-        <text x="455" y="66" text-anchor="middle" font-size="14" font-weight="600" fill="#0b0b0b">Browser</text>
-        <text x="455" y="83" text-anchor="middle" font-size="11" fill="#6b6a66">dashboard</text>
-
-        <path d="M185,92 V134" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow)"></path>
-        <path d="M455,92 V134" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow)"></path>
-
-        <!-- controller -->
-        <rect x="170" y="140" width="300" height="72" rx="10" fill="#eaf2fd" stroke="#2a78d6" stroke-width="1.6"></rect>
-        <text x="320" y="171" text-anchor="middle" font-size="15" font-weight="600" fill="#0b0b0b">tt-ctl</text>
-        <text x="320" y="192" text-anchor="middle" font-size="11" fill="#52514e">controller · scheduling · lifecycle · fleet state</text>
-
-        <path d="M470,176 H490" stroke="#6b6a66" stroke-width="1.5" stroke-dasharray="3 3"></path>
-        <rect x="490" y="158" width="130" height="36" rx="18" fill="#ffffff" stroke="#e1e0d9"></rect>
-        <text x="555" y="181" text-anchor="middle" font-size="11" fill="#52514e">SQLite state</text>
-
-        <path d="M320,212 V262" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow)"></path>
-        <text x="330" y="242" font-size="11" fill="#6b6a66">HTTP</text>
-
-        <!-- agents -->
-        <rect x="40" y="268" width="560" height="132" rx="12" fill="none" stroke="#c3c2b7" stroke-width="1.4" stroke-dasharray="5 4"></rect>
-        <text x="54" y="290" font-size="11" fill="#6b6a66">one tt-agent per host</text>
-
-        <rect x="64" y="302" width="248" height="84" rx="10" fill="#ffffff" stroke="#e1e0d9"></rect>
-        <text x="188" y="332" text-anchor="middle" font-size="14" font-weight="600" fill="#0b0b0b">tt-agent</text>
-        <text x="188" y="352" text-anchor="middle" font-size="11" fill="#6b6a66">host A · SQLite</text>
-        <text x="188" y="370" text-anchor="middle" font-size="11" fill="#6b6a66">engines · disks · networking</text>
-
-        <rect x="328" y="302" width="248" height="84" rx="10" fill="#ffffff" stroke="#e1e0d9"></rect>
-        <text x="452" y="332" text-anchor="middle" font-size="14" font-weight="600" fill="#0b0b0b">tt-agent</text>
-        <text x="452" y="352" text-anchor="middle" font-size="11" fill="#6b6a66">host B · SQLite</text>
-        <text x="452" y="370" text-anchor="middle" font-size="11" fill="#6b6a66">engines · disks · networking</text>
-
-        <path d="M132,400 V458" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow)"></path>
-        <path d="M320,400 V458" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow)"></path>
-        <path d="M508,400 V458" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow)"></path>
-
-        <!-- engines -->
-        <rect x="44" y="464" width="176" height="60" rx="10" fill="#eaf2fd" stroke="#2a78d6" stroke-width="1.6"></rect>
-        <text x="132" y="500" text-anchor="middle" font-size="13" font-weight="600" fill="#0b0b0b">QEMU/KVM</text>
-
-        <rect x="232" y="464" width="176" height="60" rx="10" fill="#fdeee7" stroke="#eb6834" stroke-width="1.6"></rect>
-        <text x="320" y="500" text-anchor="middle" font-size="13" font-weight="600" fill="#0b0b0b">Firecracker</text>
-
-        <rect x="420" y="464" width="176" height="60" rx="10" fill="#e6f6f0" stroke="#1baf7a" stroke-width="1.6"></rect>
-        <text x="508" y="500" text-anchor="middle" font-size="13" font-weight="600" fill="#0b0b0b">Docker/Podman</text>
-
-        <path d="M132,524 V550" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow)"></path>
-        <path d="M320,524 V550" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow)"></path>
-        <path d="M508,524 V550" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow)"></path>
-
-        <rect x="44" y="556" width="552" height="40" rx="10" fill="#eef3fa" stroke="#e1e0d9"></rect>
-        <text x="320" y="581" text-anchor="middle" font-size="11.5" fill="#52514e">per-host disks, networking and guest state</text>
-      </svg>
-      <figcaption class="figcaption">
-        The CLI and dashboard speak HTTP to the controller; the controller keeps fleet
-        state and drives the host agents, which own the engines and the host resources
-        underneath them. Linux engines are shown; experimental FreeBSD agents use
-        the same controller API. Details in the
-        <a href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md">API reference</a>.
-      </figcaption>
-    </figure>
-
-    <table>
-      <caption class="visually-hidden">TTstack components and their responsibilities</caption>
-      <thead>
-        <tr>
-          <th scope="col">Component</th>
-          <th scope="col">Responsibility</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td><code>tt</code></td>
-          <td>CLI client, local image recipes, deployment over SSH</td>
-        </tr>
-        <tr>
-          <td><code>tt-ctl</code></td>
-          <td>Scheduling, environment lifecycle, fleet state and web dashboard</td>
-        </tr>
-        <tr>
-          <td><code>tt-agent</code></td>
-          <td>Host-local VM/container lifecycle, storage and networking</td>
-        </tr>
-        <tr>
-          <td><code>crates/core</code></td>
-          <td>Shared API models, engine, storage and networking implementations</td>
-        </tr>
-      </tbody>
-    </table>
-  </section>
-
-  <section id="usage">
-    <h2>Create, use, tear down</h2>
-    <p class="muted">
-      Start with a registered host and a prepared <code>alpine-cloud</code> image.
-      This example keeps the environment until explicit deletion. The SSH address
-      is illustrative: configure the agent's client-reachable address, then use
-      the endpoint reported by <code>env show</code>.
-    </p>
-    <div class="terms">
-      <div class="term">
-<pre><code>$ tt env create demo --owner dev --image alpine-cloud \
-    --engine qemu --cpu 1 --mem 256 --disk 2048 \
-    --ssh-key ~/.ssh/id_ed25519.pub --lifetime 0
-$ tt env show demo
-# Selected output; VM and access rows omitted:
-Environment: demo
-  Owner:   dev
-  State:   Active
-  VMs:     1
-  Expiry:  never (retained until explicit deletion)
-
-# Use the reported SSH endpoint when ready:
-$ ssh -p 20000 root@192.0.2.10</code></pre>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TTstack — Lightweight Private Cloud</title>
+    <meta
+      name="description"
+      content="Create and manage VMs and containers on your own hosts. TTstack combines one controller, per-host agents and local SQLite state, with explicit lifecycle and recovery contracts."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="TTstack — Lightweight Private Cloud" />
+    <meta
+      property="og:description"
+      content="QEMU/KVM, Firecracker and Docker/Podman on Linux. One controller, per-host agents, retained disks and explicit recovery."
+    />
+    <meta property="og:url" content="https://ttstack.github.io/TTstack/" />
+    <meta name="theme-color" content="#eef3fa" />
+    <link rel="icon" href="favicon.svg?v=3" type="image/svg+xml" />
+    <!-- Bump the asset query token when changing the corresponding cached file. -->
+    <link rel="stylesheet" href="style.css?v=5" />
+  </head>
+  <body id="top">
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="bar">
+      <div class="wrap bar-inner">
+        <a class="brand" href="#top" aria-label="TTstack home"
+          ><span>TT</span>stack</a
+        >
+        <nav class="nav" aria-label="Page sections">
+          <a href="#architecture">Architecture</a>
+          <a href="#usage">Usage</a>
+          <a href="#engines">Engines</a>
+          <a href="#lifecycle">Lifecycle</a>
+          <a href="#docs">Docs</a>
+          <a href="https://github.com/TTstack/TTstack">GitHub ↗</a>
+        </nav>
       </div>
-      <div class="term">
-<pre><code>$ tt status
-Fleet Status
-  Hosts:   2/2 online
-  VMs:     3
-  Envs:    2
-  CPU:     8/64 cores
-  Memory:  6144/131072 MB
-  Disk:    122880/4000000 MB</code></pre>
+    </header>
+
+    <main id="main" class="wrap" tabindex="-1">
+      <section class="hero" aria-labelledby="hero-title">
+        <div>
+          <p class="eyebrow">A lightweight private cloud</p>
+          <h1 id="hero-title">VMs and containers, on your own hosts.</h1>
+          <p class="lede">
+            TTstack gives developers and small teams one place to create,
+            access, stop, restart and delete environments across a small fleet.
+          </p>
+          <div class="cta">
+            <a
+              class="btn primary"
+              href="https://github.com/TTstack/TTstack#quick-start-one-linuxsystemd-host"
+              >Get started</a
+            >
+            <a class="btn" href="#architecture">How it works</a>
+          </div>
+          <p class="project-links">
+            <a
+              href="https://github.com/TTstack/TTstack/actions/workflows/ci.yml"
+              >CI checks</a
+            >
+            <a href="https://github.com/TTstack/TTstack/blob/master/LICENSE"
+              >MIT license</a
+            >
+            <a href="https://github.com/TTstack/TTstack/blob/master/Cargo.toml"
+              >Rust 1.88+</a
+            >
+          </p>
+        </div>
+        <aside class="overview" aria-label="Deployment at a glance">
+          <p class="eyebrow">A small stack</p>
+          <dl>
+            <div>
+              <dt>Control plane</dt>
+              <dd>
+                One controller, one agent per host. Local SQLite state in each
+                service.
+              </dd>
+            </div>
+            <div>
+              <dt>Supported hosts</dt>
+              <dd>
+                Linux x86_64, with QEMU/KVM, Firecracker and Docker/Podman.
+              </dd>
+            </div>
+            <div>
+              <dt>Your workflow</dt>
+              <dd>
+                CLI, REST API and web dashboard. Temporary or retained
+                environments.
+              </dd>
+            </div>
+          </dl>
+          <p><a href="#freebsd">Experimental FreeBSD in mixed fleets →</a></p>
+        </aside>
+      </section>
+
+      <section id="architecture" aria-labelledby="architecture-title">
+        <div class="section-heading">
+          <p class="eyebrow">Architecture</p>
+          <h2 id="architecture-title">Fleet coordination. Local execution.</h2>
+          <p>
+            The controller places workloads and coordinates environments. Each
+            host agent owns its engines, disks and networking.
+          </p>
+        </div>
+        <figure class="architecture">
+          <div class="architecture-flow">
+            <div class="node">
+              <h3>Clients</h3>
+              <p><code>tt</code> CLI<br />REST client<br />Browser dashboard</p>
+            </div>
+            <div class="connection">
+              <span>HTTP</span><span aria-hidden="true">→</span>
+            </div>
+            <div class="node node-controller">
+              <h3><code>tt-ctl</code></h3>
+              <p>
+                Placement and lifecycle<br />Fleet observations<br />Controller
+                SQLite
+              </p>
+            </div>
+            <div class="connection">
+              <span>HTTP</span><span aria-hidden="true">→</span>
+            </div>
+            <div class="node">
+              <h3><code>tt-agent</code></h3>
+              <p>
+                One per resource host<br />Native engines and storage<br />Agent
+                SQLite
+              </p>
+            </div>
+          </div>
+          <figcaption>
+            No external database or message queue. The shared Rust library
+            <code>ttcore</code> supplies API models, capability contracts and
+            host implementations.
+            <a
+              href="https://github.com/TTstack/TTstack/blob/master/docs/architecture.md"
+              >Read the architecture guide →</a
+            >
+          </figcaption>
+        </figure>
+      </section>
+
+      <section id="usage" aria-labelledby="usage-title">
+        <div class="section-heading">
+          <p class="eyebrow">Usage</p>
+          <h2 id="usage-title">Create an environment. Keep its disk.</h2>
+          <p>
+            With a configured CLI, a registered QEMU host and a prepared
+            <code>alpine-cloud</code> image, this example retains the guest
+            until you delete it.
+          </p>
+        </div>
+        <div class="terms">
+          <div class="term">
+            <h3 id="create-example-title">Create and inspect</h3>
+            <pre
+              tabindex="0"
+              role="region"
+              aria-labelledby="create-example-title"
+            ><code>tt env create demo --image alpine-cloud \
+  --engine qemu --cpu 1 --mem 256 --disk 2048 \
+  --ssh-key ~/.ssh/id_ed25519.pub --lifetime 0
+
+tt env show demo</code></pre>
+            <p>
+              Use the guest IP from the agent host, or the configured SSH
+              endpoint reported by <code>env show</code> from a remote client.
+              Wait for SSH readiness.
+            </p>
+          </div>
+          <div class="term">
+            <h3 id="lifecycle-example-title">Stop, restart and delete</h3>
+            <pre
+              tabindex="0"
+              role="region"
+              aria-labelledby="lifecycle-example-title"
+            ><code># Stop retains the guest disk.
+tt env stop demo
+
+# Start boots the retained disk again.
+tt env start demo
+
+# Delete removes disks and recovery points.
+tt env delete demo</code></pre>
+          </div>
+        </div>
+        <p class="note">
+          Omit <code>--lifetime 0</code> for the six-hour default; expiry also
+          deletes the guest disks. <code>running</code> describes the VM
+          process, not SSH or application readiness. Follow the
+          <a
+            href="https://github.com/TTstack/TTstack#quick-start-one-linuxsystemd-host"
+            >full installation walkthrough</a
+          >
+          and
+          <a href="https://github.com/TTstack/TTstack/blob/master/docs/ssh.md"
+            >SSH guide</a
+          >
+          for setup and access.
+        </p>
+      </section>
+
+      <section id="engines" aria-labelledby="engines-title">
+        <div class="section-heading">
+          <p class="eyebrow">Engines</p>
+          <h2 id="engines-title">Choose the guest you need.</h2>
+          <p>
+            One lifecycle interface, with explicit requirements for each engine
+            and storage backend.
+          </p>
+        </div>
+        <div class="grid engines">
+          <article class="card engine-qemu">
+            <p class="eyebrow">Full virtual machines</p>
+            <h3>QEMU/KVM</h3>
+            <p>
+              Cloud images, initial SSH accounts and public keys, with optional
+              guest sudo. Stopped VMs support CPU/RAM updates and virtual-disk
+              growth; guest partitions and filesystems grow separately.
+            </p>
+            <a
+              class="more"
+              href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md#qemu-full-vms-with-ssh"
+              >Prepare a QEMU guest →</a
+            >
+          </article>
+          <article class="card engine-firecracker">
+            <p class="eyebrow">Prepared microVMs</p>
+            <h3>Firecracker</h3>
+            <p>
+              A prepared kernel and ext4 rootfs under jailer, with resource
+              limits, read-only configuration and stopped-VM resizing. Prepared
+              images can support SSH; the built-in smoke image checks boot and
+              networking only.
+            </p>
+            <a
+              class="more"
+              href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md#firecracker-prepared-microvm-workloads"
+              >Prepare a Firecracker guest →</a
+            >
+          </article>
+          <article class="card engine-docker">
+            <p class="eyebrow">Application containers</p>
+            <h3>Docker/Podman</h3>
+            <p>
+              Images with a long-running default command and requested
+              application ports. The selected runtime stays bound to the agent
+              inventory. Container disk quotas, managed SSH and VM network
+              policies are unavailable.
+            </p>
+            <a
+              class="more"
+              href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md#docker--podman-application-containers"
+              >Prepare a container →</a
+            >
+          </article>
+        </div>
+        <aside id="freebsd" class="callout" aria-labelledby="freebsd-title">
+          <div>
+            <p class="eyebrow">Experimental</p>
+            <h3 id="freebsd-title">FreeBSD bhyve and Jail</h3>
+          </div>
+          <div>
+            <p>
+              Mixed fleets can use prepared bhyve raw disks and copied Jail
+              roots. bhyve supports stopped zvol recovery points; Jail supports
+              root public-key injection. Native binaries and manual host/network
+              setup are required. Primary CI and automated deployment remain
+              Linux-only.
+            </p>
+            <a
+              class="more"
+              href="https://github.com/TTstack/TTstack/blob/master/docs/compatibility.md#experimental-freebsd-restoration"
+              >FreeBSD requirements and tested scope →</a
+            >
+          </div>
+        </aside>
+      </section>
+
+      <section id="lifecycle" aria-labelledby="lifecycle-title">
+        <div class="section-heading">
+          <p class="eyebrow">Lifecycle</p>
+          <h2 id="lifecycle-title">Explicit state, retained resources.</h2>
+          <p>
+            Creation is saved before provisioning. A timeout can leave running
+            or partial resources; inspect the existing environment before
+            retrying.
+          </p>
+        </div>
+        <dl class="states" aria-label="Environment states">
+          <div class="state creating">
+            <dt><code>creating</code></dt>
+            <dd>A saved plan is being provisioned.</dd>
+          </div>
+          <div class="state active">
+            <dt><code>active</code></dt>
+            <dd>All VM processes run without reported errors.</dd>
+          </div>
+          <div class="state stopped">
+            <dt><code>stopped</code></dt>
+            <dd>Execution has stopped; disks remain.</dd>
+          </div>
+          <div class="state failed">
+            <dt><code>failed</code></dt>
+            <dd>Inspect errors and retained resources.</dd>
+          </div>
+          <div class="state deleting">
+            <dt><code>deleting</code></dt>
+            <dd>Cleanup continues until resources are removed.</dd>
+          </div>
+        </dl>
+        <p class="note">
+          Start boots stopped guests; VM memory does not survive a stop. Delete
+          and expiry remove guest storage and backups. The controller retries
+          incomplete deletion; host reboot does not automatically restart
+          guests.
+          <a
+            href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md#lifecycle-and-recovery"
+            >Lifecycle and recovery contract →</a
+          >
+        </p>
+      </section>
+
+      <section id="highlights" aria-labelledby="highlights-title">
+        <div class="section-heading">
+          <p class="eyebrow">Operations</p>
+          <h2 id="highlights-title">Know what the host can do.</h2>
+          <p>
+            Capability checks guide admission. Runtime state, image eligibility
+            and capacity still matter when each operation executes.
+          </p>
+        </div>
+        <div class="grid features">
+          <article class="card">
+            <h3>Inspect support</h3>
+            <p>
+              <code>tt capabilities</code> shows the design matrix.
+              <code>tt host show HOST_ID</code> shows scoped host prerequisites
+              and denial reasons.
+            </p>
+            <a
+              class="more"
+              href="https://github.com/TTstack/TTstack/blob/master/docs/capabilities.md"
+              >Capability contracts →</a
+            >
+          </article>
+          <article class="card">
+            <h3>Place by reservation</h3>
+            <p>
+              CPU, memory and disk figures are configured budgets and
+              reservations. VM placement prefers eligible zvol hosts, then packs
+              by remaining memory.
+            </p>
+            <a
+              class="more"
+              href="https://github.com/TTstack/TTstack/blob/master/docs/architecture.md#placement-storage-and-capabilities"
+              >Placement and storage →</a
+            >
+          </article>
+          <article class="card">
+            <h3>Resize while stopped</h3>
+            <p>
+              QEMU and Firecracker accept CPU/RAM changes and root-disk growth.
+              Updates preserve the VM identity and disk; shrinking is
+              unsupported.
+            </p>
+            <a
+              class="more"
+              href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md#offline-resource-updates"
+              >Offline resource updates →</a
+            >
+          </article>
+          <article class="card">
+            <h3>Keep a disk recovery point</h3>
+            <p>
+              Opt-in, stopped-only backups use qualified zvol snapshots or
+              strict Linux file reflinks. Restore overwrites the current disk
+              and leaves the VM stopped.
+            </p>
+            <a
+              class="more"
+              href="https://github.com/TTstack/TTstack/blob/master/docs/disk-backup.md"
+              >Backup eligibility and retries →</a
+            >
+          </article>
+          <article class="card">
+            <h3>Choose network controls</h3>
+            <p>
+              Linux QEMU and Firecracker support routed outgoing denial and
+              separate guest isolation from host services, peers and private
+              networks.
+            </p>
+            <a
+              class="more"
+              href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md#networking-and-platform-scope"
+              >Networking and isolation →</a
+            >
+          </article>
+          <article class="card">
+            <h3>Prepare images on each host</h3>
+            <p>
+              Local recipes prepare guest images; deployment installs services.
+              Register hosts separately and wait for their image catalog before
+              placement.
+            </p>
+            <a
+              class="more"
+              href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md#recipes-and-image-discovery"
+              >Images and discovery →</a
+            >
+          </article>
+        </div>
+      </section>
+
+      <section id="scope" aria-labelledby="scope-title">
+        <div class="section-heading">
+          <p class="eyebrow">Scope and access</p>
+          <h2 id="scope-title">A manager for small, trusted fleets.</h2>
+        </div>
+        <ul class="points">
+          <li>
+            <strong>One administrator boundary.</strong> Deployment configures a
+            shared API key; owner names are labels. Services use HTTP without
+            built-in TLS. Protect management access with a trusted network or
+            protected tunnel/proxy. Manual starts without a key leave the API
+            unauthenticated.
+          </li>
+          <li>
+            <strong>Local resources, caller-owned policy.</strong> There is no
+            image distribution, guest migration, HA or cross-host private
+            network. User identity, application installation and idle-stop
+            policy belong to callers. Disk recovery points share the host
+            storage's failure domain.
+          </li>
+          <li>
+            <strong>Evidence for named revisions.</strong> The 50-host and
+            1000-VM limits are guardrails, not benchmarked capacity.
+            Implementation, host probes and live guest validation prove
+            different things; the
+            <a
+              href="https://github.com/TTstack/TTstack/blob/master/docs/compatibility.md"
+              >compatibility guide</a
+            >
+            and
+            <a
+              href="https://github.com/TTstack/TTstack/blob/master/docs/README.md#validation-evidence"
+              >dated reports</a
+            >
+            record the tested combinations and limits.
+          </li>
+        </ul>
+      </section>
+
+      <section id="docs" aria-labelledby="docs-title">
+        <div class="section-heading">
+          <p class="eyebrow">Documentation</p>
+          <h2 id="docs-title">Start with the guide for your task.</h2>
+          <p>
+            Current behavior lives in maintained guides. Proposals retain design
+            context; validation reports record evidence at specific revisions.
+          </p>
+        </div>
+        <ul class="doc-links">
+          <li>
+            <a
+              href="https://github.com/TTstack/TTstack/blob/master/docs/architecture.md"
+              ><h3>Architecture <span aria-hidden="true">↗</span></h3>
+              <p>Ownership, request flow, persistence and placement.</p></a
+            >
+          </li>
+          <li>
+            <a
+              href="https://github.com/TTstack/TTstack/blob/master/docs/deployment.md"
+              ><h3>Deployment <span aria-hidden="true">↗</span></h3>
+              <p>Prerequisites, installation, fleet setup and upgrades.</p></a
+            >
+          </li>
+          <li>
+            <a
+              href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md"
+              ><h3>Guest images <span aria-hidden="true">↗</span></h3>
+              <p>Recipes, storage layouts and guest networking.</p></a
+            >
+          </li>
+          <li>
+            <a
+              href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md"
+              ><h3>REST API <span aria-hidden="true">↗</span></h3>
+              <p>Requests, returned states and failure recovery.</p></a
+            >
+          </li>
+          <li>
+            <a href="https://github.com/TTstack/TTstack/blob/master/docs/ssh.md"
+              ><h3>Initial SSH access <span aria-hidden="true">↗</span></h3>
+              <p>Accounts, public keys, endpoints and readiness.</p></a
+            >
+          </li>
+          <li>
+            <a
+              href="https://github.com/TTstack/TTstack/blob/master/docs/capabilities.md"
+              ><h3>
+                Technical capabilities <span aria-hidden="true">↗</span>
+              </h3>
+              <p>Design support, scoped host reports and admission.</p></a
+            >
+          </li>
+          <li>
+            <a
+              href="https://github.com/TTstack/TTstack/blob/master/docs/disk-backup.md"
+              ><h3>VM disk backup <span aria-hidden="true">↗</span></h3>
+              <p>Recovery points, destructive restore and exact retries.</p></a
+            >
+          </li>
+          <li>
+            <a
+              href="https://github.com/TTstack/TTstack/blob/master/docs/compatibility.md"
+              ><h3>Compatibility <span aria-hidden="true">↗</span></h3>
+              <p>Platform limits, CI and recorded live evidence.</p></a
+            >
+          </li>
+        </ul>
+        <p class="note">
+          <a
+            href="https://github.com/TTstack/TTstack/blob/master/docs/README.md"
+            >Full documentation index →</a
+          >
+          <a
+            href="https://github.com/TTstack/TTstack/blob/master/docs/workflows.md"
+            >Contributor workflows →</a
+          >
+        </p>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap foot">
+        <p>TTstack · MIT licensed</p>
+        <p>
+          <a href="https://github.com/TTstack/TTstack/blob/master/README.md"
+            >README</a
+          >
+          <a href="https://github.com/TTstack/TTstack/blob/master/LICENSE"
+            >License</a
+          >
+          <a href="https://github.com/TTstack/TTstack">GitHub</a>
+        </p>
       </div>
-    </div>
-    <p class="muted">
-      Capacity figures are configured reservations, not measured host load; the CLI
-      labels memory and disk as MB, with values in MiB. On the agent host, use the
-      guest IP directly: VM port forwarding does not provide loopback access.
-      Initial SSH, public endpoints and readiness are described in the
-      <a href="https://github.com/TTstack/TTstack/blob/master/docs/ssh.md">SSH guide</a>.
-      The full walkthrough, including host registration and image creation, is in the
-      <a href="https://github.com/TTstack/TTstack#quick-start-one-linuxsystemd-host">README quick start</a>.
-    </p>
-  </section>
-
-  <section id="lifecycle">
-    <h2>Lifecycle</h2>
-    <p class="muted">
-      Environments and their VMs move through a small, explicit set of states.
-    </p>
-    <figure class="figure figure--lifecycle">
-      <svg viewBox="0 0 760 300" role="img" aria-labelledby="lifeTitle lifeDesc">
-        <title id="lifeTitle">Common environment lifecycle paths</title>
-        <desc id="lifeDesc">Creating leads to active when all VM processes are running without errors. Stop retains disks; start boots again. Active or stopped environments may be deleted or expire. Failed environments retain resources and may recover or be explicitly deleted. Completed deletion removes the record.</desc>
-        <defs>
-          <marker id="arrow2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M0,0 L10,5 L0,10 z" fill="#6b6a66"></path>
-          </marker>
-          <marker id="arrow2d" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M0,0 L10,5 L0,10 z" fill="#d03b3b"></path>
-          </marker>
-        </defs>
-
-        <!-- main chain -->
-        <rect x="20" y="60" width="124" height="64" rx="10" fill="#fef7e6" stroke="#fab219" stroke-width="1.6"></rect>
-        <text x="82" y="97" text-anchor="middle" font-size="13.5" font-weight="600" fill="#0b0b0b">creating</text>
-
-        <rect x="192" y="60" width="124" height="64" rx="10" fill="#e8f6e8" stroke="#0ca30c" stroke-width="1.6"></rect>
-        <text x="254" y="97" text-anchor="middle" font-size="13.5" font-weight="600" fill="#0b0b0b">active</text>
-
-        <rect x="364" y="60" width="124" height="64" rx="10" fill="#f1f4f9" stroke="#6b6a66" stroke-width="1.6"></rect>
-        <text x="426" y="97" text-anchor="middle" font-size="13.5" font-weight="600" fill="#0b0b0b">stopped</text>
-
-        <rect x="536" y="60" width="124" height="64" rx="10" fill="#fdefe9" stroke="#ec835a" stroke-width="1.6"></rect>
-        <text x="598" y="97" text-anchor="middle" font-size="13.5" font-weight="600" fill="#0b0b0b">deleting</text>
-
-        <path d="M144,92 H186" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow2)"></path>
-        <text x="165" y="82" text-anchor="middle" font-size="10.5" fill="#6b6a66">running</text>
-
-        <path d="M316,92 H358" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow2)"></path>
-        <text x="337" y="82" text-anchor="middle" font-size="10.5" fill="#6b6a66">stop</text>
-
-        <path d="M488,92 H530" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow2)"></path>
-        <text x="509" y="82" text-anchor="middle" font-size="10.5" fill="#6b6a66">delete</text>
-        <path d="M254,60 V28 H598 V54" fill="none" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow2)"></path>
-        <text x="426" y="19" text-anchor="middle" font-size="10.5" fill="#6b6a66">delete / expiry</text>
-
-        <path d="M426,128 C426,170 254,170 254,128" fill="none" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow2)"></path>
-        <text x="340" y="180" text-anchor="middle" font-size="10.5" fill="#6b6a66">start</text>
-
-        <path d="M660,92 H686" stroke="#6b6a66" stroke-width="1.5" marker-end="url(#arrow2)"></path>
-        <text x="694" y="96" font-size="11.5" fill="#52514e">removed</text>
-
-        <!-- failure edges -->
-        <path d="M82,124 V190" stroke="#d03b3b" stroke-width="1.3" stroke-dasharray="4 4"></path>
-        <path d="M254,124 V190" stroke="#d03b3b" stroke-width="1.3" stroke-dasharray="4 4"></path>
-        <path d="M426,124 V190" stroke="#d03b3b" stroke-width="1.3" stroke-dasharray="4 4"></path>
-        <path d="M82,190 H426" fill="none" stroke="#d03b3b" stroke-width="1.3" stroke-dasharray="4 4"></path>
-        <path d="M380,190 V208" stroke="#d03b3b" stroke-width="1.3" stroke-dasharray="4 4" marker-end="url(#arrow2d)"></path>
-
-        <rect x="310" y="214" width="140" height="64" rx="10" fill="#fbeaea" stroke="#d03b3b" stroke-width="1.6"></rect>
-        <text x="380" y="251" text-anchor="middle" font-size="13.5" font-weight="600" fill="#0b0b0b">failed</text>
-
-        <path d="M450,246 H598 V134" fill="none" stroke="#d03b3b" stroke-width="1.3" stroke-dasharray="4 4" marker-end="url(#arrow2d)"></path>
-        <text x="524" y="238" text-anchor="middle" font-size="10.5" fill="#6b6a66">delete</text>
-      </svg>
-      <figcaption class="figcaption">
-        This shows common paths, not every transition. Mixed or failed VM states
-        and offline hosts can make an environment <strong>failed</strong>; it can
-        recover to active or stopped when the cause resolves. Process state does
-        not establish SSH or application readiness. Recovery, retries and expiry are in the
-        <a href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md#lifecycle-and-recovery">API reference</a>.
-      </figcaption>
-    </figure>
-
-    <ul class="points">
-      <li>
-        <strong>Stop keeps the disks, not the memory.</strong>
-        Stopping releases execution resources and preserves disks or containers;
-        starting boots the workload again. Save work in the guest before stopping.
-      </li>
-      <li>
-        <strong>Delete is destructive.</strong>
-        Deleting an environment removes its runtime disks and containers. Cleanup that
-        does not finish stays visible as <code>deleting</code> and is retried.
-      </li>
-      <li>
-        <strong>Expiry is a cleanup trigger.</strong>
-        The default lifetime is six hours. Choose a longer lifetime, or use
-        <code>--lifetime 0</code> to disable automatic expiry. When a lifetime ends,
-        the controller runs the deletion cleanup path &mdash; it is not an exact
-        termination deadline.
-      </li>
-    </ul>
-  </section>
-
-  <section id="engines">
-    <h2>Linux engines, one interface</h2>
-    <div class="grid">
-      <article class="card">
-        <svg class="icon" viewBox="0 0 26 26" role="img" aria-label="QEMU/KVM" fill="none" stroke="#2a78d6" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="7" y="7" width="12" height="12" rx="2"></rect>
-          <path d="M10 3v4M16 3v4M10 19v4M16 19v4M3 10h4M3 16h4M19 10h4M19 16h4"></path>
-        </svg>
-        <h3>QEMU/KVM</h3>
-        <p>
-          Full VMs from cloud images, with initial SSH accounts/public keys and
-          optional guest sudo. CPU/RAM updates and virtual-disk growth are supported
-          while stopped; the guest manages partition and filesystem growth.
-        </p>
-        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md">Guest images and access &rarr;</a></p>
-      </article>
-      <article class="card">
-        <svg class="icon" viewBox="0 0 26 26" role="img" aria-label="Firecracker" fill="none" stroke="#eb6834" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="3" y="3" width="20" height="20" rx="3"></rect>
-          <rect x="9.5" y="9.5" width="7" height="7" rx="1.5"></rect>
-        </svg>
-        <h3>Firecracker</h3>
-        <p>
-          MicroVMs under jailer with per-VM resource limits, a prepared kernel and
-          rootfs, prepared-image SSH and offline ext4 growth. Shutdown is requested
-          before forced termination; the built-in smoke image does not include SSH.
-        </p>
-        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md#firecracker-prepared-microvm-workloads">Firecracker setup &rarr;</a></p>
-      </article>
-      <article class="card">
-        <svg class="icon" viewBox="0 0 26 26" role="img" aria-label="Docker or Podman containers" fill="none" stroke="#1baf7a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="3" y="13" width="20" height="9" rx="2"></rect>
-          <rect x="7" y="6" width="12" height="5" rx="1.5"></rect>
-        </svg>
-        <h3>Docker/Podman</h3>
-        <p>
-          Containers from images that provide a long-running default command,
-          publishing the application ports you ask for. Runtime selection is bound
-          to the agent inventory; installing another runtime does not switch it.
-        </p>
-        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md">Container images &rarr;</a></p>
-      </article>
-    </div>
-  </section>
-
-  <section id="freebsd">
-    <h2>Experimental FreeBSD</h2>
-    <p>
-      bhyve boots prepared raw disks and supports stopped zvol backups; Jail uses
-      copied roots with optional root public keys. Neither supports offline
-      resizing or Linux guest network isolation. Native binaries and manual
-      host/network setup are required.
-      <a href="https://github.com/TTstack/TTstack/blob/master/docs/compatibility.md#experimental-freebsd-restoration">FreeBSD scope and limits &rarr;</a>
-    </p>
-  </section>
-
-  <section id="highlights">
-    <h2>Highlights</h2>
-    <p class="muted">
-      What the lifecycle machinery does on its own, and the choices that keep the
-      stack small.
-    </p>
-    <div class="grid">
-      <article class="card">
-        <svg class="icon icon--neutral" viewBox="0 0 26 26" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M4 6l2 2 3-4M4 14l2 2 3-4M4 22l2 2 3-4"></path>
-          <path d="M13 6h9M13 14h9M13 22h9"></path>
-        </svg>
-        <h3>Inspect capabilities before creation</h3>
-        <p>
-          <code>tt capabilities</code> shows engine/storage support;
-          <code>tt host show HOST_ID</code> explains host availability and denial
-          reasons. Placement, direct agent requests and dashboard controls share
-          the same capability contracts. Offline reports remain visible as history.
-        </p>
-        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/capabilities.md">Technical capabilities &rarr;</a></p>
-      </article>
-      <article class="card">
-        <svg class="icon icon--neutral" viewBox="0 0 26 26" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="3" y="4" width="20" height="18" rx="3"></rect>
-          <path d="M18 10a6 6 0 1 0 0 7M18 5v5h-5"></path>
-        </svg>
-        <h3>Opt-in disk recovery points</h3>
-        <p>
-          Back up stopped QEMU/Firecracker root disks on qualified ZFS or reflink
-          storage, or experimental bhyve root zvols. Restore overwrites the current
-          disk and leaves the VM stopped. There is no full-copy fallback;
-          environment deletion and expiry also remove its backups.
-        </p>
-        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/disk-backup.md">Disk backup and restore &rarr;</a></p>
-      </article>
-      <article class="card">
-        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Expiry and deletion retries" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="13" cy="13" r="9"></circle>
-          <path d="M13 7.5V13l3.5 3"></path>
-        </svg>
-        <h3>Expiry and deletion retries</h3>
-        <p>
-          Choose a lifetime or keep an environment until you delete it. When expiry
-          is enabled, the controller cleans up expired environments and retries
-          incomplete deletion.
-        </p>
-        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md#lifecycle-and-recovery">Recovery semantics &rarr;</a></p>
-      </article>
-      <article class="card">
-        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Requests are persisted before they run" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M13 3l7.5 3v6c0 4.6-3.1 8.4-7.5 10-4.4-1.6-7.5-5.4-7.5-10V6z"></path>
-          <path d="M9.8 12.8l2.4 2.4 4.2-4.6"></path>
-        </svg>
-        <h3>Persisted before it runs</h3>
-        <p>
-          Creation plans are saved before provisioning. A timeout or disconnected
-          client can leave running or partial resources; inspect the existing name
-          before retrying.
-        </p>
-      </article>
-      <article class="card">
-        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Lifecycle reconciliation" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M4 13a9 9 0 0 1 15.4-6.4"></path>
-          <path d="M4 4.5V9h4.5"></path>
-          <path d="M22 13a9 9 0 0 1-15.4 6.4"></path>
-          <path d="M22 21.5V17h-4.5"></path>
-        </svg>
-        <h3>Lifecycle reconciliation</h3>
-        <p>
-          Agent and controller reconcile on a loop: failed network restoration is
-          retried and confirmed process state clears obsolete recovery errors.
-          Uncertain resources remain available for inspection. Reconciliation yields
-          between VM checks so queued lifecycle operations can proceed.
-        </p>
-      </article>
-      <article class="card">
-        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Placement by reservation" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="13" cy="13" r="8.5"></circle>
-          <circle cx="13" cy="13" r="3.5"></circle>
-          <path d="M13 2v4M13 20v4M2 13h4M20 13h4"></path>
-        </svg>
-        <h3>Placement by reservation</h3>
-        <p>
-          VM placement prefers eligible ZFS zvol hosts and falls back to file storage. Scheduling
-          uses the CPU, memory and disk you reserved, not measured load, so placement
-          stays predictable.
-        </p>
-      </article>
-      <article class="card">
-        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Guest network controls" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="5.5" y="11.5" width="15" height="10.5" rx="2.5"></rect>
-          <path d="M9 11.5V8.5a4 4 0 0 1 8 0v3"></path>
-        </svg>
-        <h3>Guest network controls</h3>
-        <p>
-          Both Linux QEMU and Firecracker support blocking routed outgoing traffic
-          while allowing replies to inbound connections. Separate opt-in isolation
-          blocks guest-initiated access to host services, peers and private networks.
-          These controls are unavailable for Docker/Podman.
-        </p>
-        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md#networking-and-platform-scope">Networking and isolation &rarr;</a></p>
-      </article>
-      <article class="card">
-        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Disks retained across stop" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-          <ellipse cx="13" cy="6.5" rx="8" ry="3.5"></ellipse>
-          <path d="M5 6.5v13c0 1.9 3.6 3.5 8 3.5s8-1.6 8-3.5v-13"></path>
-          <path d="M5 13c0 1.9 3.6 3.5 8 3.5s8-1.6 8-3.5"></path>
-        </svg>
-        <h3>Disks that survive a stop</h3>
-        <p>
-          Stopping releases execution resources but preserves disks and containers;
-          VM memory does not survive. ZFS zvols with snapshot clones, and file-backed
-          disks, sit behind the same interface.
-        </p>
-      </article>
-      <article class="card">
-        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="Resize a stopped VM" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M4 10V4h6"></path>
-          <path d="M4 4l6.5 6.5"></path>
-          <path d="M22 16v6h-6"></path>
-          <path d="M22 22l-6.5-6.5"></path>
-        </svg>
-        <h3>Resize a stopped VM</h3>
-        <p>
-          QEMU and Firecracker support CPU and memory increases or decreases for
-          the next boot, and disk growth while stopped. QEMU guests manage their
-          own filesystem growth; Firecracker also grows ext4 offline.
-          Resource updates are unavailable for Docker/Podman, bhyve and Jail.
-        </p>
-        <p class="more"><a href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md#offline-resource-updates">Offline resource updates &rarr;</a></p>
-      </article>
-      <article class="card">
-        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="One controller with three interfaces" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M13 2.5l9 5v11l-9 5-9-5v-11z"></path>
-          <path d="M4 7.5l9 5 9-5"></path>
-          <path d="M13 12.5V23.5"></path>
-        </svg>
-        <h3>One controller, three interfaces</h3>
-        <p>
-          No message queue and no database server: the controller and each agent keep
-          their state in SQLite, and you drive the fleet from the CLI, the REST API or
-          the web dashboard. The dashboard supports basic SSH-key input and host
-          capability inspection; custom SSH accounts, guest configuration, resize
-          and disk backup are available through the CLI and API.
-        </p>
-      </article>
-      <article class="card">
-        <svg class="icon icon--neutral" viewBox="0 0 26 26" role="img" aria-label="One Rust workspace" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2.5" y="4.5" width="21" height="17" rx="2.5"></rect>
-          <path d="M7 10l3 3-3 3"></path>
-          <path d="M13 16h6"></path>
-        </svg>
-        <h3>One workspace, your hosts</h3>
-        <p>
-          <code>tt</code>, <code>tt-ctl</code>, <code>tt-agent</code> and the shared
-          core are a single Rust workspace. Linux and experimental FreeBSD builds
-          select their native host implementations while sharing fleet models.
-        </p>
-      </article>
-    </div>
-    <p class="muted">
-      Supported scope, defaults and recovery semantics live in
-      <a href="https://github.com/TTstack/TTstack/blob/master/docs/compatibility.md">compatibility</a>
-      and the
-      <a href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md#lifecycle-and-recovery">API reference</a>,
-      with the detailed contracts and limitations for each engine.
-    </p>
-  </section>
-
-  <section id="scope">
-    <h2>Scope and access</h2>
-    <ul class="points">
-      <li><strong>Small Linux fleets.</strong> Linux x86_64 is the supported host
-        platform. The 50-host and 1000-VM limits are guardrails, not benchmarked capacity.</li>
-      <li><strong>Experimental FreeBSD in mixed fleets.</strong> Native lifecycle
-        tests cover FreeBSD 15.1-RELEASE-p3 amd64 alongside two Linux hosts.
-        Primary CI and automated deployment remain Linux-only; this does not
-        establish support for other FreeBSD versions or untrusted-tenant isolation.</li>
-      <li><strong>One administrator boundary.</strong> Deployment configures a shared
-        API key. Owner labels are not authorization, and services use HTTP without
-        built-in TLS. Manual starts without a key leave the API unauthenticated.
-        Keep management access on a trusted network or protected proxy.</li>
-      <li><strong>Explicit operator responsibilities.</strong> Images are prepared on
-        each host. There is no image distribution, guest migration, HA, cross-host private
-        network or automatic guest restart after a host reboot. Identity and application
-        policy belong to callers.</li>
-      <li><strong>Evidence has a scope.</strong> Implemented options and native-engine
-        probes are not blanket live-validation claims. See the
-        <a href="https://github.com/TTstack/TTstack/blob/master/docs/compatibility.md">compatibility matrix</a>
-        and <a href="https://github.com/TTstack/TTstack/blob/master/docs/README.md#validation-evidence">dated reports</a>.
-      </li>
-    </ul>
-  </section>
-
-  <section id="docs">
-    <h2>Documentation</h2>
-    <div class="grid">
-      <a class="card link-card" href="https://github.com/TTstack/TTstack/blob/master/docs/deployment.md">
-        <h3>Deployment</h3>
-        <p>Dependencies, installation, fleet configuration and upgrades.</p>
-      </a>
-      <a class="card link-card" href="https://github.com/TTstack/TTstack/blob/master/docs/guest-images.md">
-        <h3>Guest images</h3>
-        <p>Recipes, image formats, guest access, storage and networking.</p>
-      </a>
-      <a class="card link-card" href="https://github.com/TTstack/TTstack/blob/master/docs/ssh.md">
-        <h3>Initial SSH access</h3>
-        <p>Guest accounts, public keys, reachable endpoints and readiness.</p>
-      </a>
-      <a class="card link-card" href="https://github.com/TTstack/TTstack/blob/master/docs/rest-api.md">
-        <h3>REST API</h3>
-        <p>Endpoints, request defaults, response and state semantics.</p>
-      </a>
-      <a class="card link-card" href="https://github.com/TTstack/TTstack/blob/master/docs/compatibility.md">
-        <h3>Compatibility</h3>
-        <p>Supported scope, CI coverage and the limits of live verification.</p>
-      </a>
-      <a class="card link-card" href="https://github.com/TTstack/TTstack/blob/master/docs/capabilities.md">
-        <h3>Technical capabilities</h3>
-        <p>Engine/storage support, scoped host reports and compatibility.</p>
-      </a>
-      <a class="card link-card" href="https://github.com/TTstack/TTstack/blob/master/docs/disk-backup.md">
-        <h3>VM disk backup</h3>
-        <p>Opt-in stopped-disk recovery points, restore, retries and cleanup.</p>
-      </a>
-    </div>
-    <p class="muted">
-      Full index in
-      <a href="https://github.com/TTstack/TTstack/blob/master/docs/README.md">docs/README.md</a>.
-    </p>
-  </section>
-
-</main>
-
-<footer>
-  <div class="wrap foot">
-    <p>MIT licensed &middot; &copy; 2020 fh</p>
-    <p>
-      <a href="https://github.com/TTstack/TTstack/blob/master/LICENSE">License</a> &middot;
-      <a href="https://github.com/TTstack/TTstack/blob/master/README.md">README</a> &middot;
-      <a href="https://github.com/TTstack/TTstack">GitHub</a>
-    </p>
-  </div>
-</footer>
-
-</body>
+    </footer>
+  </body>
 </html>
