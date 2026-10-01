@@ -35,7 +35,7 @@ the review lens over them.
   report is authoritative; only an absent report uses the explicit legacy mapping.
   Unknown or ambiguous reports must not grant new work. Preserve exact retries of
   accepted operations and existing backup recovery after admission is withdrawn.
-  See [technical capabilities](../../docs/capabilities.md); do not add a parallel
+  See [technical capabilities](../../../../docs/capabilities.md); do not add a parallel
   feature matrix or assume a host-global grant applies to every engine.
 
 ## Networking

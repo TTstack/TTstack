@@ -1,8 +1,6 @@
 ---
 name: x-commit
-description: Review the requested TTstack worktree changes, fix confirmed defects, validate, and create atomic local commits. Use only when the user explicitly invokes /x-commit.
-argument-hint: "[<pathspec>... | commit summary]"
-disable-model-invocation: true
+description: Review requested TTstack worktree changes, fix confirmed defects, validate, and create atomic local commits. Use when the user requests committing a defined set of changes.
 ---
 
 # Self-Reviewing Commit for TTstack
@@ -13,16 +11,20 @@ No deploy; no version bump or tag unless the user asks. New commits only
 
 ## Input
 
-`$ARGUMENTS` — optional Git pathspecs or a summary of what to commit. Given
+Use optional Git pathspecs or a commit summary supplied in the user's request. Given
 pathspecs → only matching changes are candidates; everything else is baseline.
 Empty → all intended changes. Unknown flags → reject; never guess. Pathspecs matching
 no change → nothing is intended.
 
 ## Setup
 
-Read `.claude/docs/workflow-policy.md`, `.claude/docs/commit-protocol.md`,
-`.claude/docs/review-core.md`, `.claude/docs/lifecycle-patterns.md`,
-`.claude/docs/false-positive-guide.md`. Preflight and ledger before the first edit.
+Read [workflow policy](../ttstack-development/references/workflow-policy.md) and
+[commit protocol](../ttstack-development/references/commit-protocol.md) for preflight,
+ownership, validation, and staging. Use [review core](../x-review/references/review-core.md)
+and the [false-positive guide](../x-review/references/false-positive-guide.md) to assess
+defects. For lifecycle, persistence, networking, engine, or deployment changes, read
+[lifecycle patterns](../ttstack-development/references/lifecycle-patterns.md).
+Complete preflight and record the ledger before the first edit.
 
 ## Protocol
 
@@ -42,12 +44,14 @@ Read `.claude/docs/workflow-policy.md`, `.claude/docs/commit-protocol.md`,
    paths, and tests.
 2. Check the mapped invariants in `lifecycle-patterns.md`; refute candidates through
    `false-positive-guide.md`.
-3. Fix confirmed defects completely, with a regression test. An unaccepted public or
-   persisted-contract break stays uncommitted and Open.
+3. Fix confirmed defects completely, with a regression test when it proves behavior
+   or a concrete failure. Documentation-only fixes need link, example, and diff checks.
+   An unaccepted public or persisted-contract break stays uncommitted and Open.
 4. A real but disproportionate fix → Won't Fix with a reason recorded in
    `docs/audit.md`, never only in chat. No progress on a repeat pass → stop and report.
 
-Investigation may run in parallel; edits and commits are sequential.
+If delegation is available and authorized, investigation may run in parallel;
+edits and commits on the shared worktree are sequential.
 
 ### 3. Validate and commit
 

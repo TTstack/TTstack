@@ -14,4 +14,4 @@ Simplicity = stable, deterministic lifecycle behavior — not shorter text.
 - **Admit only improvements that name the ambiguity or failure they remove.**
 
 Scope belongs to callers. User identity, application installation, and business
-policies stay outside the manager ([AGENTS.md](../../AGENTS.md)).
+policies stay outside the manager ([AGENTS.md](../../../../AGENTS.md)).

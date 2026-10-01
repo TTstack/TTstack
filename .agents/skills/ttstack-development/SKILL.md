@@ -25,11 +25,11 @@ agent is `tt-agent`, and controller is `tt-ctl`.
 
 ## Apply the shared guides
 
-- [lifecycle-patterns.md](../../docs/lifecycle-patterns.md) — invariants the change
+- [lifecycle-patterns.md](references/lifecycle-patterns.md) — invariants the change
   must preserve.
-- [commit-protocol.md](../../docs/commit-protocol.md) — checks by change class and the
+- [commit-protocol.md](references/commit-protocol.md) — checks by change class and the
   final workspace gate.
-- [workflow-policy.md](../../docs/workflow-policy.md) — ownership, atomic units, and
+- [workflow-policy.md](references/workflow-policy.md) — ownership, atomic units, and
   preservation of unrelated work.
 
 ## Select useful checks
@@ -41,10 +41,11 @@ Configuration-drive tests need the tools from `e2fsprogs`; a skipped external-to
 is not a pass.
 
 Finish with the workspace checks in
-[commit-protocol.md](../../docs/commit-protocol.md). Dependency, edition, or
+[commit-protocol.md](references/commit-protocol.md). Dependency, edition, or
 newer-standard-library usage also needs the declared minimum compiler. Explain
 unavailable prerequisites and state what was actually verified.
 
 Inspect the final diff and run `git diff --check`. Report behavior, evidence, and
 remaining limits. Do not run `make deploy*` as a development check; remote tests use
-the separate `/x-live` skill with the session's existing host authorization.
+the separate [$x-live](../x-live/SKILL.md) skill with the session's existing host
+authorization.

@@ -1,26 +1,28 @@
 ---
 name: x-review
-description: Review a TTstack scope for concrete lifecycle, recovery, and operator defects, and update the docs/audit.md registry. Use only when the user explicitly invokes /x-review.
-argument-hint: "[N | all | staged | worktree | <rev> | <rev1>..<rev2>]"
-disable-model-invocation: true
+description: Review a TTstack diff, commit range, or repository scope for concrete lifecycle, recovery, and operator defects, and update docs/audit.md. Use when the user requests this review workflow.
 ---
 
 # TTstack Lifecycle Review
 
 High-signal review. Code read-only; `docs/audit.md` is the registry exception.
-Never commit, push, or deploy. Fixes belong to `/x-commit`. Review alone does not
-authorize fixes, deployment, or live host tests.
+Never commit, push, or deploy. Fixes belong to [$x-commit](../x-commit/SKILL.md).
+Review alone does not authorize fixes, deployment, or live host tests.
 
 ## Setup
 
-Read `.claude/docs/workflow-policy.md`, `.claude/docs/pragmatic-engineering.md`,
-`.claude/docs/review-core.md` (Subsystem Map), `.claude/docs/lifecycle-patterns.md`,
-`.claude/docs/false-positive-guide.md`. Public API, persisted state, or a documented
-default in scope → also `docs/rest-api.md`, `docs/compatibility.md`.
+Read [workflow policy](../ttstack-development/references/workflow-policy.md) for scope
+and ownership, [pragmatic engineering](references/pragmatic-engineering.md), and
+[review core](references/review-core.md) for the subsystem map and evidence standard.
+Refute candidates with the [false-positive guide](references/false-positive-guide.md).
+For lifecycle, persistence, networking, engine, or deployment changes, also read
+[lifecycle patterns](../ttstack-development/references/lifecycle-patterns.md).
+For public API, persisted state, or a documented default in scope, also read the
+[REST API](../../../docs/rest-api.md) and [compatibility guide](../../../docs/compatibility.md).
 
 ## Input
 
-`$ARGUMENTS` — at most one scope:
+Use at most one review scope supplied in the user's request:
 
 | Input | Scope | Evidence |
 |-------|-------|----------|
@@ -49,9 +51,10 @@ Historical scope: report only defects still present at `HEAD`.
 
 ### 2. Evidence
 
-Small single-subsystem → review directly. Read-only agents only when a context split
-helps; `all` → disjoint batches, one owner per file. fmt/compile/clippy are tools, not
-findings.
+Review a small single-subsystem scope directly. For `all`, use disjoint batches with
+one owner per file. If delegation is available and authorized, keep reviewers
+read-only and split only when it helps manage context. fmt/compile/clippy are tools,
+not findings.
 
 Cover what the diff touches: lifecycle and partial failure, persistence and
 compatibility, networking, engines, placement, authorization, operator experience.
@@ -61,8 +64,9 @@ test alone does not establish depth.
 ### 3. Verify
 
 Re-read each candidate and try to **refute** it (`false-positive-guide.md`). Keep only
-what the code demonstrates; merge findings sharing a root cause. One independent
-verifier only if a candidate stays ambiguous. Voting is not proof.
+what the code demonstrates; merge findings sharing a root cause. If authorized
+delegation helps resolve an ambiguous candidate, use one independent verifier.
+Agreement is not proof.
 
 ### 4. Completeness
 

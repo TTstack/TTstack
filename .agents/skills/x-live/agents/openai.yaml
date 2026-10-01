@@ -1,0 +1,6 @@
+interface:
+  display_name: "TTstack Live Validation"
+  short_description: "Validate TTstack behavior on authorized test hosts"
+
+policy:
+  allow_implicit_invocation: false

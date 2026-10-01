@@ -19,7 +19,7 @@ behavior and are updated together with the code.
 | Configure initial VM SSH and public ingress | [SSH](ssh.md) |
 | Inspect the experimental FreeBSD restoration and its limits | [FreeBSD scope](compatibility.md#experimental-freebsd-restoration) |
 | Configure distributed deployment | [Fleet template](../tools/deploy.toml.example) |
-| Contribute or choose an AI workflow | [Repository instructions](../AGENTS.md) and [Claude workflows](../.claude/README.md) |
+| Contribute or choose an AI workflow | [Repository instructions](../AGENTS.md) and [Codex workflows](workflows.md) |
 
 ## Proposals
 

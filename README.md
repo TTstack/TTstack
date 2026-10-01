@@ -167,7 +167,7 @@ readiness and application readiness are separate observations.
 | [Compatibility](docs/compatibility.md) | Supported scope, CI and limits of live verification |
 | [Validation evidence](docs/README.md#validation-evidence) | Dated reports for specific tested revisions, with their limits |
 | [Fleet configuration template](tools/deploy.toml.example) | Commented distributed deployment configuration |
-| [Claude workflows](.claude/README.md) | `/x-review`, `/x-check`, `/x-commit`, and `/x-live` entry points with their shared guides |
+| [Codex workflows](docs/workflows.md) | Repository skills for development, review, checks, commits, and live validation |
 | [Project website](https://ttstack.github.io/TTstack/) | Published landing page, built from [`site/`](site/) |
 
 `make help` lists development commands. `make doc` generates Rust source API

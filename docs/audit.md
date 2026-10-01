@@ -1,9 +1,9 @@
 # TTstack audit
 
-> Auto-managed by `/x-review` and `/x-commit`; registry edits are not code writes.
+> Managed by `$x-review` and `$x-commit`; registry edits are not code writes.
 > Confirmed findings are appended under **Open**; a disproven finding is removed
 > rather than kept as backlog; resolved history belongs in Git and the dated
-> validation reports. Entry shape and severity: `.claude/docs/review-core.md` §5.
+> validation reports. Entry shape and severity: [review core](../.agents/skills/x-review/references/review-core.md#5-audit-registry) §5.
 >
 > Dated dispositions identify the reviewed revisions and their evidence.
 > Design reviews are not registry entries. The

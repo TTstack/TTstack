@@ -1,0 +1,6 @@
+interface:
+  display_name: "TTstack Commit"
+  short_description: "Review, validate, and commit intended TTstack changes"
+
+policy:
+  allow_implicit_invocation: false

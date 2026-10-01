@@ -1,6 +1,6 @@
 # Authorized Host Validation
 
-Policy for `/x-live` and any bounded functional test on a real host. A pass here is
+Policy for `$x-live` and any bounded functional test on a real host. A pass here is
 not a security certification or a capacity measurement.
 
 ## Authorization and bounds

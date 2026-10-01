@@ -33,7 +33,7 @@ there are no `tests/` or `benches/` directories.
 | Deployment and recipes | `crates/cli/src/{deploy,image_builder}.rs`, `tools/deploy.toml.example` | `docs/deployment.md` |
 | Build and CI | `Cargo.toml`, `.github/workflows/ci.yml`, `Makefile` | `docs/compatibility.md` |
 
-Documentation, `.claude/`, and dated reports map to the behavior they describe.
+Documentation, `.agents/skills/`, and dated reports map to the behavior they describe.
 
 ## 2. Review depth (effort, not severity)
 
@@ -75,10 +75,12 @@ ready application. State which one was observed.
 fmt / compile / clippy → tools, not findings. Still LOW if tools miss: documentation
 contradicting the code, a stale default in a guide, or a link that no longer resolves.
 
-## 5. Audit registry (`docs/audit.md`) — SSOT
+## 5. Audit registry
 
-Every skill that writes the registry uses these rules and this shape. State meanings:
-`workflow-policy.md` §5. Decide from current code, not prior entry text.
+Every skill that writes [docs/audit.md](../../../../docs/audit.md) uses these rules
+and this shape. State meanings:
+[workflow policy](../../ttstack-development/references/workflow-policy.md) §5.
+Decide from current code, not prior entry text.
 
 1. Prune Open entries proven fixed or obsolete. Narrow scope: in-scope entries only;
    unrelated Open stays unless proven fixed. History → Git and the dated reports. The

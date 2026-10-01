@@ -1,11 +1,13 @@
 # Workflow Safety and Atomic Commit Policy
 
-SSOT safety for `/x-review`, `/x-check`, `/x-commit`, `/x-live`. Skills must not
-weaken it. See also `pragmatic-engineering.md`.
+Shared safety for `$ttstack-development`, `$x-review`, `$x-check`, `$x-commit`, and
+`$x-live`. See also [pragmatic engineering](../../x-review/references/pragmatic-engineering.md).
+The user's instructions and existing session authorization take precedence;
+loading a skill does not authorize additional work or external actions.
 
-**Hard rules:** mutation work is user-invoked · local commits only · no history
-rewrite · one independent issue per commit · no version bump or tag unless the user
-asks · `make deploy*` is never a check.
+**Default boundaries:** mutations stay within the user's task · local commits only ·
+no history rewrite · one independent issue per commit · no version bump or tag unless
+the user asks · `make deploy*` is never a check.
 
 ## 1. Preflight
 
@@ -13,7 +15,10 @@ Before mutate/commit:
 
 1. Record `git status --short`, branch, `HEAD`.
 2. Separate staged / unstaged / untracked baseline.
-3. Stop on merge/rebase/cherry-pick or detached HEAD unless the user resolves it.
+3. For commit workflows, inspect an in-progress merge/rebase/cherry-pick or detached
+   HEAD. Continue only if handling that state is part of the authorized task;
+   otherwise preserve it and report the commit blocker. Read-only review and checks
+   can still proceed.
 4. Define this invocation's owned files/hunks; baseline stays with its author.
 5. **Commit workflows:** freeze owned paths (+ planned units) before review edits.
    Stage only the freeze set + this invocation's fix/format paths — never paths that
@@ -30,8 +35,8 @@ Dirty tree OK; clear ownership required.
 - Live systems: never reset host networking, stop another guest or service, or undo
   work owned by another session. Track and clean up only task-created resources.
 - If a needed fix overlaps baseline and cannot be separated safely → stop and report.
-- Review agents read-only. Parallelism: investigation only. Edits and commits on one
-  tree: sequential.
+- If delegation is available and authorized, review agents stay read-only.
+  Parallelism is for investigation; edits and commits on one tree are sequential.
 
 ## 3. Atomic commit units
 
@@ -62,4 +67,5 @@ One issue / root cause / behavior change → one commit.
 Disproven entries are removed, not retained in a Rejected section. Record the
 refutation in the review output or commit history; routine noise needs no entry.
 
-Registry rules and entry shape: `review-core.md` §5.
+Registry rules and entry shape:
+[review core](../../x-review/references/review-core.md#5-audit-registry) §5.

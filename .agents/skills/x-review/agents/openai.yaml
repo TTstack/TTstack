@@ -1,0 +1,6 @@
+interface:
+  display_name: "TTstack Lifecycle Review"
+  short_description: "Review TTstack defects and maintain the audit registry"
+
+policy:
+  allow_implicit_invocation: false

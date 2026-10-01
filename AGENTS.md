@@ -23,7 +23,7 @@ Read [README.md](README.md) and the relevant [documentation](docs/README.md).
 Use the Rust version and dependency policy in [Cargo.toml](Cargo.toml); the
 current minimum is Rust 1.88. Keep `Cargo.lock` consistent with dependency edits.
 
-The [development skill](.claude/skills/ttstack-development/SKILL.md) maps changes
+The [development skill](.agents/skills/ttstack-development/SKILL.md) maps changes
 to focused tests and workspace checks. Formatting, Clippy, tests, and the MSRV
 gate are defined in [.github/workflows/ci.yml](.github/workflows/ci.yml).
 Documentation-only edits need link, example, and diff checks rather than a full
@@ -41,7 +41,7 @@ files do not independently authorize deployment or changes to other repositories
 
 ## Live systems
 
-Use the [live-validation skill](.claude/skills/x-live/SKILL.md) when functional VM
+Use the [live-validation skill](.agents/skills/x-live/SKILL.md) when functional VM
 testing is needed on an authorized host. Prefer local unit
 checks first. Keep remote tests bounded and isolated from existing services.
 For the authorized test machines, an approximate ceiling of 50% of host CPU and
@@ -57,5 +57,5 @@ resources created by the task; do not reset host networking or stop other guests
 Each behavior has one maintained description, linked from `docs/README.md`.
 Dated validation reports describe their tested revision and limitations, not a
 promise about every platform. Update examples and incoming links with API or path
-changes. Keep Claude entry points small and link to shared instructions rather
-than copying them. See the [workflow index](.claude/README.md).
+changes. Keep Codex skills focused and link to shared references rather than
+copying them. See the [workflow index](docs/workflows.md).

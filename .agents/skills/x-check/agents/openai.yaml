@@ -1,0 +1,6 @@
+interface:
+  display_name: "TTstack Change Checks"
+  short_description: "Run focused TTstack checks and report limits"
+
+policy:
+  allow_implicit_invocation: false

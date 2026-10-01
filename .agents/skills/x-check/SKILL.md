@@ -1,19 +1,19 @@
 ---
 name: x-check
-description: Run the checks appropriate to a TTstack change and report their limits. Use only when the user explicitly invokes /x-check.
-argument-hint: "[paths | check scope]"
-disable-model-invocation: true
+description: Select and run checks for a TTstack change, then report results and verification limits without editing or committing. Use when the user requests validation of a change or check scope.
 ---
 
 # TTstack Change Checks
 
-Select and run the checks for `$ARGUMENTS`, or for the current task's uncommitted
-changes when omitted. Validate only: no edits, no commit, no deploy.
+Select and run checks for the paths or scope in the user's request, or for the
+current task's uncommitted changes when omitted. Validate only: no edits, no commit,
+no deploy.
 
 ## Setup
 
-Read `.claude/docs/workflow-policy.md`, `.claude/docs/commit-protocol.md` (change
-classes and the workspace gate), and `AGENTS.md` for the workspace rules.
+Read [workflow policy](../ttstack-development/references/workflow-policy.md) for
+ownership, [commit protocol](../ttstack-development/references/commit-protocol.md)
+for change classes and checks, and [AGENTS.md](../../../AGENTS.md) for workspace rules.
 
 ## Protocol
 

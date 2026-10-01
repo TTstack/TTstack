@@ -1,0 +1,6 @@
+interface:
+  display_name: "TTstack Development"
+  short_description: "Implement and validate focused TTstack changes"
+
+policy:
+  allow_implicit_invocation: true
