@@ -1,7 +1,8 @@
 # Workflow Safety and Atomic Commit Policy
 
-Shared safety for `$ttstack-development`, `$x-review`, `$x-check`, `$x-commit`, and
-`$x-live`. See also [pragmatic engineering](../../x-review/references/pragmatic-engineering.md).
+Shared safety for `$ttstack-development`, `$x-review`, `$x-overhaul`, `$x-check`,
+`$x-commit`, and `$x-live`. See also
+[pragmatic engineering](../../x-review/references/pragmatic-engineering.md).
 The user's instructions and existing session authorization take precedence;
 loading a skill does not authorize additional work or external actions.
 

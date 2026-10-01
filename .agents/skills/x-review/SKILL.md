@@ -1,13 +1,19 @@
 ---
 name: x-review
-description: Review a TTstack diff, commit range, or repository scope for concrete lifecycle, recovery, and operator defects, and update docs/audit.md. Use when the user requests this review workflow.
+description: Review a TTstack diff, commit range, or repository scope for concrete lifecycle, recovery, and operator defects, and update docs/audit.md without code repairs. Use for review-only requests or as the review phase of x-overhaul.
 ---
 
 # TTstack Lifecycle Review
 
 High-signal review. Code read-only; `docs/audit.md` is the registry exception.
-Never commit, push, or deploy. Fixes belong to [$x-commit](../x-commit/SKILL.md).
-Review alone does not authorize fixes, deployment, or live host tests.
+A standalone review ends with findings and registry changes; it does not automatically
+commit, push, or deploy. Review alone does not authorize code repairs or live host tests.
+Use [$x-overhaul](../x-overhaul/SKILL.md) for review, repair, validation, and local
+commits, or [$x-commit](../x-commit/SKILL.md) to commit defined worktree changes.
+
+When reused by `x-overhaul`, keep this review phase code read-only and return its
+scope, baseline, coverage, findings, and registry changes to the caller. The caller
+owns subsequent repairs and commits; do not start a nested overhaul from this skill.
 
 ## Setup
 

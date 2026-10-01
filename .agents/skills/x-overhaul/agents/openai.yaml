@@ -1,0 +1,6 @@
+interface:
+  display_name: "TTstack Overhaul"
+  short_description: "Review TTstack, repair defects, and commit validated fixes"
+
+policy:
+  allow_implicit_invocation: false

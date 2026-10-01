@@ -20,6 +20,7 @@ The `x-` workflows retain their explicit-only policy through
 | --- | --- |
 | [$ttstack-development](../.agents/skills/ttstack-development/SKILL.md) | Implement and validate focused code or documentation changes |
 | [$x-review](../.agents/skills/x-review/SKILL.md) | Review a scope for concrete lifecycle, recovery, and operator defects; code read-only, registry excepted |
+| [$x-overhaul](../.agents/skills/x-overhaul/SKILL.md) | Review the full repository or an explicit scope, repair confirmed defects, validate, and create atomic local commits |
 | [$x-check](../.agents/skills/x-check/SKILL.md) | Select and run the checks appropriate to a change, and report their limits |
 | [$x-commit](../.agents/skills/x-commit/SKILL.md) | Validate and commit the requested change, preserving unrelated work |
 | [$x-live](../.agents/skills/x-live/SKILL.md) | Plan and run bounded functional tests on an authorized host, recording platform limits |
@@ -27,10 +28,21 @@ The `x-` workflows retain their explicit-only policy through
 `ttstack-development` allows implicit invocation for TTstack code and documentation
 tasks. The `x-` workflows can also be selected explicitly from the skill selector.
 
+`x-review` without a scope reviews uncommitted task changes and leaves code
+untouched. `x-overhaul` without a scope reviews the full repository and continues
+through repairs, validation, and local commits. Both accept `all`, `N`, `staged`,
+`worktree`, a revision, or a range. In an overhaul, `staged` or `worktree` also
+selects the intended changes to commit; unrelated baseline work stays untouched.
+Push requires task or session authorization. Neither workflow deploys or changes
+versions automatically.
+
 For example:
 
 ```text
 $x-review staged
+$x-review all
+$x-overhaul
+$x-overhaul 1
 $x-check docs/workflows.md
 $x-commit Commit the intended skill migration changes.
 $x-live Validate stop/start persistence on the already-authorized test host.
