@@ -38,6 +38,8 @@ The dashboard covers fleet inventory, scoped host capabilities and basic
 environment actions, including SSH keys for QEMU, prepared Firecracker and Jail.
 The CLI and REST API also expose offline resizing, disk backup, guest
 configuration and advanced initial SSH options.
+The [architecture guide](docs/architecture.md) explains ownership, request flow,
+durable state and the controller/agent boundary.
 
 ## Quick start: one Linux/systemd host
 
@@ -65,7 +67,7 @@ tt image list
 
 # Use an existing SSH public key; never pass the private key.
 tt env create demo --image alpine-cloud --engine qemu \
-  --cpu 1 --mem 256 --disk 2048 --ssh-key ~/.ssh/id_ed25519.pub
+  --cpu 1 --mem 256 --disk 2048 --ssh-key ~/.ssh/id_ed25519.pub --lifetime 0
 tt env show demo
 ```
 
@@ -80,10 +82,15 @@ the management address is not necessarily a guest access endpoint. See
 [networking](docs/guest-images.md#networking-and-platform-scope) for other TCP ports.
 
 ```bash
+# Stop keeps disks; start boots them again.
 tt env stop demo
 tt env start demo
+# Delete removes the guest disks and any disk recovery point.
 tt env delete demo
 ```
+
+This example uses `--lifetime 0` to retain the environment until explicit deletion.
+Omitting it selects the six-hour default; expiry also deletes the guest disks.
 
 For containers or custom guests, see the [image guide](docs/guest-images.md).
 For multiple hosts, use [distributed deployment](docs/deployment.md#distributed-deployment).
@@ -99,24 +106,19 @@ For multiple hosts, use [distributed deployment](docs/deployment.md#distributed-
   a timeout or interruption, inspect `tt env show NAME` before retrying. Incomplete
   deletion remains visible and is retried while the controller is running.
 - Scheduling prefers eligible hosts using ZFS zvol storage for VMs, falling back
-  to file storage.
+  to file storage, then packs by remaining memory.
   It uses configured CPU, memory and disk reservations, not measured load.
   Limits of 50 hosts and 1000 tracked VMs are guardrails, not tested fleet capacity.
 - Inspect engine/storage support with `tt capabilities` and host prerequisites
   with `tt host show HOST_ID`. Shared [capability checks](docs/capabilities.md)
   drive request validation, placement, agent admission and dashboard controls.
 - QEMU cloud images and prepared Firecracker images support
-  [initial SSH accounts and public keys](docs/ssh.md), with optional guest sudo.
-  QEMU supports virtual-disk growth;
-  guest partitions/filesystems must grow separately. Firecracker uses a prepared
-  kernel/rootfs and supports ext4 growth; its built-in recipe only checks boot
-  and networking. Both support explicit
-  [stopped-VM resource updates](docs/rest-api.md#offline-resource-updates).
-  Docker requires a long-running image default command.
-- Docker/Podman selection is persisted with the agent inventory, so installing
-  another runtime does not silently move container operations to a different store.
-- Firecracker uses jailer and per-VM resource limits, supports opaque read-only
-  guest configuration, and requests orderly shutdown before forced termination.
+  [initial SSH accounts and public keys](docs/ssh.md), with optional guest sudo,
+  and [stopped-VM resource updates](docs/rest-api.md#offline-resource-updates).
+  Firecracker uses jailer and a prepared kernel/rootfs; its built-in recipe checks
+  boot and networking only. Docker needs a long-running image default command and
+  retains its selected Docker/Podman runtime. See [guest images](docs/guest-images.md)
+  for preparation, disk growth and engine-specific limits.
 - Linux QEMU and Firecracker both support routed outgoing traffic restrictions
   and opt-in host-enforced guest network isolation; Docker/Podman supports neither.
   See [networking and isolation](docs/guest-images.md#networking-and-platform-scope).
@@ -159,6 +161,7 @@ readiness and application readiness are separate observations.
 | Document | Scope |
 |---|---|
 | [Documentation index](docs/README.md) | Reading paths, maintained guides and dated evidence |
+| [Architecture](docs/architecture.md) | Component ownership, durable request flow, placement and state boundaries |
 | [Deployment](docs/deployment.md) | Dependencies, installation, fleet configuration, upgrades |
 | [Guest images](docs/guest-images.md) | Recipes, image formats, guest access, storage and networking |
 | [Initial SSH access](docs/ssh.md) | Guest accounts, public keys, reachable endpoints and readiness |

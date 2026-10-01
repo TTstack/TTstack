@@ -20,17 +20,19 @@ there are no `tests/` or `benches/` directories.
 
 | Subsystem | Files | Guides |
 |-----------|-------|--------|
-| Shared contracts | `crates/core/src/{api,model,auth,guest_config,command,lib}.rs` | `docs/rest-api.md`, `docs/compatibility.md` |
+| Shared contracts | `crates/core/src/{api,model,auth,capability,guest_config,command,lib}.rs` | `docs/architecture.md`, `docs/rest-api.md`, `docs/capabilities.md`, `docs/compatibility.md` |
 | Initial SSH access | `crates/core/src/ssh.rs`, `crates/core/src/ssh_bootstrap.sh`, `crates/agent/src/ssh_ingress.rs` | `docs/ssh.md`, `lifecycle-patterns.md` |
-| Engines | `crates/core/src/engine/{mod,qemu,firecracker,docker}.rs`, `engine/firecracker/sandbox.rs` | `docs/guest-images.md`, `lifecycle-patterns.md` |
+| Engines | `crates/core/src/engine/{mod,qemu,firecracker,docker,bhyve,jail}.rs`, `crates/core/src/engine/firecracker/sandbox.rs` | `docs/guest-images.md`, `docs/compatibility.md`, `lifecycle-patterns.md` |
 | Storage and images | `crates/core/src/storage/{mod,file,zvol}.rs` | `docs/guest-images.md`, `lifecycle-patterns.md` |
-| Networking and isolation | `crates/core/src/net.rs`, `crates/core/src/net/isolation.rs` | `docs/guest-images.md`, `docs/deployment.md` |
-| Agent runtime | `crates/agent/src/{runtime,handler,config,auth}.rs` | `lifecycle-patterns.md`, `docs/rest-api.md` |
-| Environment lifecycle | `crates/ctl/src/handler.rs`, `crates/ctl/src/db.rs` | `lifecycle-patterns.md`, `docs/rest-api.md` |
+| Disk backup | `crates/core/src/backup.rs`, `crates/core/src/storage/backup.rs`, `crates/agent/src/backup.rs`, `crates/ctl/src/backup.rs` | `docs/disk-backup.md`, `lifecycle-patterns.md` |
+| Networking and isolation | `crates/core/src/net.rs`, `crates/core/src/net/{isolation,freebsd}.rs` | `docs/guest-images.md`, `docs/deployment.md`, `docs/compatibility.md` |
+| Agent runtime | `crates/agent/src/{main,runtime,handler,config,auth}.rs` | `lifecycle-patterns.md`, `docs/rest-api.md` |
+| Environment lifecycle | `crates/ctl/src/{main,handler,db,config,auth}.rs` | `lifecycle-patterns.md`, `docs/rest-api.md` |
 | Placement and scheduling | `crates/ctl/src/scheduler.rs` | `docs/compatibility.md`, `lifecycle-patterns.md` |
 | Dashboard | `crates/ctl/src/web.rs` | `docs/rest-api.md` |
 | CLI and credentials | `crates/cli/src/{main,client}.rs` | `docs/rest-api.md`, `docs/deployment.md` |
 | Deployment and recipes | `crates/cli/src/{deploy,image_builder}.rs`, `tools/deploy.toml.example` | `docs/deployment.md` |
+| Offline agent conversion | `crates/agent/examples/upgrade-agent-v5.rs` | `docs/deployment.md`, `docs/validation/agent-v5-conversion-2026-09-29.md` |
 | Build and CI | `Cargo.toml`, `.github/workflows/ci.yml`, `Makefile` | `docs/compatibility.md` |
 
 Documentation, `.agents/skills/`, and dated reports map to the behavior they describe.

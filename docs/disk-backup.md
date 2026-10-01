@@ -5,6 +5,10 @@ Firecracker VM, or an experimental FreeBSD bhyve VM on zvol storage. Backup
 admission is **disabled by default**. This is a local disk
 rollback facility: it does not save memory or recover a deleted VM or failed host.
 
+Use [Enable and use](#enable-and-use) for CLI operations, [Supported storage](#supported-storage)
+for eligibility, and [API and exact retries](#api-and-exact-retries) after an unknown
+outcome. Component ownership is described in [architecture](architecture.md).
+
 ## Enable and use
 
 Start an eligible agent with `--enable-disk-backup`. Distributed deployment exposes
@@ -212,8 +216,7 @@ Ordinary stop/start retains its existing SSH behavior.
 
 ## Upgrades and evidence
 
-This feature uses controller schema v5 and agent schema v6. Read
-[upgrade compatibility](deployment.md#resource-update-schema-gate) before replacing
+Read [upgrade compatibility](deployment.md#persistent-state-schema-gate) before replacing
 services with retained inventory; disabling admission does not make old binaries
 safe to use on the new state.
 

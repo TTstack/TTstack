@@ -6,6 +6,11 @@ Agent-only deployment installs only `tt-agent`; copy a compatible `tt` binary to
 that host if using the built-in recipes there. Examples below use the default
 install paths and a CLI already configured for the controller.
 
+Choose [QEMU](#qemu-full-vms-with-ssh), [Docker/Podman](#docker--podman-application-containers)
+or [Firecracker](#firecracker-prepared-microvm-workloads), then check
+[storage](#storage) and [networking](#networking-and-platform-scope) for the intended
+host. Experimental FreeBSD setup is maintained in [compatibility](compatibility.md#experimental-freebsd-restoration).
+
 ## Recipes and image discovery
 
 ```bash

@@ -202,7 +202,7 @@ are migrated into `90-ttstack-mounts.conf`. Guest disks and jail ownership are n
 recursively changed. Remote scripts travel through SSH stdin and binaries use
 private random staging directories with SHA-256 transfer verification.
 Check the target revision's database compatibility and upgrade requirements
-before starting the new services. See [schema compatibility](#resource-update-schema-gate).
+before starting the new services. See [schema compatibility](#persistent-state-schema-gate).
 For rollback, retain matching binaries and consistent backups of controller/agent
 databases and guest storage, taken while services/workloads are stopped.
 
@@ -215,8 +215,14 @@ tested combinations.
 
 ## Upgrade compatibility
 
+Choose the state path before replacing services: a compatible current inventory
+can reopen normally; retained native v5 agent inventory needs the explicit offline
+converter; unsupported older formats require a separately reviewed conversion or
+explicit workload replacement. The [schema gate](#persistent-state-schema-gate)
+below describes those alternatives.
+
 Scoped [capability reports](capabilities.md) are additive host metadata and do not
-change these schema versions. New controllers accept the documented legacy gates
+change database schemas. New controllers accept the documented legacy gates
 when an agent omits the report. A present report is authoritative; unknown report
 versions reject new feature-dependent work. Restart agents after changing host
 prerequisites to refresh their startup observations.
@@ -241,7 +247,9 @@ addresses does not forward an old controller's credentials: supply `TT_API_KEY`
 for the new controller. A `--server` override reuses saved credentials only when
 its address exactly matches the configured one.
 
-### Resource-update schema gate
+<a id="resource-update-schema-gate"></a>
+
+### Persistent-state schema gate
 
 The current controller uses schema v5 and the agent uses schema v6. Both use
 WAL/FULL writer connections. Backup generations, pending operations and retirement
@@ -271,8 +279,9 @@ SQLite before switching files. Upgrade the controller alongside the agent and
 verify retained guests and storage. New v6 state is not readable by a v5 agent;
 executable-only rollback is insufficient.
 
-For the supplied upgrade path, use the previous compatible binaries to drain and
-explicitly delete agent workloads, then remove the empty host registration. Stop
+For workload replacement instead of retained-state conversion, use the previous
+compatible binaries to drain and explicitly delete agent workloads, then remove
+the empty host registration. Stop
 the old agent, retain its old database/state privately, and initialize a separate
 empty state directory with the new agent before re-registering the host. Recreate
 workloads explicitly. This is destructive workload replacement, not in-place VM
@@ -288,12 +297,10 @@ false. Distributed agent configuration accepts `enable_disk_backup = true`.
 Disabling admission leaves existing backup maintenance available. See
 [disk backup](disk-backup.md) for eligible storage and lifecycle semantics.
 
-Use `--container-runtime docker|podman` or `TT_CONTAINER_RUNTIME` to select a runtime
-for a new container inventory. Distributed deployment accepts `container_runtime`
-in each agent section. Runtime and [network bindings](ssh.md#reachable-endpoint)
-are persisted before VM creation. Current agents require these bindings for
-managed workloads. Valid bindings continue to protect healthy VM operations when
-an unrelated VM row is unreadable.
+Runtime and [network bindings](ssh.md#reachable-endpoint) are persisted before VM
+creation. Current agents require these bindings for managed workloads. Valid
+bindings continue to protect healthy VM operations when an unrelated VM row is
+unreadable; see [container runtime selection](guest-images.md#docker--podman-application-containers).
 
 Deploy matching controller/agent binaries and preserve compatible state for
 rollback; do not restore stale metadata over disks that have grown. See

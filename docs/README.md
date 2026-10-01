@@ -2,6 +2,20 @@
 
 Reading paths for TTstack's maintained guides and its dated validation evidence.
 
+## Start here
+
+- **First environment:** follow the [repository quick start](../README.md#quick-start-one-linuxsystemd-host),
+  then choose an engine in [guest images](guest-images.md).
+- **Host operator:** read [deployment](deployment.md), [SSH endpoints](ssh.md#reachable-endpoint)
+  and [compatibility](compatibility.md) before configuring or upgrading a fleet.
+- **API integrator:** start with [architecture and ownership](architecture.md),
+  then [API requests and recovery](rest-api.md) and [capability admission](capabilities.md).
+- **Contributor:** use [AGENTS.md](../AGENTS.md) and the [workflow index](workflows.md).
+
+The maintained guides describe current implementation. `proposals/` retains design
+context, `validation/` records experiments at named revisions, and the audit registry
+tracks confirmed defects. None substitutes for the others.
+
 ## Maintained guides
 
 Each behavior has one maintained description here. These describe current
@@ -10,6 +24,7 @@ behavior and are updated together with the code.
 | Need | Document |
 | --- | --- |
 | Understand the project and start locally | [Repository overview](../README.md) |
+| Understand component boundaries and durable request flow | [Architecture](architecture.md) |
 | Install, deploy, or maintain a fleet | [Deployment](deployment.md) |
 | Prepare guests and understand storage/network boundaries | [Guest images](guest-images.md) |
 | Call the API or understand lifecycle recovery | [REST API](rest-api.md) |

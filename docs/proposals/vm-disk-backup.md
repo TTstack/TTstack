@@ -10,8 +10,10 @@ The implementation selects the recommended host opt-in flag, manual stopped-only
 operations, same-VM restore, deletion with the VM, conservative reservations,
 restore-time SSH re-observation, and WAL/FULL writers. Temporary restore metadata
 is tracked in addition to the bounded retirement backlog. Controller schema is v5
-and agent schema v6; the agent upgrade path requires a drained inventory or a
-separately reviewed offline conversion, not automatic in-agent migration.
+and agent schema v6. Retained native v5 inventory now has an explicit
+[offline converter](../deployment.md#persistent-state-schema-gate); the daemon
+does not migrate it automatically. Other formats require their own reviewed
+conversion or explicit workload replacement.
 
 Research date: 2026-09-29. Repository baseline:
 [`0547f3c`](https://github.com/TTstack/TTstack/tree/0547f3caeac3590fb86ed342ff0de94eba43a4cc),
@@ -26,10 +28,11 @@ these refinements have no new live validation.
 
 ## 1. Problem and intended outcome
 
-TTstack retains VM disks across stop/start but provides no managed recovery point
-for reverting unwanted guest disk changes. Operators currently have to coordinate
-storage tools and TTstack lifecycle themselves. The requested addition is a small,
-optional disk backup facility, with no memory capture or backup history product.
+At the research baseline, TTstack retained VM disks across stop/start but provided
+no managed recovery point for reverting unwanted guest disk changes. Operators
+had to coordinate storage tools and TTstack lifecycle themselves. The proposed
+addition was a small, optional disk backup facility, with no memory capture or
+backup history product.
 
 The requested meaning of **one backup** is one published recovery point, not a
 physical limit of one artifact. Once a valid backup exists, a refresh must keep
@@ -63,13 +66,21 @@ is one reason to keep the trigger explicit.
 | VM deletion also removes backups | Recommended boundary | Preserve the existing destructive deletion/expiry contract; this is not protection against deleting the VM. |
 | Lightweight backup only | Requested, mandatory | If the runtime cannot provide a qualified lightweight, fast backup mechanism, return backup unsupported. Full-file-copy backup is excluded, including explicit opt-in and fallback paths. |
 
-The recommended boundaries require product review before implementation. They
-are not additional requirements already approved by the requester.
+This table records the original requirements and proposed decisions, before
+implementation. The selected behavior is maintained in the [disk backup guide](../disk-backup.md);
+the [decision summary](#13-design-decisions-and-deferred-alternatives) distinguishes
+those choices from deferred alternatives.
 
 In the design sections, **must** identifies a correctness condition of the
 proposed contract; **recommend** identifies a design choice still open to review.
 
-## 2. Current implementation and integration points
+<a id="2-current-implementation-and-integration-points"></a>
+
+## 2. Preimplementation baseline and integration points
+
+The table describes `0547f3c`, not the current tree. Backup routes, durable backup
+state and WAL/FULL writers have since been implemented. Preserve these earlier
+observations as design context; use the maintained guide for the shipped contract.
 
 | Area | Inspected behavior | Consequence |
 | --- | --- | --- |

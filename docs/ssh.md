@@ -97,8 +97,9 @@ reachability from the agent, not external routing or initial-key validity foreve
 The advertised host key is the initial identity, not a key-rotation registry.
 
 Agents require ssh-keygen and ssh-keyscan to advertise managed SSH support.
-Controller schema v5 and agent schema v6 preserve SSH options, host identity,
-runtime/network bindings and the disk-backup lifecycle. Disk restore invalidates
+Persistent records preserve SSH options, host identity, runtime/network bindings
+and the disk-backup lifecycle; [deployment compatibility](deployment.md#persistent-state-schema-gate)
+owns schema versions and upgrade paths. Disk restore invalidates
 old SSH observations and exposes `ssh.observation_error` while the initial identity
 is unconfirmed; see the [restore policy](disk-backup.md#ssh-observations-after-restore).
 Upgrade them together following the target revision's compatibility requirements.

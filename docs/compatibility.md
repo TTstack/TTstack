@@ -22,6 +22,7 @@ code change does not inherit a fresh live-validation claim from an older report.
 | Ubuntu cloud guest | Built-in QEMU recipe | Not covered by the listed guest lifecycle runs |
 | Linux/systemd deployment | Local/distributed service generation and isolated service restart | [Linux upgrade, 2026-09-24](validation/linux-host-upgrade-validation-2026-09-24.md) and later isolated runs; not every deploy configuration |
 | Agent database initialization | Current native schema, identity and runtime/network bindings | [Process-level checks, 2026-09-28](validation/native-agent-schema-2026-09-28.md): fresh initialization, reopen and non-mutating rejection of incompatible fixtures; no production data migration |
+| Offline native v5 agent conversion | Explicit converter writes a separate v6 database while preserving validated VM metadata; no automatic daemon migration | [Conversion rehearsal, 2026-09-29](validation/agent-v5-conversion-2026-09-29.md): rejection fixtures and five-VM metadata/storage preservation; not every legacy format or a new deployment acceptance run |
 | Linux/OpenRC, musl binaries | Distributed deployment support | No complete live deployment coverage in the listed reports |
 | FreeBSD bhyve/Jail/PF | Experimental implementation, manual setup | [Mixed fleet, 2026-09-29](validation/capability-tags-mixed-fleet-2026-09-29.md): native FreeBSD 15.1 bhyve/zvol and Jail/file lifecycle, SSH, capability rejection, backup eligibility and cleanup |
 | Other host platforms | No validated agent deployment path | No support commitment |
@@ -162,6 +163,9 @@ They describe that decision and its limits, not current dependency freshness or
 an upgrade policy for future data.
 
 ## Product boundaries
+
+The [architecture guide](architecture.md) explains which service owns each
+decision. The following limits define the supported product scope.
 
 - One controller, with configured limits of 50 hosts and 1000 tracked VMs. These
   are guardrails, not benchmarked capacity. Mutations serialize per environment and reads

@@ -7,6 +7,11 @@ sets the same administrator key on the controller and agents. The dashboard HTML
 at `/` is public; its API calls still require authentication. There is no per-owner
 or per-environment authorization. See [deployment](deployment.md).
 
+Use controller endpoints for normal fleet operations. The
+[architecture guide](architecture.md) explains controller/agent ownership. Read
+[environment requests](#environment-requests), [returned state](#returned-state-and-resources)
+and [lifecycle recovery](#lifecycle-and-recovery) together before retrying mutations.
+
 ## Response format
 
 Application handlers return an envelope:
@@ -43,6 +48,8 @@ for every failure. A transport timeout does not mean an operation was cancelled.
 | POST | `/api/envs/{id}/start` | No payload |
 | GET | `/api/vms/{id}` | `Vm` |
 | POST | `/api/vms/{id}/resources` | Updated stopped `Vm`; see [offline resources](#offline-resource-updates) |
+| GET / PUT / DELETE | `/api/vms/{id}/backup` | Inspect / create or refresh / remove a disk recovery point; see [disk backup](disk-backup.md#api-and-exact-retries) |
+| POST | `/api/vms/{id}/backup/restore` | Restore a selected generation to the existing stopped VM |
 | GET | `/api/images` | `ImageInfo[]`: `name`, `host_id`; cached file/zvol images on online hosts |
 | GET | `/api/capabilities` | Versioned technical capability matrix; see [capabilities](capabilities.md) |
 | GET | `/api/status` | `FleetStatus`: host/environment/VM counts and resource reservations |
@@ -114,8 +121,8 @@ Disk growth does not create a backup. Explicit [disk recovery points](disk-backu
 must be removed, including retired artifacts, before changing root capacity;
 CPU/RAM-only changes remain supported when no backup operation is pending.
 Independent disaster-recovery backups remain the operator's responsibility.
-Controller schema v5 and agent schema v6 prevent older binaries from ignoring
-newer persistent contracts; read the [upgrade guidance](deployment.md#resource-update-schema-gate).
+Database schema gates prevent older binaries from ignoring newer persistent
+contracts; read the [upgrade guidance](deployment.md#persistent-state-schema-gate).
 
 ## Disk backup operations
 
@@ -330,6 +337,8 @@ normal fleet operations to avoid untracked resources.
 | GET | `/api/vms` | `Vm[]` |
 | GET | `/api/vms/{id}` | `Vm` |
 | POST | `/api/vms/{id}/resources` | Updated stopped `Vm`; see [offline resources](#offline-resource-updates) |
+| GET / PUT / DELETE | `/api/vms/{id}/backup` | Backup view with revision ETag; mutation headers required; see [disk backup](disk-backup.md#api-and-exact-retries) |
+| POST | `/api/vms/{id}/backup/restore` | Backup view after restoring the selected generation; VM stays stopped |
 | DELETE | `/api/vms/{id}` | No payload; idempotent |
 | POST | `/api/vms/{id}/stop` | No payload |
 | POST | `/api/vms/{id}/start` | No payload |

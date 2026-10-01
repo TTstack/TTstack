@@ -4,6 +4,9 @@ TTstack distinguishes design support, observed host prerequisites and eligibilit
 of a particular operation. Capability tags describe technical contracts, not
 user authorization, application readiness or scheduling entitlements.
 
+For component ownership and request flow, start with [architecture](architecture.md).
+For an operation's fields and errors, use the [API reference](rest-api.md).
+
 ## Inspect support
 
 ```sh
@@ -99,8 +102,9 @@ bhyve outgoing-policy gates remain engine-specific. A canonical tag inserted int
 a legacy flat list does not satisfy an old gate. There is no fallback to legacy
 grants when a present canonical report denies or cannot interpret a requirement.
 
-The new report is additive JSON metadata. It changes neither controller schema v5
-nor agent schema v6, and it adds no in-agent state migration. Older readers may
+The report is additive JSON metadata and does not change database schemas or add
+an in-agent state migration. [Deployment compatibility](deployment.md#persistent-state-schema-gate)
+owns the current versions and upgrade paths. Older readers may
 ignore the optional report; current agents retain the legacy identifiers for that
 compatibility path. Removing them requires an explicit future compatibility
 transition, not a timed removal after an arbitrary release. The backup protocol
