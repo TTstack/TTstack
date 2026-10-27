@@ -698,6 +698,18 @@ async fn download_verified(url: &str, dest: &Path, pin: Option<&str>) -> Result<
     Ok(())
 }
 
+/// Downloads are size-bounded regardless of what the origin announces:
+/// curl's --max-filesize only compares the advertised length, so the staged
+/// bytes are measured after the transfer as well.
+const MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+fn check_download_size(url: &str, len: u64) -> Result<()> {
+    if len > MAX_DOWNLOAD_BYTES {
+        return Err(eg!("download {url} exceeds the 8 GiB size limit"));
+    }
+    Ok(())
+}
+
 async fn download_file(url: &str, dest: &Path) -> Result<()> {
     let parent = dest.parent().unwrap_or(Path::new("."));
     let staging = tempfile::NamedTempFile::new_in(parent).c(d!("download staging file"))?;
@@ -725,6 +737,10 @@ async fn download_file(url: &str, dest: &Path) -> Result<()> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
+    let len = std::fs::metadata(staging.path())
+        .c(d!("download size"))?
+        .len();
+    check_download_size(url, len)?;
     staging.persist(dest).map_err(|e| eg!(e.to_string()))?;
     Ok(())
 }
@@ -765,6 +781,13 @@ async fn human_size(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_size_bound_rejects_more_than_the_announced_limit() {
+        assert!(check_download_size("https://example/img", MAX_DOWNLOAD_BYTES).is_ok());
+        assert!(check_download_size("https://example/img", MAX_DOWNLOAD_BYTES + 1).is_err());
+        assert!(check_download_size("https://example/img", 0).is_ok());
+    }
 
     #[test]
     fn freebsd_recipe_uses_exact_release_and_official_architecture_path() {

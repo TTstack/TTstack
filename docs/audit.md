@@ -12,14 +12,6 @@
 
 ## Open
 
-### [LOW] image-builder: download size bound is not enforced
-- **Where**: `crates/cli/src/image_builder.rs` (`download_file`)
-- **What**: `curl --max-filesize` only compares the announced size and does nothing when it is absent or false. Trigger: compromised/misbehaving mirror serving chunked or lying responses.
-- **Why**: staging grows without bound until the 900 s timeout, risking image-directory disk exhaustion on the agent host; checksums (verified after download) do not cap bytes.
-- **Suggested fix**: reject above the bound from staged-file metadata before publish; regression test of the checker.
-
----
-
 ### [LOW] image-builder: umount failure masks the primary build error
 - **Where**: `crates/cli/src/image_builder.rs` (`create_firecracker`)
 - **What**: when image population fails and the cleanup `umount` also fails, only the umount error is reported. Trigger: bad mirror download plus a busy leftover mount reference.
