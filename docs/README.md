@@ -60,6 +60,7 @@ establish. A new report belongs in `docs/validation/` and is linked here.
 
 | Evidence | Document |
 | --- | --- |
+| Full-repository overhaul: admission and diagnostic repairs, QEMU lifecycle, FreeBSD native net tests and cleanup on two hosts | [Overhaul corrections, 2026-10-27](validation/overhaul-corrections-2026-10-27.md) |
 | Explicit offline v5-to-v6 metadata conversion, refusal cases and five-VM preservation rehearsal | [Agent v5 conversion, 2026-09-29](validation/agent-v5-conversion-2026-09-29.md) |
 | Scoped capability reports, mixed Linux/FreeBSD lifecycle, backup/recovery, host failures and isolated cleanup | [Capability tags and mixed fleet, 2026-09-29](validation/capability-tags-mixed-fleet-2026-09-29.md) |
 | Master synchronization, native FreeBSD regressions, bhyve backup/restore and Jail rejection | [FreeBSD master synchronization, 2026-09-29](validation/freebsd-master-sync-2026-09-29.md) |
