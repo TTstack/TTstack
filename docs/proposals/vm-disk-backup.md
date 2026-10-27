@@ -914,7 +914,7 @@ validation.
 Measure representative creation/publication/restore/cleanup time and additional
 space on small functional fixtures. Do not promise millisecond latency or constant
 space from primitive names. Do not stress-test a host to justify this feature.
-Run the appropriate [workspace checks](../../.agents/skills/ttstack-development/references/commit-protocol.md)
+Run the appropriate [workspace checks](../ai/commit-protocol.md)
 when code exists; documentation-only preparation needs link, example, and diff
 checks rather than a Rust build.
 

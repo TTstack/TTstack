@@ -3,7 +3,7 @@
 Checks by change class, used by development and validation workflows. Commit steps
 apply only when committing is authorized, including `$x-commit`. Use with
 [workflow policy](workflow-policy.md). Check scope and support limits in
-[compatibility](../../../../docs/compatibility.md).
+[compatibility](../compatibility.md).
 
 ## Invocation ledger
 
@@ -42,7 +42,7 @@ Keep the ledger across commits. Stage only the freeze set + this-invocation fix/
 ## Final workspace gate
 
 Once per stable code state, after the last behavior commit. CI runs exactly these
-([.github/workflows/ci.yml](../../../../.github/workflows/ci.yml)); run the rows the change
+([.github/workflows/ci.yml](../../.github/workflows/ci.yml)); run the rows the change
 can affect and reuse checks already passed on the same state.
 
 ```sh
@@ -60,7 +60,7 @@ commit → new atomic fix, then re-run the affected checks.
 ## Version, schema, and deployment
 
 - The version lives in `[workspace.package] version` of the root
-  [Cargo.toml](../../../../Cargo.toml); every crate inherits it. There is no changelog and
+  [Cargo.toml](../../Cargo.toml); every crate inherits it. There is no changelog and
   no release convention — do not bump or tag unless the user asks.
 - Compatibility includes `SCHEMA_VERSION`
   (`crates/ctl/src/db.rs`, `crates/agent/src/runtime.rs`), stored engine values and

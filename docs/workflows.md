@@ -53,19 +53,19 @@ installation or configuration change is required for these repository skills.
 
 ## Shared guides
 
-Each guide has one maintained copy under its owning skill's `references/`.
-Other skills link to that copy when needed. These guides govern the workflows;
-product behavior remains documented in the [documentation index](README.md).
+The shared guides live under `docs/ai/`, independent of any single skill;
+skills link to them rather than keeping per-skill copies. These guides govern
+the workflows; product behavior remains documented in the [documentation index](README.md).
 
 | Guide | Contents |
 | --- | --- |
-| [workflow-policy.md](../.agents/skills/ttstack-development/references/workflow-policy.md) | Preflight, ownership, atomic units, validation failure, dispositions |
-| [commit-protocol.md](../.agents/skills/ttstack-development/references/commit-protocol.md) | Per-unit and final checks, staging, commit message, version/schema rules |
-| [review-core.md](../.agents/skills/x-review/references/review-core.md) | Subsystem map, review depth, evidence standard, audit registry rules |
-| [lifecycle-patterns.md](../.agents/skills/ttstack-development/references/lifecycle-patterns.md) | Lifecycle, placement, networking, state, and secret invariants |
-| [false-positive-guide.md](../.agents/skills/x-review/references/false-positive-guide.md) | What is deliberately not a defect here |
-| [host-validation.md](../.agents/skills/x-live/references/host-validation.md) | Authorization, budget, isolation, evidence, and cleanup for live hosts |
-| [pragmatic-engineering.md](../.agents/skills/x-review/references/pragmatic-engineering.md) | The engineering lens the skills apply |
+| [workflow-policy.md](ai/workflow-policy.md) | Preflight, ownership, atomic units, validation failure, dispositions |
+| [commit-protocol.md](ai/commit-protocol.md) | Per-unit and final checks, staging, commit message, version/schema rules |
+| [review-core.md](ai/review-core.md) | Subsystem map, review depth, evidence standard, audit registry rules |
+| [lifecycle-patterns.md](ai/lifecycle-patterns.md) | Lifecycle, placement, networking, state, and secret invariants |
+| [false-positive-guide.md](ai/false-positive-guide.md) | What is deliberately not a defect here |
+| [host-validation.md](ai/host-validation.md) | Authorization, budget, isolation, evidence, and cleanup for live hosts |
+| [pragmatic-engineering.md](ai/pragmatic-engineering.md) | The engineering lens the skills apply |
 
 Findings are registered in the [audit registry](audit.md). Paths in shell examples
 and code-formatted repository paths are relative to the repository root; Markdown

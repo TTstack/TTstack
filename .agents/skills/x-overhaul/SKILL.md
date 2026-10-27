@@ -1,9 +1,12 @@
 ---
 name: x-overhaul
-description: Review a TTstack scope, fix confirmed in-scope defects, validate, and create atomic local commits. Use when the user requests this review-and-fix workflow; no scope selects the full repository.
+description: Review a TTstack scope, fix confirmed in-scope defects, validate, and create atomic local commits. Invoke explicitly as $x-overhaul; empty scope selects the full repository.
 ---
 
 # TTstack Review, Repair, and Commit
+
+Resolve repository paths from the Git root; Markdown links are relative to
+this file. Read invocation arguments from the user prompt.
 
 Review the scope, resolve confirmed defects safely, validate, and create local
 commits. An explicit invocation authorizes these in-scope repairs and commits.
@@ -13,7 +16,7 @@ tests, version bump, or tag without authorization covering that action.
 ## Input and ownership
 
 Empty input selects `all`: the full repository. Explicit input uses the scopes and
-revision checks in [$x-review](../x-review/SKILL.md#input): `all`, `N`, `staged`,
+revision checks in [x-review](../x-review/SKILL.md#input): `all`, `N`, `staged`,
 `worktree`, a revision, or a range. Accept at most one scope; reject `--fix` and
 unknown flags. Pass the resolved scope to the review phase explicitly because
 standalone `x-review` defaults to uncommitted task changes.
@@ -24,16 +27,23 @@ unrelated Open entries and pre-existing work intact. `all` accounts for every
 tracked file; do not silently absorb untracked baseline files into commits.
 
 `staged` and `worktree` select changes the user intends this invocation to commit.
-Freeze their paths and hunks before edits using [$x-commit](../x-commit/SKILL.md#1-scope).
+Freeze their paths and hunks before edits using [x-commit](../x-commit/SKILL.md#1-scope).
 For `staged`, unstaged and untracked work stays baseline. Isolate any repair that
 overlaps unrelated work; if it cannot be separated safely, report the blocker and
 continue independent units without staging the overlap.
 
+## Preflight
+
+Run `git status --short --branch` and `git rev-parse HEAD` explicitly before
+review or edits. Record the staged, unstaged and untracked baseline, branch and
+starting HEAD for `workflow-policy.md` §1 and the invocation ledger.
+
 ## Setup
 
-Read [workflow policy](../ttstack-development/references/workflow-policy.md),
-[commit protocol](../ttstack-development/references/commit-protocol.md), and
-[$x-review](../x-review/SKILL.md) with its scope-relevant Setup guides. Complete
+Read first:
+[workflow-policy.md](../../../docs/ai/workflow-policy.md),
+[commit-protocol.md](../../../docs/ai/commit-protocol.md), and
+[x-review](../x-review/SKILL.md) with its scope-relevant Setup guides. Complete
 preflight and record the starting HEAD, branch, baseline, scope, and owned paths
 before the first edit. Freeze each newly discovered repair unit before changing it.
 
@@ -53,13 +63,13 @@ Passing checks and keyword searches alone do not establish review coverage.
 Keep the resolved scope and baseline for the repair phase. Reuse a review already
 completed in this invocation; recheck only evidence invalidated by later changes.
 Reassess existing in-scope Open and Won't Fix entries under
-[review core](../x-review/references/review-core.md#5-audit-registry).
+[review-core.md](../../../docs/ai/review-core.md#5-audit-registry).
 
 ## 2. Repair and commit
 
 Resolve confirmed in-scope findings in severity order, one root cause per unit.
 For `staged` or `worktree`, fix defects within their intended units before committing
-those units. Apply [$x-commit](../x-commit/SKILL.md#2-review-and-fix) review and repair
+those units. Apply [x-commit](../x-commit/SKILL.md#2-review-and-fix) review and repair
 steps to each unit, including callers, cleanup paths, partial failure, retries, and
 public or persisted contracts. Add a regression test when it proves the changed
 behavior or a concrete failure; documentation repairs need link and example checks.
@@ -92,7 +102,7 @@ neither an empty working-tree diff nor zero Open entries proves full coverage.
 If pushing is already authorized, verify the target and push only the intended
 validated commits, without force-push or unrelated commits. Otherwise finish with
 local commits. Deployment and live validation use the separate
-[$x-live](../x-live/SKILL.md) workflow and require an authorized host.
+[x-live](../x-live/SKILL.md) workflow and require an authorized host.
 
 ## Output
 

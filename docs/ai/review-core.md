@@ -79,9 +79,9 @@ contradicting the code, a stale default in a guide, or a link that no longer res
 
 ## 5. Audit registry
 
-Every skill that writes [docs/audit.md](../../../../docs/audit.md) uses these rules
+Every skill that writes [docs/audit.md](../audit.md) uses these rules
 and this shape. State meanings:
-[workflow policy](../../ttstack-development/references/workflow-policy.md) §5.
+[workflow policy](workflow-policy.md) §5.
 Decide from current code, not prior entry text.
 
 1. Prune Open entries proven fixed or obsolete. Narrow scope: in-scope entries only;

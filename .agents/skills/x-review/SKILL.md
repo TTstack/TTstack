@@ -1,15 +1,24 @@
 ---
 name: x-review
-description: Review a TTstack diff, commit range, or repository scope for concrete lifecycle, recovery, and operator defects, and update docs/audit.md without code repairs. Use for review-only requests or as the review phase of x-overhaul.
+description: Review a TTstack diff, commit range, or repository scope for concrete lifecycle, recovery, and operator defects, updating docs/audit.md only. Use only when the user explicitly invokes $x-review, or as the review phase of $x-overhaul.
 ---
 
 # TTstack Lifecycle Review
 
+Resolve repository paths from the Git root; Markdown links are relative to
+this file. Read invocation arguments from the user prompt.
+
 High-signal review. Code read-only; `docs/audit.md` is the registry exception.
 A standalone review ends with findings and registry changes; it does not automatically
 commit, push, or deploy. Review alone does not authorize code repairs or live host tests.
-Use [$x-overhaul](../x-overhaul/SKILL.md) for review, repair, validation, and local
-commits, or [$x-commit](../x-commit/SKILL.md) to commit defined worktree changes.
+Use [x-overhaul](../x-overhaul/SKILL.md) for review, repair, validation, and local
+commits, or [x-commit](../x-commit/SKILL.md) to commit defined worktree changes.
+
+## Preflight
+
+Run `git status --short --branch` and `git rev-parse HEAD` explicitly before
+review. Record the staged, unstaged and untracked baseline, branch and starting
+HEAD for `workflow-policy.md` §1 and the invocation ledger.
 
 When reused by `x-overhaul`, keep this review phase code read-only and return its
 scope, baseline, coverage, findings, and registry changes to the caller. The caller
@@ -17,12 +26,15 @@ owns subsequent repairs and commits; do not start a nested overhaul from this sk
 
 ## Setup
 
-Read [workflow policy](../ttstack-development/references/workflow-policy.md) for scope
-and ownership, [pragmatic engineering](references/pragmatic-engineering.md), and
-[review core](references/review-core.md) for the subsystem map and evidence standard.
-Refute candidates with the [false-positive guide](references/false-positive-guide.md).
-For lifecycle, persistence, networking, engine, or deployment changes, also read
-[lifecycle patterns](../ttstack-development/references/lifecycle-patterns.md).
+Read first:
+[workflow-policy.md](../../../docs/ai/workflow-policy.md) (scope and ownership),
+[pragmatic-engineering.md](../../../docs/ai/pragmatic-engineering.md),
+[review-core.md](../../../docs/ai/review-core.md) (subsystem map and evidence
+standard), and
+[false-positive-guide.md](../../../docs/ai/false-positive-guide.md) (candidate
+refutation). For lifecycle, persistence, networking, engine, or deployment
+changes, also read
+[lifecycle-patterns.md](../../../docs/ai/lifecycle-patterns.md).
 For public API, persisted state, or a documented default in scope, also read the
 [REST API](../../../docs/rest-api.md) and [compatibility guide](../../../docs/compatibility.md).
 

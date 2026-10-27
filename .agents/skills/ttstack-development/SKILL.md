@@ -1,9 +1,12 @@
 ---
 name: ttstack-development
-description: Implement and validate focused TTstack changes using the owning Rust crate, lifecycle contracts, and relevant checks. Use for TTstack code or documentation work; live host testing has a separate workflow.
+description: Implement and validate focused TTstack changes using the owning Rust crate, lifecycle contracts, and relevant checks. Live host testing uses the separate $x-live workflow.
 ---
 
 # TTstack Development
+
+Resolve repository paths from the Git root; Markdown links are relative to
+this file. Read invocation arguments from the user prompt.
 
 Read [AGENTS.md](../../../AGENTS.md) and inspect the task's diff before choosing
 checks. Package names differ from directory names: core is `ttcore`, CLI is `tt`,
@@ -25,12 +28,12 @@ agent is `tt-agent`, and controller is `tt-ctl`.
 
 ## Apply the shared guides
 
-- [lifecycle-patterns.md](references/lifecycle-patterns.md) — invariants the change
-  must preserve.
-- [commit-protocol.md](references/commit-protocol.md) — checks by change class and the
-  final workspace gate.
-- [workflow-policy.md](references/workflow-policy.md) — ownership, atomic units, and
-  preservation of unrelated work.
+- [lifecycle-patterns.md](../../../docs/ai/lifecycle-patterns.md) — invariants the
+  change must preserve.
+- [commit-protocol.md](../../../docs/ai/commit-protocol.md) — checks by change class
+  and the final workspace gate.
+- [workflow-policy.md](../../../docs/ai/workflow-policy.md) — ownership, atomic units,
+  and preservation of unrelated work.
 
 ## Select useful checks
 
@@ -41,11 +44,11 @@ Configuration-drive tests need the tools from `e2fsprogs`; a skipped external-to
 is not a pass.
 
 Finish with the workspace checks in
-[commit-protocol.md](references/commit-protocol.md). Dependency, edition, or
+[commit-protocol.md](../../../docs/ai/commit-protocol.md). Dependency, edition, or
 newer-standard-library usage also needs the declared minimum compiler. Explain
 unavailable prerequisites and state what was actually verified.
 
 Inspect the final diff and run `git diff --check`. Report behavior, evidence, and
 remaining limits. Do not run `make deploy*` as a development check; remote tests use
-the separate [$x-live](../x-live/SKILL.md) skill with the session's existing host
+the separate [x-live](../x-live/SKILL.md) skill with the session's existing host
 authorization.

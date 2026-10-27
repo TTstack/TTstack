@@ -1,9 +1,12 @@
 ---
 name: x-commit
-description: Review requested TTstack worktree changes, fix confirmed defects, validate, and create atomic local commits. Use when the user requests committing a defined set of changes.
+description: Review requested TTstack worktree changes, fix confirmed defects, validate, and create atomic local commits. Invoke explicitly as $x-commit; does not bump the version, tag, or push.
 ---
 
 # Self-Reviewing Commit for TTstack
+
+Resolve repository paths from the Git root; Markdown links are relative to
+this file. Read invocation arguments from the user prompt.
 
 Review owned worktree changes → fix confirmed defects → validate → local commits.
 No deploy; no version bump or tag unless the user asks. New commits only
@@ -16,15 +19,25 @@ pathspecs → only matching changes are candidates; everything else is baseline.
 Empty → all intended changes. Unknown flags → reject; never guess. Pathspecs matching
 no change → nothing is intended.
 
+## Preflight
+
+Run `git status --short --branch` and `git rev-parse HEAD` explicitly before
+review or edits. Record the staged, unstaged and untracked baseline, branch and
+starting HEAD for `workflow-policy.md` §1 and the invocation ledger.
+
 ## Setup
 
-Read [workflow policy](../ttstack-development/references/workflow-policy.md) and
-[commit protocol](../ttstack-development/references/commit-protocol.md) for preflight,
-ownership, validation, and staging. Use [review core](../x-review/references/review-core.md)
-and the [false-positive guide](../x-review/references/false-positive-guide.md) to assess
-defects. For lifecycle, persistence, networking, engine, or deployment changes, read
-[lifecycle patterns](../ttstack-development/references/lifecycle-patterns.md).
-Complete preflight and record the ledger before the first edit.
+Read first:
+[workflow-policy.md](../../../docs/ai/workflow-policy.md) and
+[commit-protocol.md](../../../docs/ai/commit-protocol.md) (preflight, ownership,
+validation, staging),
+[review-core.md](../../../docs/ai/review-core.md) and
+[false-positive-guide.md](../../../docs/ai/false-positive-guide.md) (defect
+assessment). For lifecycle, persistence, networking, engine, or deployment
+changes, also read
+[lifecycle-patterns.md](../../../docs/ai/lifecycle-patterns.md).
+
+Preflight, then record the ledger before the first edit.
 
 ## Protocol
 

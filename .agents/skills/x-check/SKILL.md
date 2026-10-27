@@ -1,19 +1,29 @@
 ---
 name: x-check
-description: Select and run checks for a TTstack change, then report results and verification limits without editing or committing. Use when the user requests validation of a change or check scope.
+description: Select and run checks for a TTstack change, then report results and verification limits without editing or committing. Invoke explicitly as $x-check.
 ---
 
 # TTstack Change Checks
+
+Resolve repository paths from the Git root; Markdown links are relative to
+this file. Read invocation arguments from the user prompt.
 
 Select and run checks for the paths or scope in the user's request, or for the
 current task's uncommitted changes when omitted. Validate only: no edits, no commit,
 no deploy.
 
+## Preflight
+
+Run `git status --short --branch` and `git rev-parse HEAD` explicitly before
+checks. Record the staged, unstaged and untracked baseline, branch and starting
+HEAD for `workflow-policy.md` §1.
+
 ## Setup
 
-Read [workflow policy](../ttstack-development/references/workflow-policy.md) for
-ownership, [commit protocol](../ttstack-development/references/commit-protocol.md)
-for change classes and checks, and [AGENTS.md](../../../AGENTS.md) for workspace rules.
+Read first:
+[workflow-policy.md](../../../docs/ai/workflow-policy.md) (ownership),
+[commit-protocol.md](../../../docs/ai/commit-protocol.md) (change classes and
+checks), and [AGENTS.md](../../../AGENTS.md) (workspace rules).
 
 ## Protocol
 

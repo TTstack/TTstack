@@ -57,5 +57,6 @@ resources created by the task; do not reset host networking or stop other guests
 Each behavior has one maintained description, linked from `docs/README.md`.
 Dated validation reports describe their tested revision and limitations, not a
 promise about every platform. Update examples and incoming links with API or path
-changes. Keep Codex skills focused and link to shared references rather than
-copying them. See the [workflow index](docs/workflows.md).
+changes. Keep Codex skills focused and link to the shared
+guides under [docs/ai/](docs/workflows.md#shared-guides) rather than copying
+them. See the [workflow index](docs/workflows.md).

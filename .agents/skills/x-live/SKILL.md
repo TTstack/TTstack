@@ -1,9 +1,12 @@
 ---
 name: x-live
-description: Plan and run bounded TTstack lifecycle, guest, networking, or restart checks on an authorized host, then record results and cleanup. Use when the user requests live functional validation; Linux x86_64 is supported and FreeBSD is experimental.
+description: Plan and run bounded TTstack lifecycle, guest, networking, or restart checks on an authorized host, then record results and cleanup. Invoke explicitly as $x-live; Linux x86_64 is supported and FreeBSD is experimental.
 ---
 
 # Lightweight TTstack Live Validation
+
+Resolve repository paths from the Git root; Markdown links are relative to
+this file. Read invocation arguments from the user prompt.
 
 Functional acceptance on a real host. Not benchmarking, not production deployment,
 not a security certification.
@@ -13,9 +16,15 @@ not a security certification.
 Use the behavior, defect, or environment supplied in the user's request. Empty → the
 uncommitted task change; with no change either, ask instead of guessing a scope.
 
+## Preflight
+
+Run `git rev-parse HEAD` explicitly before connecting to a host, and record the
+tested revision for the invocation report.
+
 ## Setup
 
-Read [host validation](references/host-validation.md), the
+Read first:
+[host-validation.md](../../../docs/ai/host-validation.md), the
 [guest guide](../../../docs/guest-images.md), and the most relevant
 [dated report](../../../docs/README.md#validation-evidence) for useful cases and the
 limits of earlier evidence. Prior reports are not permission to reuse a host or

@@ -2,7 +2,7 @@
 
 Shared safety for `$ttstack-development`, `$x-review`, `$x-overhaul`, `$x-check`,
 `$x-commit`, and `$x-live`. See also
-[pragmatic engineering](../../x-review/references/pragmatic-engineering.md).
+[pragmatic engineering](pragmatic-engineering.md).
 The user's instructions and existing session authorization take precedence;
 loading a skill does not authorize additional work or external actions.
 
@@ -69,4 +69,4 @@ Disproven entries are removed, not retained in a Rejected section. Record the
 refutation in the review output or commit history; routine noise needs no entry.
 
 Registry rules and entry shape:
-[review core](../../x-review/references/review-core.md#5-audit-registry) §5.
+[review core](review-core.md#5-audit-registry) §5.
