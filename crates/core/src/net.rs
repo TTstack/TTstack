@@ -356,6 +356,12 @@ add rule ip {NFT_TABLE} postrouting ip saddr 10.10.0.0/16 masquerade
 #[path = "net/freebsd.rs"]
 mod platform;
 
+// The FreeBSD predicates are pure string logic; compile them on any test host
+// so the ownership and ruleset checks also run on the Linux CI target.
+#[cfg(all(not(target_os = "freebsd"), test))]
+#[path = "net/freebsd.rs"]
+mod freebsd_impl;
+
 // ═══════════════════════════════════════════════════════════════════
 // Public re-exports (dispatches to platform module)
 // ═══════════════════════════════════════════════════════════════════

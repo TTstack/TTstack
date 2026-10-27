@@ -2,6 +2,16 @@
 use super::*;
 use std::net::Ipv4Addr;
 
+// Ownership of a renamed interface is proven by its exact description:
+// prefix-related VM IDs must never pass this guard for another VM's device.
+fn tap_owned(info: &str, vm_id: &str) -> bool {
+    let expected = format!("ttstack:{vm_id}");
+    info.lines().any(|line| {
+        line.split_once(':')
+            .is_some_and(|(key, value)| key.trim() == "description" && value.trim() == expected)
+    })
+}
+
 fn run(args: &[&str]) -> Result<String> {
     let output = Command::new(args[0])
         .args(&args[1..])
@@ -57,7 +67,7 @@ pub fn create_tap(vm_id: &str) -> Result<()> {
             let saved = tap_device(vm_id)?;
             if interfaces.split_whitespace().any(|name| name == saved) {
                 let info = run(&["ifconfig", &saved])?;
-                if !info.contains(&format!("description: ttstack:{vm_id}")) {
+                if !tap_owned(&info, vm_id) {
                     return Err(eg!("TAP device ownership changed; retain resources"));
                 }
                 saved
@@ -109,7 +119,7 @@ pub fn destroy_tap(vm_id: &str) -> Result<()> {
         let saved = tap_device(vm_id)?;
         if interfaces.split_whitespace().any(|name| name == saved) {
             let info = run(&["ifconfig", &saved])?;
-            if !info.contains(&format!("description: ttstack:{vm_id}")) {
+            if !tap_owned(&info, vm_id) {
                 return Err(eg!("TAP device ownership changed; retain resources"));
             }
             run(&["ifconfig", &saved, "destroy"])?;
@@ -231,6 +241,17 @@ pub fn allow_outgoing(ip: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tap_ownership_requires_the_exact_interface_description() {
+        let info = "tap1: flags=8843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST> metric 0 mtu 1500\n\
+                    \tdescription: ttstack:web2\n\
+                    \tgroups: tap\n\
+                    \tnd6 options=29<PERFORMNUD,IFDISABLED,AUTO_LINKLOCAL>";
+        assert!(tap_owned(info, "web2"));
+        assert!(!tap_owned(info, "web"));
+        assert!(!tap_owned("tap1: flags=8843\n\tgroups: tap", "web2"));
+        assert!(!tap_owned("", "web2"));
+    }
     #[test]
     fn pf_preflight_rejects_the_quick_wildcard_that_skips_sibling_anchors() {
         let info = "Status: Enabled for 0 days";

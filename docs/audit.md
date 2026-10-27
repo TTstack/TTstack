@@ -12,14 +12,6 @@
 
 ## Open
 
-### [MEDIUM] net: FreeBSD TAP ownership check is a substring match
-- **Where**: `crates/core/src/net/freebsd.rs` (`create_tap`, `destroy_tap`)
-- **What**: ownership is tested with `contains("description: ttstack:{vm_id}")`; prefix-related VM IDs (`web`/`web2`, possible via direct-agent IDs) make the guard pass for the wrong device. Trigger: stale record plus TAP number reuse across the crash window the ownership check exists to cover.
-- **Why**: the cross-VM safety guard behind "renamed interfaces retain a separately recorded device" is bypassed, renaming/destroying another VM's TAP; contradicts documented ownership checks.
-- **Suggested fix**: parse the description line and compare exactly; regression test with prefix-related IDs.
-
----
-
 ### [MEDIUM] agent: resource-update state conflicts return 500 instead of the documented 409
 - **Where**: `crates/agent/src/handler.rs` (`resize_vm` status mapping)
 - **What**: `conflict: ...` errors from backup guards (busy writer, retained artifacts) miss every mapped substring and fall through to 500. Trigger: resource update while a backup operation is unfinished or artifacts remain.
