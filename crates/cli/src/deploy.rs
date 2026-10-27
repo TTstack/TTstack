@@ -457,15 +457,17 @@ fn remote_setup_script(
         openrc_initd_content.push_str(&format!("\ncommand_user=\"{user}:{user}\"\n"));
     }
 
-    // Shell snippet that writes the env file with 0600 permissions
+    // Shell snippet that atomically places the env file with 0600 permissions:
+    // stage, chmod, rename, sync, so a crash never leaves a truncated key file.
     let env_file_setup = match env_file {
         Some((path, content)) => format!(
             r#"
 # Write environment file (keeps secrets out of process args)
 sudo mkdir -p $(dirname {path})
-sudo install -m 600 /dev/null {path}
-printf '%s' '{content}' | sudo tee {path} > /dev/null
-sudo chmod 600 {path}
+printf '%s' '{content}' | sudo tee {path}.new > /dev/null
+sudo chmod 600 {path}.new
+sudo mv -f {path}.new {path}
+sync {path} 2>/dev/null || sync
 "#,
             path = path,
             content = content,
@@ -665,6 +667,28 @@ fn mount_guard_dropin(unit: &str) -> Option<String> {
     }
 }
 
+// Installed secret files are staged, synced and renamed: a crash must never
+// leave a truncated key file behind for the next service start.
+fn write_private_file(path: &str, content: &str) -> Result<()> {
+    let target = std::path::Path::new(path);
+    let parent = target.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent).c(d!("create env dir"))?;
+    use std::io::Write;
+    let mut staging = tempfile::NamedTempFile::new_in(parent).c(d!("stage env file"))?;
+    staging
+        .write_all(content.as_bytes())
+        .c(d!("write env file"))?;
+    staging.as_file().sync_all().c(d!("sync env file"))?;
+    staging.persist(target).map_err(|e| eg!(e.to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o600))
+            .c(d!("env file permissions"))?;
+    }
+    Ok(())
+}
+
 async fn local_install_systemd(
     name: &str,
     exec_start: &str,
@@ -673,29 +697,7 @@ async fn local_install_systemd(
 ) -> Result<()> {
     // Write optional environment file with restricted permissions
     if let Some((path, content)) = env_file {
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .c(d!("create env dir"))?;
-        }
-        {
-            use std::io::Write;
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(path).c(d!("open env file"))?;
-            file.write_all(content.as_bytes()).c(d!("write env file"))?;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            let _ = std::fs::set_permissions(path, perms);
-        }
+        write_private_file(path, content)?;
     }
 
     let env_path = env_file.map(|(p, _)| p);
@@ -1202,6 +1204,11 @@ host = "10.0.0.3"
         assert!(script.contains("EnvironmentFile=/opt/tt/etc/tt-agent.env"));
         assert!(script.contains("TT_API_KEY=test-key"));
         assert!(!script.contains("--api-key"));
+        // The key file is staged and renamed, never truncated in place.
+        assert!(
+            script.contains("sudo mv -f /opt/tt/etc/tt-agent.env.new /opt/tt/etc/tt-agent.env")
+        );
+        assert!(!script.contains("install -m 600 /dev/null /opt/tt/etc/tt-agent.env"));
 
         // Refuse unsupported hosts before creating users, paths or services.
         #[cfg(unix)]
@@ -1247,6 +1254,33 @@ mod key_tests {
                 0o600
             );
         }
+    }
+    #[test]
+    fn env_files_are_replaced_atomically_with_private_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub").join("tt-agent.env");
+        let path = path.to_str().unwrap();
+        write_private_file(path, "TT_API_KEY=first\n").unwrap();
+        write_private_file(path, "TT_API_KEY=second\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "TT_API_KEY=second\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        // Staging is renamed, not left behind next to the target.
+        assert_eq!(
+            std::fs::read_dir(std::path::Path::new(path).parent().unwrap())
+                .unwrap()
+                .count(),
+            1
+        );
     }
     #[test]
     fn mismatched_role_keys_are_not_silently_rotated() {

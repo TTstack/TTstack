@@ -12,14 +12,6 @@
 
 ## Open
 
-### [HIGH] deploy: API-key env file is truncated in place, not atomically placed
-- **Where**: `crates/cli/src/deploy.rs` (`remote_setup_script` env snippet, `local_install_systemd` env write)
-- **What**: the service env file holding `TT_API_KEY` is emptied in place (`install /dev/null` + `tee` remotely; truncate+write locally) with no fsync and no atomic rename, on every routine redeploy. Trigger: power loss or crash during/shortly after redeploy.
-- **Why**: an empty env file starts the controller/agent with no key, serving `0.0.0.0` management listeners unauthenticated; manual repair needed. Violates the installed-files "private and atomically placed" invariant the binary installation already follows.
-- **Suggested fix**: stage + chmod 0600 + rename + sync in both paths; regression test asserting the preserved-key property of the local atomic writer and the script shape.
-
----
-
 ### [MEDIUM] agent-runtime: reconcile silently erases unresolved operation errors
 - **Where**: `crates/agent/src/runtime.rs` (`reconcile_vm`)
 - **What**: a failed stop persists `stop unfinished: ...` on a Running record; a transient engine query failure overwrites it with `cannot query engine: ...` (then clears it on recovery), and the blanket `vm.error = None` after successful network recovery clears it directly on the next scan. Trigger: failed stop followed by a routine reconcile scan or a transient engine query failure.
