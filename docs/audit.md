@@ -12,14 +12,6 @@
 
 ## Open
 
-### [MEDIUM] agent: resource-update state conflicts return 500 instead of the documented 409
-- **Where**: `crates/agent/src/handler.rs` (`resize_vm` status mapping)
-- **What**: `conflict: ...` errors from backup guards (busy writer, retained artifacts) miss every mapped substring and fall through to 500. Trigger: resource update while a backup operation is unfinished or artifacts remain.
-- **Why**: the controller surfaces 502, which the API guide defines as an unknown outcome; the actual outcome is a clean pre-mutation rejection, so operators are sent into the wrong recovery ritual.
-- **Suggested fix**: map the `conflict: ` prefix to 409; unit-test the classifier with the produced strings.
-
----
-
 ### [MEDIUM] ctl: unschedulable-capacity error echoes raw request, not the applied reservation
 - **Where**: `crates/ctl/src/scheduler.rs` (`place_vm` error branch)
 - **What**: `disk` prints `spec.disk.unwrap_or(default_disk())` (0 for Firecracker) while `mem` already prints the overhead-inclusive reservation. Trigger: disk-constrained Firecracker host with an omitted disk size.

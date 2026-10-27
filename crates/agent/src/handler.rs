@@ -234,23 +234,27 @@ pub async fn resize_vm(
 ) -> impl IntoResponse {
     match mutate(state, move |rt| rt.resize_vm(&id, target)).await {
         Ok(vm) => (StatusCode::OK, Json(ApiResp::success(vm))),
-        Err(e) => {
-            let status = if e.contains("insufficient resources")
-                || e.contains("require a confirmed stopped VM")
-                || e.contains("retry the recorded target first")
-            {
-                StatusCode::CONFLICT
-            } else if e.contains("shrinking")
-                || e.contains("must be > 0")
-                || e.contains("capability ")
-                || e.contains("overflow")
-            {
-                StatusCode::BAD_REQUEST
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
-            (status, Json(ApiResp::err(e)))
-        }
+        Err(e) => (resize_status(&e), Json(ApiResp::err(e))),
+    }
+}
+
+// Resource-update validation and state errors use 400/409 as documented;
+// unknown failures stay 500. Backup exclusions are state conflicts.
+fn resize_status(e: &str) -> StatusCode {
+    if e.contains("conflict: ")
+        || e.contains("insufficient resources")
+        || e.contains("require a confirmed stopped VM")
+        || e.contains("retry the recorded target first")
+    {
+        StatusCode::CONFLICT
+    } else if e.contains("shrinking")
+        || e.contains("must be > 0")
+        || e.contains("capability ")
+        || e.contains("overflow")
+    {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
     }
 }
 fn action(result: Result<(), String>) -> Reply<()> {
@@ -506,4 +510,34 @@ async fn cleanup_backup(state: AppState, id: String) {
         eprintln!("[agent] backup cleanup {id}: {e}");
     }
     rt.backup_release(&id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resize_conflicts_are_documented_409_not_unknown_outcome_500() {
+        for conflict in [
+            "conflict: remove backups and finish cleanup before disk resizing",
+            "conflict: backup operation unfinished; inspect it before lifecycle changes",
+            "conflict: backup worker is running; inspect or retry the same operation",
+            "insufficient resources to restart VM",
+            "resource updates require a confirmed stopped VM",
+            "resource update unfinished; retry the recorded target first",
+        ] {
+            assert_eq!(resize_status(conflict), StatusCode::CONFLICT, "{conflict}");
+        }
+        for invalid in [
+            "disk shrinking is not supported",
+            "cpu, memory and root disk must be > 0",
+            "disk capacity overflow",
+        ] {
+            assert_eq!(resize_status(invalid), StatusCode::BAD_REQUEST, "{invalid}");
+        }
+        assert_eq!(
+            resize_status("storage backend write failed"),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
 }
