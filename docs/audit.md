@@ -12,11 +12,7 @@
 
 ## Open
 
-### [MEDIUM] ctl: "no host has image" can fire while an image-bearing host fails capacity
-- **Where**: `crates/ctl/src/scheduler.rs` (`place_vm` error ladder)
-- **What**: when a fit host lacks the image and an image-bearing host fails capacity, the final branch claims "no host has image" although one does. Trigger: mixed image/capacity failure across two hosts (observed live during the 2026-10-27 overhaul validation).
-- **Why**: the diagnostic names the wrong dimension and is factually false for the fleet; the operator cleans up image catalogs while the real blocker is capacity.
-- **Suggested fix**: only emit the image message when no supporting host carries the image; otherwise emit the capacity message with the reservation evaluated on image-bearing hosts; regression test for the mixed case.
+None.
 
 ## Won't Fix
 

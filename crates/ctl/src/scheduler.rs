@@ -129,46 +129,46 @@ pub fn place_vm(
             .iter()
             .filter(|h| h.state == HostState::Online && h.engines.contains(&spec.engine))
             .count();
-        let with_resource = hosts
-            .iter()
-            .filter(|h| {
-                h.state == HostState::Online
-                    && h.engines.contains(&spec.engine)
-                    && supports(h)
-                    && disk_reservation(spec, h)
-                        .is_some_and(|disk| h.resource.can_fit(cpu, mem, disk))
-            })
-            .count();
 
         if online == 0 {
             return Err(eg!("no online hosts available"));
         } else if with_engine == 0 {
             return Err(eg!("no online host supports engine={}", spec.engine,));
-        } else if with_resource == 0 {
-            // Report the reservation the scheduler actually evaluated (image
-            // size and configuration drive included), not the raw request:
-            // the message must point the operator at the failing dimension.
-            let needed = hosts
-                .iter()
-                .filter(|h| {
-                    h.state == HostState::Online && h.engines.contains(&spec.engine) && supports(h)
-                })
-                .find_map(|h| disk_reservation(spec, h))
-                .unwrap_or(disk);
-            return Err(eg!(
-                "no host has enough resources for engine={}, cpu={}, mem={}MB, disk={}MB",
-                spec.engine,
-                cpu,
-                mem,
-                needed,
-            ));
-        } else {
+        }
+        // Image availability is a placement dimension of its own: only call it
+        // missing when no supporting host actually carries the image.
+        let image_ok = |h: &&Host| {
+            !check_images
+                || host_images
+                    .get(&h.id)
+                    .is_some_and(|imgs| imgs.contains(&spec.image))
+        };
+        let eligible: Vec<&Host> = hosts
+            .iter()
+            .filter(supporting)
+            .filter(|h| image_ok(h))
+            .collect();
+        if check_images && eligible.is_empty() {
             return Err(eg!(
                 "no host has image '{}' for engine={}",
                 spec.image,
                 spec.engine,
             ));
         }
+        // Report the reservation the scheduler actually evaluated (image
+        // size and configuration drive included), not the raw request:
+        // the message must point the operator at the failing dimension.
+        let needed = eligible
+            .iter()
+            .find_map(|h| disk_reservation(spec, h))
+            .unwrap_or(disk);
+        return Err(eg!(
+            "no host has enough resources for engine={}, cpu={}, mem={}MB, disk={}MB",
+            spec.engine,
+            cpu,
+            mem,
+            needed,
+        ));
     }
 
     // Prefer provisioned ZFS hosts; keep Docker independent of VM storage.
@@ -304,6 +304,29 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("base image size"), "{err}");
+    }
+
+    #[test]
+    fn mixed_image_and_capacity_failures_report_the_real_blocker() {
+        // A fit host without the image and an unfit host with it must not
+        // produce the false "no host has image" diagnosis.
+        let images: HashMap<String, HashSet<String>> =
+            [("with-image".into(), ["ubuntu".into()].into_iter().collect())].into();
+        let fit_no_image = make_host("fit-no-image", 8, 8192, vec![Engine::Qemu]);
+        let mut unfit_with_image = make_host("with-image", 8, 8192, vec![Engine::Qemu]);
+        unfit_with_image.resource.disk_total = 100;
+        let spec = make_spec();
+        let err = place_vm(&[fit_no_image.clone(), unfit_with_image], &spec, &images)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("enough resources"), "{err}");
+        assert!(err.contains("disk=40960MB"), "{err}");
+        assert!(!err.contains("no host has image"), "{err}");
+        // Only when no supporting host carries the image is that the diagnosis.
+        let err = place_vm(&[fit_no_image], &spec, &images)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no host has image 'ubuntu'"), "{err}");
     }
 
     #[test]
