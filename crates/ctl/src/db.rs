@@ -324,10 +324,17 @@ impl Db {
         for vm in &vms {
             if let Some(mut env) = self.get_env(&vm.env_id)? {
                 env.vm_ids.retain(|id| !vms.iter().any(|v| &v.id == id));
-                env.state = EnvState::Failed;
-                env.error = Some(format!(
-                    "host {id} detached; guests may still exist on that host"
-                ));
+                // A retained `deleting` state keeps the controller's cleanup
+                // retry alive for VMs on other hosts; detach only releases
+                // this host's tracking.
+                if env.state != EnvState::Deleting {
+                    env.state = EnvState::Failed;
+                }
+                let note = format!("host {id} detached; guests may still exist on that host");
+                env.error = Some(match env.error {
+                    Some(previous) => format!("{previous}; {note}"),
+                    None => note,
+                });
                 self.put_env(&env)?;
             }
         }
@@ -541,6 +548,31 @@ mod tests {
     }
 
     // ── Host CRUD ───────────────────────────────────────────────────
+
+    #[test]
+    fn detach_keeps_deleting_env_alive_for_remaining_host_cleanup() {
+        let db = test_db();
+        db.put_host(&make_host("h1")).unwrap();
+        db.put_host(&make_host("h2")).unwrap();
+        let mut env = make_env("env");
+        env.vm_ids = vec!["v1".into(), "v2".into()];
+        env.state = EnvState::Deleting;
+        env.error = Some("cleanup incomplete: h2: injected".into());
+        db.put_environment(
+            &env,
+            &[make_vm("v1", "env", "h1"), make_vm("v2", "env", "h2")],
+        )
+        .unwrap();
+        let orphans = db.detach_host("h1").unwrap();
+        assert_eq!(orphans.len(), 1);
+        let env = db.get_env("env").unwrap().unwrap();
+        assert_eq!(env.state, EnvState::Deleting);
+        let error = env.error.unwrap();
+        assert!(error.contains("cleanup incomplete: h2: injected"));
+        assert!(error.contains("detached"));
+        assert_eq!(env.vm_ids, vec!["v2".to_string()]);
+        assert!(db.get_vm("v2").unwrap().is_some());
+    }
 
     #[test]
     fn engine_sets_roundtrip_and_unknown_records_fail_without_mutation() {

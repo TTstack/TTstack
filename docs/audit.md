@@ -12,14 +12,6 @@
 
 ## Open
 
-### [MEDIUM] ctl: host detach demotes a `deleting` environment to `failed`, ending cleanup retry
-- **Where**: `crates/ctl/src/db.rs` (`detach_host`)
-- **What**: detach unconditionally sets `env.state = Failed` and replaces the retained cleanup error. Trigger: stuck delete across an offline host and a failing online agent, then the documented `detach` remedy.
-- **Why**: the 60-second expiry sweep only retries `Deleting` envs, so remaining cleanup on the other host stops permanently and its error is no longer visible; contradicts "retains remaining records as deleting. The controller retries".
-- **Suggested fix**: preserve `Deleting`, append the detach note to the existing error; regression test detaching under a partial-delete fixture.
-
----
-
 ### [MEDIUM] ctl: plan persisted but provisioning never spawned when a post-plan write fails
 - **Where**: `crates/ctl/src/handler.rs` (`create_environment`)
 - **What**: after `put_environment` commits, a failing host-reservation write or `environment_detail` read returns 500 before `finish_creation` is spawned. Trigger: transient DB I/O error in that window.
