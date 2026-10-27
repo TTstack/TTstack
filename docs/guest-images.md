@@ -55,7 +55,9 @@ a bootable image.
 For existing directory layouts, file storage accepts one unambiguous disk: a
 single `.qcow2` file, or a single file whose format is checked. Empty or ambiguous
 directories and symbolic links used as QEMU disks are rejected, including during
-cold start. A writable clone must never resolve to a shared source disk.
+cold start. A writable clone must never resolve to a shared source disk, so
+chained qcow2 images with a backing file are rejected at creation and resize;
+flatten them first with `qemu-img convert -O qcow2 SOURCE FLAT.qcow2`.
 
 ```bash
 /opt/ttstack/bin/tt env create demo --image alpine-cloud --engine qemu \

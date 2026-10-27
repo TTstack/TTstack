@@ -12,14 +12,6 @@
 
 ## Open
 
-### [MEDIUM] storage: file provisioning accepts backing-chained qcow2, coupling clones to a shared source
-- **Where**: `crates/core/src/storage/file.rs` (`resize_disk`)
-- **What**: create/resize validate format and size via `qemu-img info` but never inspect `backing-filename`; backup admission rejects the same condition. Trigger: operator imports a documented "existing layout" image created with `qemu-img create -b`.
-- **Why**: the writable clone silently reads shared source blocks; later image housekeeping corrupts guests and reservations undercount storage, violating "a writable clone must never resolve to a shared source disk".
-- **Suggested fix**: reject non-null backing references in the same inspection used for create/resize; fixture-parse regression test; document flattening via `qemu-img convert`.
-
----
-
 ### [MEDIUM] net: FreeBSD TAP ownership check is a substring match
 - **Where**: `crates/core/src/net/freebsd.rs` (`create_tap`, `destroy_tap`)
 - **What**: ownership is tested with `contains("description: ttstack:{vm_id}")`; prefix-related VM IDs (`web`/`web2`, possible via direct-agent IDs) make the guard pass for the wrong device. Trigger: stale record plus TAP number reuse across the crash window the ownership check exists to cover.

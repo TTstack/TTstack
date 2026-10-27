@@ -205,6 +205,7 @@ impl ImageStore for FileStore {
             ));
         }
         let info: serde_json::Value = serde_json::from_slice(&info.stdout).c(d!("disk info"))?;
+        reject_backing_chain(&info)?;
         let size = info["virtual-size"]
             .as_u64()
             .ok_or_else(|| eg!("missing virtual disk size"))?;
@@ -241,9 +242,41 @@ impl ImageStore for FileStore {
     }
 }
 
+// A writable clone must never resolve to a shared source disk: chained
+// qcow2 images couple guest reads to a second file and undercount storage.
+fn reject_backing_chain(info: &serde_json::Value) -> Result<()> {
+    if info.get("backing-filename").is_some() || info.get("full-backing-filename").is_some() {
+        return Err(eg!(
+            "file storage requires a self-contained qcow2 image; flatten the backing chain with qemu-img convert"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backing_chained_images_are_rejected_before_clone_or_growth() {
+        let standalone: serde_json::Value = serde_json::json!({
+            "format": "qcow2", "virtual-size": 1073741824u64
+        });
+        assert!(reject_backing_chain(&standalone).is_ok());
+        for chained in [
+            serde_json::json!({
+                "format": "qcow2", "virtual-size": 1073741824u64,
+                "backing-filename": "shared.qcow2"
+            }),
+            serde_json::json!({
+                "format": "qcow2", "virtual-size": 1073741824u64,
+                "full-backing-filename": "/images/shared.qcow2"
+            }),
+        ] {
+            let err = reject_backing_chain(&chained).unwrap_err().to_string();
+            assert!(err.contains("self-contained"), "{err}");
+        }
+    }
 
     #[test]
     #[cfg(unix)]
