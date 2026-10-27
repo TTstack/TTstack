@@ -738,6 +738,7 @@ impl Runtime {
         }
         let needs_recovery = vm.error.is_some();
         let was_running = matches!(vm.state, VmState::Running | VmState::Paused);
+        let was_failed = vm.state == VmState::Failed;
         match (self.engine_factory)(vm.engine, self.container_runtime)
             .and_then(|eng| eng.state(&vm))
         {
@@ -780,7 +781,14 @@ impl Runtime {
                             .and_then(|_| self.restore_network(&vm))
                     };
                     match recovery {
-                        Ok(()) => vm.error = None,
+                        Ok(()) => {
+                            // Recovery clears only its own errors (and the
+                            // documented stale-readiness error of a late VMM);
+                            // unresolved operation errors stay visible.
+                            if was_failed || vm.error.as_deref().is_none_or(recovery_owned) {
+                                vm.error = None;
+                            }
+                        }
                         Err(e) => {
                             self.network_ready = false;
                             vm.error = Some(format!("network recovery failed: {e}"));
@@ -789,7 +797,11 @@ impl Runtime {
                 }
             }
             Err(e) => {
-                vm.error = Some(format!("cannot query engine: {e}"));
+                // A transient query failure never erases an unresolved
+                // operation error from another lifecycle operation.
+                if vm.error.as_deref().is_none_or(recovery_owned) {
+                    vm.error = Some(format!("cannot query engine: {e}"));
+                }
             }
         }
         if let Some(ssh) = &mut vm.ssh {
@@ -1104,6 +1116,15 @@ pub fn resolve_host_id(db_path: &str, cli_id: Option<String>) -> Result<String> 
     )
     .c(d!("persist generated host_id"))?;
     Ok(id)
+}
+
+/// Errors written by reconciliation itself. Other error strings record
+/// unresolved operation failures and must survive routine scans until the
+/// operation is confirmed or retried, never silently dropped.
+fn recovery_owned(error: &str) -> bool {
+    error.starts_with("cannot query engine:")
+        || error == "network recovery pending"
+        || error.starts_with("network recovery failed:")
 }
 
 fn save_vm(db: &Connection, vm: &Vm) -> Result<()> {
@@ -1653,6 +1674,9 @@ mod lifecycle_tests {
             }
         }
         fn state(&self, vm: &Vm) -> Result<VmState> {
+            if vm.image == "query-fails" {
+                return Err(eg!("injected query failure"));
+            }
             if vm.image == "live" {
                 Ok(VmState::Running)
             } else {
@@ -1988,6 +2012,57 @@ mod lifecycle_tests {
         save_vm(&rt.db, &running).unwrap();
         assert!(rt.resize_vm(&guest.id, target).is_err());
     }
+    #[test]
+    fn reconcile_retains_unresolved_operation_errors() {
+        // Successful routine scans must not erase another operation's failure.
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        let mut guest = vm("stopped-op", "live", VmState::Running);
+        guest.error = Some("stop unfinished: injected stop failure".into());
+        save_vm(&rt.db, &guest).unwrap();
+        rt.reconcile().unwrap();
+        assert_eq!(
+            load_vm(&rt.db, &guest.id).unwrap().unwrap().error,
+            guest.error
+        );
+        // A transient query failure must not replace it either, and the later
+        // engine recovery must not turn that transient into a silent clear.
+        guest.image = "query-fails".into();
+        save_vm(&rt.db, &guest).unwrap();
+        rt.reconcile().unwrap();
+        assert_eq!(
+            load_vm(&rt.db, &guest.id).unwrap().unwrap().error,
+            guest.error
+        );
+        let mut saved = load_vm(&rt.db, &guest.id).unwrap().unwrap();
+        saved.image = "live".into();
+        save_vm(&rt.db, &saved).unwrap();
+        rt.reconcile().unwrap();
+        assert_eq!(
+            load_vm(&rt.db, &guest.id).unwrap().unwrap().error,
+            guest.error
+        );
+        // Recovery-owned errors are still cleared on a successful scan.
+        let mut recovered = vm("recovered", "live", VmState::Running);
+        recovered.error = Some("network recovery pending".into());
+        save_vm(&rt.db, &recovered).unwrap();
+        rt.reconcile().unwrap();
+        assert!(
+            load_vm(&rt.db, &recovered.id)
+                .unwrap()
+                .unwrap()
+                .error
+                .is_none()
+        );
+        // Late VMM readiness still clears a stale Failed error, as documented.
+        let mut late = vm("late", "live", VmState::Failed);
+        late.error = Some("create failed: injected".into());
+        save_vm(&rt.db, &late).unwrap();
+        rt.reconcile().unwrap();
+        let late = load_vm(&rt.db, &late.id).unwrap().unwrap();
+        assert_eq!(late.state, VmState::Running);
+        assert!(late.error.is_none());
+    }
+
     fn vm(id: &str, image: &str, state: VmState) -> Vm {
         Vm {
             backup: Default::default(),

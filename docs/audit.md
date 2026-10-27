@@ -12,14 +12,6 @@
 
 ## Open
 
-### [MEDIUM] agent-runtime: reconcile silently erases unresolved operation errors
-- **Where**: `crates/agent/src/runtime.rs` (`reconcile_vm`)
-- **What**: a failed stop persists `stop unfinished: ...` on a Running record; a transient engine query failure overwrites it with `cannot query engine: ...` (then clears it on recovery), and the blanket `vm.error = None` after successful network recovery clears it directly on the next scan. Trigger: failed stop followed by a routine reconcile scan or a transient engine query failure.
-- **Why**: the unresolved partial failure disappears from the VM and the controller mirror with no retry or confirmation, contradicting "retaining unresolved operation errors" in `docs/rest-api.md`.
-- **Suggested fix**: treat reconcile-owned error strings as the only ones it may overwrite/clear, and preserve the documented Failed→Running stale-readiness clear; regression tests for both paths fail today.
-
----
-
 ### [MEDIUM] ctl: host detach demotes a `deleting` environment to `failed`, ending cleanup retry
 - **Where**: `crates/ctl/src/db.rs` (`detach_host`)
 - **What**: detach unconditionally sets `env.state = Failed` and replaces the retained cleanup error. Trigger: stuck delete across an offline host and a failing online agent, then the documented `detach` remedy.
