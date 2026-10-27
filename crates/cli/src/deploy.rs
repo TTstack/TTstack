@@ -317,7 +317,8 @@ impl SshTarget {
     }
 
     async fn copy(&self, local: &Path, remote: &str) -> Result<()> {
-        let output = Command::new("scp")
+        let mut command = Command::new("scp");
+        command
             .args([
                 "-o",
                 "StrictHostKeyChecking=accept-new",
@@ -328,8 +329,14 @@ impl SshTarget {
             ])
             .arg(local)
             .arg(format!("{}@{}:{}", self.user, self.host, remote))
-            .output()
+            .kill_on_drop(true);
+        // Established-but-stalled transfers outlive ConnectTimeout; apply the
+        // same bound and guidance as scripted SSH execution.
+        let output = tokio::time::timeout(std::time::Duration::from_secs(900), command.output())
             .await
+            .c(d!(
+                "SCP upload timed out; inspect service state before retrying"
+            ))?
             .c(d!("scp failed"))?;
 
         if !output.status.success() {

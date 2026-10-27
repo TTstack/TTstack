@@ -12,14 +12,6 @@
 
 ## Open
 
-### [MEDIUM] deploy: binary upload via scp has no time bound
-- **Where**: `crates/cli/src/deploy.rs` (`SshTarget::copy`)
-- **What**: `exec` is bounded at 900 s with an actionable message; `copy` lacks a timeout and `kill_on_drop`. Trigger: established-but-stalled TCP during a remote upload.
-- **Why**: deployment silently hangs for the kernel retransmission lifetime with none of the documented "inspect before retrying" guidance.
-- **Suggested fix**: apply the same timeout wrapper pattern; note the coverage gap for a hang test.
-
----
-
 ### [MEDIUM] deploy: config with no controller and no agents reports success
 - **Where**: `crates/cli/src/deploy.rs` (`deploy_distributed`)
 - **What**: with an explicit/sidecar key the "no controller or agents" error never fires; the loops deploy nothing and print "distributed deployment complete". Trigger: a role-less deploy.toml with an existing key file.
