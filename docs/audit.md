@@ -12,14 +12,6 @@
 
 ## Open
 
-### [MEDIUM] deploy: config with no controller and no agents reports success
-- **Where**: `crates/cli/src/deploy.rs` (`deploy_distributed`)
-- **What**: with an explicit/sidecar key the "no controller or agents" error never fires; the loops deploy nothing and print "distributed deployment complete". Trigger: a role-less deploy.toml with an existing key file.
-- **Why**: misleading success output contradicting "provide at least one role to deploy".
-- **Suggested fix**: reject role-less configs up front; regression test.
-
----
-
 ### [LOW] image-builder: download size bound is not enforced
 - **Where**: `crates/cli/src/image_builder.rs` (`download_file`)
 - **What**: `curl --max-filesize` only compares the announced size and does nothing when it is absent or false. Trigger: compromised/misbehaving mirror serving chunked or lying responses.

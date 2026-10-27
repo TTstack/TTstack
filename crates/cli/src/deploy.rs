@@ -214,6 +214,11 @@ fn validate_path(value: &str, absolute: bool) -> Result<()> {
 }
 
 fn validate_config(cfg: &DeployConfig) -> Result<()> {
+    if cfg.controller.is_none() && cfg.agents.is_empty() {
+        return Err(eg!(
+            "deploy config needs at least one controller or agent role"
+        ));
+    }
     validate_path(&cfg.general.prefix, true)?;
     let user = |s: &str| -> Result<()> {
         if s.is_empty()
@@ -1114,6 +1119,13 @@ mod tests {
         assert!(dropin.contains("RequiresMountsFor=/srv/tt-run"));
         assert!(dropin.contains("ExecStartPre=/usr/bin/mountpoint -q /srv/tt-run"));
         assert!(!dropin.contains("/old-agent"));
+    }
+
+    #[test]
+    fn roleless_configs_are_rejected_before_any_remote_work() {
+        let cfg: DeployConfig = toml::from_str("").unwrap();
+        let err = validate_config(&cfg).unwrap_err().to_string();
+        assert!(err.contains("at least one"), "{err}");
     }
 
     #[test]
