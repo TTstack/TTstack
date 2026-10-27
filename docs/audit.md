@@ -12,14 +12,6 @@
 
 ## Open
 
-### [MEDIUM] ctl: unschedulable-capacity error echoes raw request, not the applied reservation
-- **Where**: `crates/ctl/src/scheduler.rs` (`place_vm` error branch)
-- **What**: `disk` prints `spec.disk.unwrap_or(default_disk())` (0 for Firecracker) while `mem` already prints the overhead-inclusive reservation. Trigger: disk-constrained Firecracker host with an omitted disk size.
-- **Why**: misleading operator output on the primary capacity diagnostic — the message claims 0 MiB is needed on a host that failed a 1028 MiB check, hiding the failing dimension.
-- **Suggested fix**: report the computed disk reservation from a supporting host; regression tests for the Firecracker and CPU-bound cases.
-
----
-
 ### [MEDIUM] deploy: binary upload via scp has no time bound
 - **Where**: `crates/cli/src/deploy.rs` (`SshTarget::copy`)
 - **What**: `exec` is bounded at 900 s with an actionable message; `copy` lacks a timeout and `kill_on_drop`. Trigger: established-but-stalled TCP during a remote upload.

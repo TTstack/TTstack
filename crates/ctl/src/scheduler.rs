@@ -99,12 +99,23 @@ pub fn place_vm(
                 reasons.join("; ")
             ));
         }
-        if hosts.iter().any(|h| {
-            h.state == HostState::Online
-                && h.engines.contains(&spec.engine)
-                && supports(h)
-                && disk_reservation(spec, h).is_none()
-        }) {
+        // Only when no supporting host can be disk-evaluated is the missing
+        // image size the known blocker; a host that provably fails capacity
+        // must surface the capacity diagnostic instead.
+        let supporting = |h: &&Host| {
+            h.state == HostState::Online && h.engines.contains(&spec.engine) && supports(h)
+        };
+        let evaluable = hosts
+            .iter()
+            .filter(supporting)
+            .filter(|h| disk_reservation(spec, h).is_some())
+            .count();
+        let unevaluable = hosts
+            .iter()
+            .filter(supporting)
+            .filter(|h| disk_reservation(spec, h).is_none())
+            .count();
+        if unevaluable > 0 && evaluable == 0 {
             return Err(eg!(
                 "base image size is unavailable or exceeds requested disk; upgrade the agent or choose a sufficient explicit disk size"
             ));
@@ -134,12 +145,22 @@ pub fn place_vm(
         } else if with_engine == 0 {
             return Err(eg!("no online host supports engine={}", spec.engine,));
         } else if with_resource == 0 {
+            // Report the reservation the scheduler actually evaluated (image
+            // size and configuration drive included), not the raw request:
+            // the message must point the operator at the failing dimension.
+            let needed = hosts
+                .iter()
+                .filter(|h| {
+                    h.state == HostState::Online && h.engines.contains(&spec.engine) && supports(h)
+                })
+                .find_map(|h| disk_reservation(spec, h))
+                .unwrap_or(disk);
             return Err(eg!(
                 "no host has enough resources for engine={}, cpu={}, mem={}MB, disk={}MB",
                 spec.engine,
                 cpu,
                 mem,
-                disk,
+                needed,
             ));
         } else {
             return Err(eg!(
@@ -250,6 +271,39 @@ mod tests {
             deny_outgoing: false,
             ssh_keys: vec![],
         }
+    }
+
+    #[test]
+    fn capacity_errors_report_the_evaluated_reservation() {
+        // A disk-constrained host must see the reservation that was checked,
+        // not the raw (omitted) request as disk=0.
+        let mut host = make_host("host", 8, 8192, vec![Engine::Firecracker]);
+        host.image_sizes.insert("ubuntu".into(), 1024);
+        host.resource.disk_total = 200;
+        let mut spec = make_spec();
+        spec.engine = Engine::Firecracker;
+        spec.disk = None;
+        let err = place_vm(std::slice::from_ref(&host), &spec, &HashMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("disk=1024MB"), "{err}");
+        assert!(!err.contains("disk=0"), "{err}");
+        // When capacity is the known blocker for every host, a sibling host
+        // that cannot be disk-evaluated must not redirect the diagnosis.
+        let mut cpu_full = make_host("cpu-full", 1, 1024, vec![Engine::Firecracker]);
+        cpu_full.image_sizes.clear();
+        let err = place_vm(&[cpu_full, host], &spec, &HashMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("enough resources"), "{err}");
+        // When every supporting host lacks the reported size, the explicit
+        // image-size remediation remains the diagnosis.
+        let mut unknown = make_host("unknown", 8, 8192, vec![Engine::Firecracker]);
+        unknown.image_sizes.clear();
+        let err = place_vm(&[unknown], &spec, &HashMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("base image size"), "{err}");
     }
 
     #[test]
