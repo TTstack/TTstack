@@ -292,9 +292,13 @@ fi
     if let Err(e) = run_cmd("umount", &[&mnt.display().to_string()]).await {
         let mnt = mount_dir.keep();
         let (_, saved) = staging.keep().map_err(|e| eg!(e.to_string()))?;
+        // A cleanup failure must not mask the primary build error.
+        let primary = match &populate {
+            Ok(()) => String::new(),
+            Err(primary) => format!("{primary}; additionally "),
+        };
         return Err(eg!(
-            "{}; staging rootfs retained at {}; unmount {} before removing it",
-            e,
+            "{primary}umount failed: {e}; staging rootfs retained at {}; unmount {} before removing it",
             saved.display(),
             mnt.display()
         ));

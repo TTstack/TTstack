@@ -12,14 +12,6 @@
 
 ## Open
 
-### [LOW] image-builder: umount failure masks the primary build error
-- **Where**: `crates/cli/src/image_builder.rs` (`create_firecracker`)
-- **What**: when image population fails and the cleanup `umount` also fails, only the umount error is reported. Trigger: bad mirror download plus a busy leftover mount reference.
-- **Why**: the operator is sent to debug mounts while the actual cause is invisible; violates "a cleanup failure must not mask the primary result".
-- **Suggested fix**: compose both errors into the reported message with the retained-artifact instructions.
-
----
-
 ### [LOW] net: FreeBSD bridge setup mutates an unverified interface
 - **Where**: `crates/core/src/net/freebsd.rs` (`setup_bridge`)
 - **What**: any interface answering to `tt0` is brought up and aliased without verifying it is a bridge (the Linux path errors before mutation). Trigger: operator/legacy tooling pre-created a non-bridge `tt0`.
