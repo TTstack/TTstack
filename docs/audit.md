@@ -12,14 +12,6 @@
 
 ## Open
 
-### [LOW] net: FreeBSD bridge setup mutates an unverified interface
-- **Where**: `crates/core/src/net/freebsd.rs` (`setup_bridge`)
-- **What**: any interface answering to `tt0` is brought up and aliased without verifying it is a bridge (the Linux path errors before mutation). Trigger: operator/legacy tooling pre-created a non-bridge `tt0`.
-- **Why**: host networking is mutated on an ownership-unproven interface and the failure only surfaces at the first guest create; contradicts the stated parity of ownership checks.
-- **Suggested fix**: verify bridge group membership before configuring; fixture-based classifier regression test.
-
----
-
 ### [LOW] ctl: registration refresh drops storage and warnings
 - **Where**: `crates/ctl/src/handler.rs` (`register_host`)
 - **What**: the same-ID refresh branch omits `host.storage`; the fresh-registration branch stores `error: None` even when the agent reports warnings. Trigger: re-register after an agent storage change; register a host with catalog warnings.

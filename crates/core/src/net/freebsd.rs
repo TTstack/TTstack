@@ -27,15 +27,26 @@ fn run(args: &[&str]) -> Result<String> {
     String::from_utf8(output.stdout).c(d!("invalid command output"))
 }
 
+// Bridge interfaces belong to the "bridge" group; anything else answering to
+// the reserved name is foreign and must not be configured.
+fn ifconfig_is_bridge(output: &str) -> bool {
+    output.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("groups:") && line.split_whitespace().any(|token| token == "bridge")
+    })
+}
+
 pub fn setup_bridge() -> Result<()> {
-    if !Command::new("ifconfig")
+    let probe = Command::new("ifconfig")
         .arg(BRIDGE_NAME)
         .bounded_output()
-        .c(d!())?
-        .status
-        .success()
-    {
+        .c(d!())?;
+    if !probe.status.success() {
         run(&["ifconfig", "bridge", "create", "name", BRIDGE_NAME])?;
+    } else if !ifconfig_is_bridge(&String::from_utf8_lossy(&probe.stdout)) {
+        return Err(eg!(
+            "{BRIDGE_NAME} exists but is not a bridge; move it aside before network setup"
+        ));
     }
     // Repeat configuration after an interrupted first setup.
     run(&["ifconfig", BRIDGE_NAME, "inet", BRIDGE_CIDR])?;
@@ -251,6 +262,21 @@ mod tests {
         assert!(!tap_owned(info, "web"));
         assert!(!tap_owned("tap1: flags=8843\n\tgroups: tap", "web2"));
         assert!(!tap_owned("", "web2"));
+    }
+    #[test]
+    fn foreign_interfaces_named_tt0_are_refused_before_configuration() {
+        let bridge = "tt0: flags=8843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST> metric 0 mtu 1500\n\
+                      \tether 02:54:00:00:00:01\n\
+                      \tinet 10.10.0.1 netmask 0xffff0000 broadcast 10.10.255.255\n\
+                      \tgroups: bridge\n\
+                      \tnd6 options=29<PERFORMNUD,IFDISABLED,AUTO_LINKLOCAL>";
+        assert!(ifconfig_is_bridge(bridge));
+        let epair = "tt0: flags=8843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST> metric 0 mtu 1500\n\
+                     \tether 02:54:00:00:00:01\n\
+                     \tgroups: epair\n\
+                     \tnd6 options=29<PERFORMNUD,IFDISABLED,AUTO_LINKLOCAL>";
+        assert!(!ifconfig_is_bridge(epair));
+        assert!(!ifconfig_is_bridge("tt0: flags=8843\n\te nd6 options=29"));
     }
     #[test]
     fn pf_preflight_rejects_the_quick_wildcard_that_skips_sibling_anchors() {
