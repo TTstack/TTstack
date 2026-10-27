@@ -188,6 +188,16 @@ impl Runtime {
         if req.guest_config.contains_key(ttcore::ssh::SEED_FILE) {
             return Err(eg!("reserved guest configuration filename"));
         }
+        // The managed SSH seed occupies one of the configuration-drive file
+        // slots; reject oversubscription before any record or clone exists.
+        if req.engine == Engine::Firecracker
+            && ssh.is_some()
+            && req.guest_config.len() >= ttcore::guest_config::MAX_FILES
+        {
+            return Err(eg!(
+                "guest_config allows at most 31 files when SSH bootstrap adds its seed"
+            ));
+        }
         let mut options = VmOptions {
             ssh,
             ports: req.ports.clone(),
@@ -2273,6 +2283,40 @@ mod lifecycle_tests {
         assert!(load_vm(&rt.db, "vm").unwrap().is_none());
         assert_eq!(rt.resource.vm_count, 0);
     }
+    #[test]
+    fn ssh_seed_counts_toward_guest_config_files_at_admission() {
+        let mut rt = runtime(Connection::open_in_memory().unwrap());
+        let guest_config: BTreeMap<String, String> = (0..32)
+            .map(|i| (format!("file-{i}.txt"), String::new()))
+            .collect();
+        let req = CreateVmReq {
+            ssh: None,
+            vm_id: "cfg-limit".into(),
+            isolated_network: false,
+            guest_config,
+            env_id: "env".into(),
+            image: "fc-ssh".into(),
+            engine: Engine::Firecracker,
+            cpu: 1,
+            mem: 128,
+            disk: 0,
+            ports: vec![],
+            deny_outgoing: false,
+            ssh_keys: vec![
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDdK7M6J7V1Z6mQ2sQm5eJ7uJrF0vH2yQ0yZ9m8FkI2k test"
+                    .into(),
+            ],
+        };
+        let err = rt.create_vm(&req).unwrap_err().to_string();
+        assert!(err.contains("31 files"), "{err}");
+        // Rejection happens before any record, seed, or clone exists.
+        assert!(load_vm(&rt.db, "cfg-limit").unwrap().is_none());
+        // Without the seed, the same 32 caller files remain valid.
+        assert!(
+            ttcore::guest_config::validate(Engine::Firecracker, &req.guest_config, false).is_ok()
+        );
+    }
+
     #[test]
     fn repeated_create_is_idempotent_and_changed_request_is_rejected() {
         let mut rt = runtime(Connection::open_in_memory().unwrap());

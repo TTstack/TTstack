@@ -12,14 +12,6 @@
 
 ## Open
 
-### [MEDIUM] guest-config: 31-file limit with SSH seed enforced only after clone and seed writing
-- **Where**: `crates/agent/src/runtime.rs` (`create_vm`), `crates/ctl/src/handler.rs` (`create_environment`)
-- **What**: both layers validate only caller files (32 allowed); the SSH seed makes 33, and `guest_config::write_disk` fails the merged map after identity/ports/resources are reserved, the seed is persisted, and the image is cloned. Trigger: Firecracker create with 32 valid files plus SSH keys — deterministic.
-- **Why**: a guaranteed-failing request is accepted (400 expected for invalid parameters) and lands in a `failed` record with partial reservations instead of an up-front rejection; `docs/guest-images.md` documents the effective 31-file limit.
-- **Suggested fix**: reject `len() >= MAX_FILES` whenever Firecracker SSH bootstrap applies, at agent admission and controller validation; regression tests assert rejection before any record/clone.
-
----
-
 ### [MEDIUM] storage: file provisioning accepts backing-chained qcow2, coupling clones to a shared source
 - **Where**: `crates/core/src/storage/file.rs` (`resize_disk`)
 - **What**: create/resize validate format and size via `qemu-img info` but never inspect `backing-filename`; backup admission rejects the same condition. Trigger: operator imports a documented "existing layout" image created with `qemu-img create -b`.

@@ -3,6 +3,9 @@ use crate::model::Engine;
 use std::collections::BTreeMap;
 
 pub type GuestConfig = BTreeMap<String, String>;
+/// Caller file limit per configuration drive; the managed SSH seed occupies
+/// one slot, leaving 31 caller files when SSH bootstrap applies.
+pub const MAX_FILES: usize = 32;
 pub const MAX_CONFIG_BYTES: usize = 64 * 1024;
 pub const CONFIG_DISK_MIB: u32 = 4;
 pub const CONFIG_DISK: &str = "guest-config.ext4";
@@ -25,7 +28,7 @@ pub fn validate(engine: Engine, files: &GuestConfig, isolated: bool) -> Result<(
     if isolated {
         Feature::Isolation.require_design(engine, Storage::File)?;
     }
-    if files.len() > 32
+    if files.len() > MAX_FILES
         || files.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>() > MAX_CONFIG_BYTES
     {
         return Err("guest_config exceeds 32 files or 64 KiB".into());

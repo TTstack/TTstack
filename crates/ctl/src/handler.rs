@@ -402,6 +402,17 @@ async fn create_environment(
                 "reserved guest configuration filename".into(),
             ));
         }
+        // The managed SSH seed occupies one of the configuration-drive file
+        // slots; reject oversubscription before scheduling.
+        if spec.engine == Engine::Firecracker
+            && spec.ssh.is_some()
+            && spec.guest_config.len() >= ttcore::guest_config::MAX_FILES
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "guest_config allows at most 31 files when SSH bootstrap adds its seed".into(),
+            ));
+        }
         ttcore::guest_config::validate(spec.engine, &spec.guest_config, spec.isolated_network)
             .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         validate_image(&spec.image, spec.engine).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
@@ -1837,6 +1848,28 @@ mod tests {
             }],
         }
     }
+    #[tokio::test]
+    async fn ssh_seed_counts_toward_guest_config_files_before_scheduling() {
+        let (state, mock, server) = fixture().await;
+        seed(&state, &mock);
+        let mut req = request();
+        req.vms[0].engine = Engine::Firecracker;
+        req.vms[0].image = "fc-ssh".into();
+        req.vms[0].ssh_keys = vec![
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDdK7M6J7V1Z6mQ2sQm5eJ7uJrF0vH2yQ0yZ9m8FkI2k test"
+                .into(),
+        ];
+        req.vms[0].guest_config = (0..32)
+            .map(|i| (format!("file-{i}.txt"), String::new()))
+            .collect();
+        let (status, message) = create_environment(&state, req).await.unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(message.contains("31 files"), "{message}");
+        assert_eq!(mock.creates.load(Ordering::SeqCst), 0);
+        assert!(state.lock_db().get_env("new-env").unwrap().is_none());
+        server.abort();
+    }
+
     #[tokio::test]
     async fn stalled_delete_does_not_block_another_environment_or_heartbeat() {
         let (state, mock, server) = fixture().await;
