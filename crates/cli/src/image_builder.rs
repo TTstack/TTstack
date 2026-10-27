@@ -709,7 +709,7 @@ const MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 fn check_download_size(url: &str, len: u64) -> Result<()> {
     if len > MAX_DOWNLOAD_BYTES {
-        return Err(eg!("download {url} exceeds the 8 GiB size limit"));
+        return Err(eg!(format!("download {url} exceeds the 8 GiB size limit")));
     }
     Ok(())
 }

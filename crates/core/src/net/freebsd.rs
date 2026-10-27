@@ -44,9 +44,9 @@ pub fn setup_bridge() -> Result<()> {
     if !probe.status.success() {
         run(&["ifconfig", "bridge", "create", "name", BRIDGE_NAME])?;
     } else if !ifconfig_is_bridge(&String::from_utf8_lossy(&probe.stdout)) {
-        return Err(eg!(
+        return Err(eg!(format!(
             "{BRIDGE_NAME} exists but is not a bridge; move it aside before network setup"
-        ));
+        )));
     }
     // Repeat configuration after an interrupted first setup.
     run(&["ifconfig", BRIDGE_NAME, "inet", BRIDGE_CIDR])?;
