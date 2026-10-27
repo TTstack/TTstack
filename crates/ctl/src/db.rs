@@ -235,6 +235,25 @@ impl Db {
         Ok(())
     }
 
+    /// Commit a creation plan together with the reservation updates of the
+    /// hosts it landed on: either the whole plan is durable or nothing is, so
+    /// a mid-plan failure can never strand a saved plan without provisioning.
+    pub fn put_planned_environment(&self, env: &Env, vms: &[Vm], hosts: &[Host]) -> Result<()> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .c(d!("begin environment plan"))?;
+        self.put_env(env)?;
+        for vm in vms {
+            self.put_vm(vm)?;
+        }
+        for host in hosts {
+            self.put_host(host)?;
+        }
+        tx.commit().c(d!("commit environment plan"))?;
+        Ok(())
+    }
+
     pub fn get_env(&self, id: &str) -> Result<Option<Env>> {
         query_one(&self.conn, "SELECT data FROM envs WHERE id = ?1", [id])
     }

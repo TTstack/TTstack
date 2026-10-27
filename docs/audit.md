@@ -12,14 +12,6 @@
 
 ## Open
 
-### [MEDIUM] ctl: plan persisted but provisioning never spawned when a post-plan write fails
-- **Where**: `crates/ctl/src/handler.rs` (`create_environment`)
-- **What**: after `put_environment` commits, a failing host-reservation write or `environment_detail` read returns 500 before `finish_creation` is spawned. Trigger: transient DB I/O error in that window.
-- **Why**: the environment stays `creating` with no error and no task forever (`lifetime: 0` disables expiry), contradicting "partial failures remain visible in `env.error`".
-- **Suggested fix**: spawn provisioning immediately after the plan commit and fall back to an in-memory detail; keep the reservation writes best-effort next to it.
-
----
-
 ### [MEDIUM] guest-config: 31-file limit with SSH seed enforced only after clone and seed writing
 - **Where**: `crates/agent/src/runtime.rs` (`create_vm`), `crates/ctl/src/handler.rs` (`create_environment`)
 - **What**: both layers validate only caller files (32 allowed); the SSH seed makes 33, and `guest_config::write_disk` fails the merged map after identity/ports/resources are reserved, the seed is persisted, and the image is cloned. Trigger: Firecracker create with 32 valid files plus SSH keys — deterministic.

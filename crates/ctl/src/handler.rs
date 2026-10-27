@@ -542,24 +542,37 @@ async fn create_environment(
         state: EnvState::Creating,
         error: None,
     };
-    db.put_environment(&env, &planned).map_err(internal)?;
     for host in &mut hosts {
         for vm in planned.iter().filter(|v| v.host_id == host.id) {
             host.resource.account(vm);
         }
-        db.put_host(host).map_err(internal)?;
     }
+    db.put_planned_environment(&env, &planned, &hosts)
+        .map_err(internal)?;
     state.revision.fetch_add(1, Ordering::SeqCst);
     drop(db);
-    let detail = environment_detail(state, &req.id)?;
-    let state = state.clone();
-    let env_id = req.id;
+    // Once the plan is durable, provisioning is spawned before any other
+    // fallible step: a failed detail read must never strand a saved plan
+    // with no task and no error.
+    let task_state = state.clone();
+    let task_env = req.id.clone();
     tokio::spawn(async move {
         let _operation = operation;
-        if let Err((_, error)) = finish_creation(state, env_id, requests).await {
+        if let Err((_, error)) = finish_creation(task_state, task_env, requests).await {
             eprintln!("[ctl] creation: {error}");
         }
     });
+    let detail = match environment_detail(state, &req.id) {
+        Ok(detail) => detail,
+        Err((_, error)) => {
+            eprintln!("[ctl] creation detail unavailable after plan commit: {error}");
+            EnvDetail {
+                env,
+                vms: planned,
+                warnings: vec![format!("plan committed; detail unavailable: {error}")],
+            }
+        }
+    };
     Ok(detail)
 }
 
