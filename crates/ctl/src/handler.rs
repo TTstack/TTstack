@@ -211,6 +211,7 @@ pub async fn register_host(
         host.engines = info.engines;
         host.capabilities = info.capabilities;
         host.capability_report = info.capability_report;
+        host.storage = info.storage;
         host.images = info.images;
         host.image_sizes = info.image_sizes;
         host.state = HostState::Online;
@@ -242,7 +243,7 @@ pub async fn register_host(
     }
     let host = Host {
         capability_report: info.capability_report,
-        error: None,
+        error: (!info.warnings.is_empty()).then(|| info.warnings.join("; ")),
         image_sizes: info.image_sizes,
         capabilities: info.capabilities,
         id: info.host_id,
@@ -1427,6 +1428,8 @@ mod tests {
         fail_action: AtomicBool,
         lose_create_response: AtomicBool,
         creates: AtomicUsize,
+        storage: Mutex<Storage>,
+        warnings: Mutex<Vec<String>>,
     }
     fn record(id: &str, env: &str) -> Vm {
         Vm {
@@ -1468,7 +1471,7 @@ mod tests {
         Json(ApiResp::success(AgentInfo {
             capability_report: None,
             vms: None,
-            warnings: vec![],
+            warnings: mock.warnings.lock().unwrap().clone(),
             image_sizes: Default::default(),
             capabilities: [
                 ("firecracker_resources", &mock.resources_supported),
@@ -1481,7 +1484,7 @@ mod tests {
             host_id: "host".into(),
             resource,
             engines: vec![Engine::Docker],
-            storage: Storage::File,
+            storage: mock.storage.lock().unwrap().clone(),
             images: vec![],
         }))
     }
@@ -1683,6 +1686,8 @@ mod tests {
             fail_action: AtomicBool::new(false),
             lose_create_response: AtomicBool::new(false),
             creates: AtomicUsize::new(0),
+            storage: Mutex::new(Storage::File),
+            warnings: Mutex::new(vec![]),
         });
         let app = Router::new()
             .route("/api/info", get(info))
@@ -1716,6 +1721,36 @@ mod tests {
             })
             .unwrap();
         (state, mock, task)
+    }
+
+    #[tokio::test]
+    async fn registration_refresh_tracks_storage_and_surfaces_warnings() {
+        let (state, mock, server) = fixture().await;
+        let addr = state.lock_db().get_host("host").unwrap().unwrap().addr;
+        *mock.storage.lock().unwrap() = Storage::Zvol;
+        *mock.warnings.lock().unwrap() = vec!["image catalog refresh delayed".into()];
+        use axum::response::IntoResponse;
+        let response = register_host(
+            State(state.clone()),
+            Json(ttcore::api::RegisterHostReq { addr }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: ApiResp<Host> = serde_json::from_slice(&body).unwrap();
+        let host = resp.data.unwrap();
+        assert_eq!(host.storage, Storage::Zvol);
+        assert_eq!(host.error.as_deref(), Some("image catalog refresh delayed"));
+        let stored = state.lock_db().get_host("host").unwrap().unwrap();
+        assert_eq!(stored.storage, Storage::Zvol);
+        assert_eq!(
+            stored.error.as_deref(),
+            Some("image catalog refresh delayed")
+        );
+        server.abort();
     }
 
     #[tokio::test]

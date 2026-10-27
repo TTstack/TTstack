@@ -12,11 +12,7 @@
 
 ## Open
 
-### [LOW] ctl: registration refresh drops storage and warnings
-- **Where**: `crates/ctl/src/handler.rs` (`register_host`)
-- **What**: the same-ID refresh branch omits `host.storage`; the fresh-registration branch stores `error: None` even when the agent reports warnings. Trigger: re-register after an agent storage change; register a host with catalog warnings.
-- **Why**: response and stored row disagree with the refresh contract used by `apply_snapshot` until the next heartbeat silently corrects them; placement preference reads the stale storage in that window.
-- **Suggested fix**: update storage on refresh and surface warnings on fresh registration; regression test with a mock report carrying both.
+None.
 
 ## Won't Fix
 
