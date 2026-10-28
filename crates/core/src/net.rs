@@ -357,8 +357,10 @@ add rule ip {NFT_TABLE} postrouting ip saddr 10.10.0.0/16 masquerade
 mod platform;
 
 // The FreeBSD predicates are pure string logic; compile them on any test host
-// so the ownership and ruleset checks also run on the Linux CI target.
+// so the ownership and ruleset checks also run on the Linux CI target. Only the
+// predicates are reachable there, so the command-driving helpers stay unused.
 #[cfg(all(not(target_os = "freebsd"), test))]
+#[allow(dead_code)]
 #[path = "net/freebsd.rs"]
 mod freebsd_impl;
 
